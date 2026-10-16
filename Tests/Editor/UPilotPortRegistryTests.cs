@@ -297,7 +297,7 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(error.Message, Does.Contain("端口 8770 当前不可绑定"));
             Assert.That(error.Message, Does.Contain("系统保留/权限限制"));
             Assert.That(error.Message, Does.Not.Contain("已被系统进程占用"));
-            Assert.That(restricted.Recommend(_a, 8770, 8017, 100), Is.EqualTo((8869, 8017)));
+            Assert.That(restricted.Recommend(_a, 8770, 8017, 100), Is.EqualTo((8869, 8018)));
             Assert.That(File.ReadAllBytes(configPath), Is.EqualTo(configBefore));
             Assert.That(EditorPrefs.GetString(_key, ""), Is.EqualTo(registryBefore));
             // No observed listener is a safe stop no-op even though startup cannot bind.
@@ -358,13 +358,60 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
-        public void RecommendationIgnoresStaleCrossProtocolReservations()
+        public void RecommendationSkipsStaleCrossProtocolReservationsIncludingCurrentProject()
         {
             _registry.Commit(_a, Config(18001, 19001));
             var before = EditorPrefs.GetString(_key, "");
             var registry = new UPilotPortRegistry(_key, _ => true);
-            Assert.That(registry.Recommend(_b, 19001, 18001, 3), Is.EqualTo((19001, 18001)));
+            Assert.That(registry.Recommend(_b, 19001, 18001, 3), Is.EqualTo((19002, 18002)));
+            Assert.That(registry.Recommend(_a, 18001, 19001, 3), Is.EqualTo((18002, 19002)));
             Assert.That(EditorPrefs.GetString(_key, ""), Is.EqualTo(before));
+        }
+
+        [Test]
+        public void RecommendationReadsLatestRegistrationAndExcludesHistoryBeforeBindProbes()
+        {
+            var probes = new System.Collections.Generic.List<int>();
+            var registry = new UPilotPortRegistry(_key, port => { probes.Add(port); return true; });
+            Assert.That(registry.Recommend(_a, 18001, 19001, 4), Is.EqualTo((18001, 19001)));
+            EditorPrefs.SetString(_key, Entry(_b, 18001, 19001));
+            probes.Clear();
+            Assert.That(registry.Recommend(_a, 18001, 19001, 4, new[] { 18002, 19002 }),
+                Is.EqualTo((18003, 19003)));
+            Assert.That(probes, Has.None.EqualTo(18001).And.None.EqualTo(19001));
+            Assert.That(probes, Has.None.EqualTo(18002).And.None.EqualTo(19002));
+        }
+
+        [TestCase("broken")]
+        [TestCase("hash:not-a-port:19001")]
+        [TestCase("hash:18001:18001")]
+        [TestCase("hash:0:19001")]
+        [TestCase("hash:18001:65536")]
+        public void CorruptRegistrationRefusesRecommendationWithoutProbingOrWriting(string registration)
+        {
+            EditorPrefs.SetString(_key, registration);
+            var registry = new UPilotPortRegistry(_key, _ => { Assert.Fail("Do not probe unverifiable recommendations."); return true; });
+            Assert.Throws<InvalidDataException>(() => registry.Recommend(_a, 18001, 19001, 100));
+            Assert.That(EditorPrefs.GetString(_key), Is.EqualTo(registration));
+            Assert.That(File.Exists(UPilotPortRegistry.ConfigPath(_a)), Is.False);
+        }
+
+        [Test]
+        public void RecommendationReadFailurePreservesOriginalException()
+        {
+            var failure = new IOException("injected registration read failure");
+            var registry = new UPilotPortRegistry(_key, readRegistration: _ => throw failure);
+            Assert.That(Assert.Throws<IOException>(() => registry.Recommend(_a, 18001, 19001, 100)), Is.SameAs(failure));
+        }
+
+        [Test]
+        public void RecommendationWrapsWithinBudgetAndKeepsProtocolsDistinct()
+        {
+            var registry = new UPilotPortRegistry(_key, _ => true);
+            // HTTP reaches 1 first; the second WS candidate preserves a distinct pair.
+            Assert.That(registry.Recommend(_a, 65535, 65534, 3, new[] { 65535, 65534 }), Is.EqualTo((2, 1)));
+            var error = Assert.Throws<IOException>(() => registry.Recommend(_a, 65535, 65534, 1, new[] { 65535, 65534 }));
+            Assert.That(error.Message, Does.Contain("本次搜索范围未找到可用端口"));
         }
 
         [Test]

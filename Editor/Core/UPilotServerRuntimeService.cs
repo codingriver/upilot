@@ -97,6 +97,7 @@ namespace CodingRiver.UPilot
         public int CompletedSegments;
         public int ActiveSegmentRequests;
         public int ConfiguredSegmentCount;
+        public long MaxSegmentSizeBytes;
         public int MaxConcurrentSegmentRequests;
         public int PeakConcurrentSegmentRequests;
         public int DedicatedThreadId;
@@ -144,7 +145,6 @@ namespace CodingRiver.UPilot
         private const string ManifestFileName = "manifest.json";
         private const string LegacyManifestFileName = "upilot-release-manifest.json";
         private const string ReleaseManifestUrl = "https://github.com/codingriver/upilot/releases/latest/download/manifest.json";
-        internal const int ParallelDownloadSegments = UPilotDownloadHelper.DefaultSegmentCount;
         private const int FileOperationRetryCount = 3;
         private const int FileOperationRetryDelayMs = 2000;
         private const int InstallLockRetryDelayMs = 250;
@@ -897,12 +897,16 @@ namespace CodingRiver.UPilot
             DownloadProgress probe = null;
             try
             {
+                var settings = UPilotUserSettings.Load(out var settingsError);
+                var options = UPilotUserSettings.CreateDownloadOptions(settings);
+                if (!string.IsNullOrEmpty(settingsError))
+                    UpdateState(state => state.WarningMessage = "通用设置读取失败，本次下载使用默认参数。" + settingsError);
                 return await UPilotDownloadHelper.DownloadAsync(Http, url, path, expectedBytes, expectedSha256,
                     progress =>
                     {
                         ApplyDownloadProgress(progress);
                         if (progress.RangeProbeOutcome.Length != 0) probe = progress;
-                    }, token);
+                    }, token, options);
             }
             finally
             {
@@ -916,7 +920,8 @@ namespace CodingRiver.UPilot
             if (probe == null || probe.RangeProbeOutcome.Length == 0) return; // Small files do not need a probe.
             if (probe.RangeProbeOutcome == "supported")
             {
-                Debug.Log("[UPilot] Range 探测成功，服务端支持分片下载。" + probe.RangeProbeDetail);
+                Debug.Log("[UPilot] Range 探测成功，服务端支持分片下载。" + probe.RangeProbeDetail +
+                          $"\n本次下载：每片上限 {probe.MaxSegmentSizeBytes} 字节，计划 {probe.ConfiguredSegmentCount} 片，最多 {probe.MaxConcurrentSegmentRequests} 并发。");
                 return;
             }
             Debug.LogWarning("[UPilot] Range 探测未通过，已降级为不带 Range 的单流下载。原因：" +
@@ -937,6 +942,7 @@ namespace CodingRiver.UPilot
                 state.CompletedSegments = progress.CompletedSegments;
                 state.ActiveSegmentRequests = progress.ActiveSegmentRequests;
                 state.ConfiguredSegmentCount = progress.ConfiguredSegmentCount;
+                state.MaxSegmentSizeBytes = progress.MaxSegmentSizeBytes;
                 state.MaxConcurrentSegmentRequests = progress.MaxConcurrentSegmentRequests;
                 state.PeakConcurrentSegmentRequests = progress.PeakConcurrentSegmentRequests;
                 state.DedicatedThreadId = progress.DedicatedThreadId;
@@ -1124,7 +1130,7 @@ namespace CodingRiver.UPilot
                     if (!reusableDownload)
                     {
                         await RetryFileOperationAsync(
-                            () => CleanupDownloadFiles(tmpPath, ParallelDownloadSegments),
+                            () => CleanupDownloadFiles(tmpPath),
                             "清理旧的服务下载文件",
                             token,
                             updateProgress: false);
@@ -1161,7 +1167,10 @@ namespace CodingRiver.UPilot
 
                 EnsureExecutablePermission(finalPath);
                 if (activateOnComplete)
+                {
+                    UpdateState(state => state.Phase = "正在保存配置…");
                     SetStandaloneExeRuntime(finalPath, manifest.ServerVersion);
+                }
 
                 UpdateState(state =>
                 {
@@ -1243,7 +1252,7 @@ namespace CodingRiver.UPilot
                         Debug.LogWarning("[UPilot] 已保留通过 SHA256 校验的下载文件，后续更新可直接复用。" +
                                          "\nPath=" + activeTmpPath);
                         var cleanupSucceeded = await RetryFileOperationAsync(
-                            () => CleanupSegmentFiles(activeTmpPath, ParallelDownloadSegments),
+                            () => CleanupSegmentFiles(activeTmpPath),
                             "清理服务下载分片文件",
                             CancellationToken.None,
                             throwOnFailure: false,
@@ -1254,7 +1263,7 @@ namespace CodingRiver.UPilot
                     else
                     {
                         var cleanupSucceeded = await RetryFileOperationAsync(
-                            () => CleanupDownloadFiles(activeTmpPath, ParallelDownloadSegments),
+                            () => CleanupDownloadFiles(activeTmpPath),
                             "清理服务下载临时文件",
                             CancellationToken.None,
                             throwOnFailure: false,
@@ -1387,16 +1396,16 @@ namespace CodingRiver.UPilot
             }
         }
 
-        private static void CleanupDownloadFiles(string targetPath, int segmentCount)
+        private static void CleanupDownloadFiles(string targetPath)
         {
             if (File.Exists(targetPath))
                 File.Delete(targetPath);
-            CleanupSegmentFiles(targetPath, segmentCount);
+            CleanupSegmentFiles(targetPath);
         }
 
-        private static void CleanupSegmentFiles(string targetPath, int segmentCount)
+        private static void CleanupSegmentFiles(string targetPath)
         {
-            UPilotDownloadHelper.CleanupSegmentFiles(targetPath, segmentCount);
+            UPilotDownloadHelper.CleanupSegmentFiles(targetPath);
         }
 
         private static bool CleanupOrQuarantineFailedTarget(
@@ -1835,7 +1844,7 @@ namespace CodingRiver.UPilot
             return manifest;
         }
 
-        private static UPilotServerDownloadInfo PickCurrentPlatformDownload(UPilotReleaseManifest manifest)
+        internal static UPilotServerDownloadInfo PickCurrentPlatformDownload(UPilotReleaseManifest manifest)
         {
             return PickDownloadForPlatform(
                 manifest,

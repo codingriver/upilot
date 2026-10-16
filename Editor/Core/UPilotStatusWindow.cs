@@ -5,6 +5,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Threading.Tasks;
@@ -64,6 +65,8 @@ namespace CodingRiver.UPilot
         private int _wsPortInput = 8765;
         private int _httpPortInput = 8011;
         private int _activeTab;
+        private UPilotUserSettingsData _generalSettings = new UPilotUserSettingsData();
+        private string _generalSettingsError = "";
         private bool _showEndpointSettings;
         private bool _showConnectionDetails;
         private bool _showDangerousDiagnostics;
@@ -135,6 +138,7 @@ namespace CodingRiver.UPilot
         {
             try
             {
+                ReloadGeneralSettings();
                 var bridge = UPilotBridge.Instance;
                 _wsHostInput = bridge.WsHost;
                 _wsPortInput = bridge.WsPort;
@@ -151,6 +155,12 @@ namespace CodingRiver.UPilot
             }
             EditorApplication.update -= OnEditorUpdate;
             EditorApplication.update += OnEditorUpdate;
+        }
+
+        private void OnFocus()
+        {
+            ReloadGeneralSettings();
+            Repaint();
         }
 
         private void OnDisable()
@@ -332,7 +342,7 @@ namespace CodingRiver.UPilot
             bool diagRunning,
             long diagResultAtMs)
         {
-            string[] tabs = new[] { "常规", "Agent", "诊断" };
+            string[] tabs = new[] { "常规", "Agent", "诊断", "通用设置" };
             _activeTab = GUILayout.Toolbar(_activeTab, tabs);
 
             EditorGUILayout.Space(4);
@@ -363,13 +373,82 @@ namespace CodingRiver.UPilot
             {
                 DrawAgentSetupSection(_guiAgentConfigSnapshot);
             }
-            else
+            else if (_activeTab == 2)
             {
                 DrawConnectionSection(status);
                 EditorGUILayout.Space(4);
                 DrawDiagnosticsSection(bridge, status, mcpStatus, diagResult, diagRunning, diagResultAtMs);
                 EditorGUILayout.Space(4);
                 DrawLogFileSection();
+            }
+            else
+            {
+                DrawGeneralSettings();
+            }
+        }
+
+        private void ReloadGeneralSettings()
+        {
+            _generalSettings = UPilotUserSettings.Load(out var error);
+            _generalSettingsError = string.IsNullOrEmpty(error)
+                ? "" : "读取通用设置失败，当前使用默认值。原配置文件未修改。\n" + error;
+        }
+
+        private void DrawGeneralSettings()
+        {
+            using (new EditorGUILayout.VerticalScope(_styleBox))
+            {
+                EditorGUILayout.LabelField("下载设置", EditorStyles.boldLabel);
+                EditorGUILayout.LabelField("当前系统用户的所有项目共享；修改只影响下一次 MCP 服务下载。", EditorStyles.wordWrappedMiniLabel);
+                var path = UPilotUserSettings.ConfigPath;
+                EditorGUILayout.LabelField("配置文件：" + (string.IsNullOrEmpty(path) ? "无法确定当前用户目录" : path), EditorStyles.wordWrappedMiniLabel);
+                EditorGUI.BeginChangeCheck();
+                var sizeText = EditorGUILayout.DelayedTextField("分片大小上限（KiB）",
+                    (_generalSettings.maxSegmentSizeBytes / 1024).ToString(CultureInfo.InvariantCulture));
+                var concurrent = EditorGUILayout.DelayedIntField("最大并发下载数", _generalSettings.maxConcurrentSegmentRequests);
+                if (EditorGUI.EndChangeCheck())
+                {
+                    if (long.TryParse(sizeText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var sizeKiB))
+                        SaveGeneralSettings(sizeKiB, concurrent);
+                    else
+                    {
+                        _generalSettingsError = "分片大小上限必须是 long 范围内的正整数 KiB，本次修改未保存。";
+                        Debug.LogError($"[UPilotUserSettings] operation=save; path={UPilotUserSettings.ConfigPath}; 分片大小上限输入无效：{sizeText}; {_generalSettingsError}");
+                    }
+                }
+                EditorGUILayout.LabelField("两项均须为正整数；分片数量按文件大小自动计算，默认 512 KiB、最多 8 片同时下载。", EditorStyles.wordWrappedMiniLabel);
+                if (!string.IsNullOrEmpty(_generalSettingsError))
+                    EditorGUILayout.HelpBox(_generalSettingsError, MessageType.Error);
+                if (GUILayout.Button("恢复默认下载设置"))
+                {
+                    var defaults = new UPilotUserSettingsData();
+                    SaveGeneralSettings(defaults.maxSegmentSizeBytes / 1024, defaults.maxConcurrentSegmentRequests);
+                }
+            }
+        }
+
+        private void SaveGeneralSettings(long sizeKiB, int concurrent)
+        {
+            try
+            {
+                var candidate = new UPilotUserSettingsData
+                {
+                    maxSegmentSizeBytes = checked(sizeKiB * 1024),
+                    maxConcurrentSegmentRequests = concurrent,
+                };
+                if (!UPilotUserSettings.TrySave(candidate, out var error))
+                {
+                    _generalSettingsError = "保存通用设置失败，本次修改未生效。\n" + error;
+                    return;
+                }
+                _generalSettings = candidate;
+                _generalSettingsError = "";
+                ShowToast("下载设置已保存，将用于下一次下载");
+            }
+            catch (Exception ex)
+            {
+                _generalSettingsError = "保存通用设置失败，本次修改未生效。\n" + ex.Message;
+                Debug.LogError($"[UPilotUserSettings] operation=save; path={UPilotUserSettings.ConfigPath}; 分片大小上限（KiB）={sizeKiB}; 最大并发下载数={concurrent}; error={ex}");
             }
         }
 
@@ -469,7 +548,8 @@ namespace CodingRiver.UPilot
             {
                 EditorGUILayout.LabelField("服务运行方式", EditorStyles.boldLabel);
                 EditorGUILayout.LabelField("当前配置", UPilotMainWindow.GetRuntimeSelectionModeLabel(runtime.GetConfiguredMode()));
-                using (new EditorGUI.DisabledScope(_runtimeSelectionBusy || !UPilotQuickStart.CanSwitchRuntime))
+                using (new EditorGUI.DisabledScope(_runtimeSelectionBusy || !UPilotQuickStart.CanSwitchRuntime ||
+                    runtime.DownloadState.IsRunning || runtime.PythonEnvironmentState.IsRunning))
                 {
                     var next = (UPilotServerRuntimeMode)EditorGUILayout.Popup("切换为", (int)_runtimeSelectionMode,
                         new[] { "本机 Python", "本地 EXE" });
@@ -498,12 +578,20 @@ namespace CodingRiver.UPilot
                     if (_runtimeSelectionMode == UPilotServerRuntimeMode.Python)
                         EditorGUILayout.LabelField("选择解释器；留空则配置并使用当前包的 Python 环境。", EditorStyles.wordWrappedMiniLabel);
 
-                    using (new EditorGUI.DisabledScope(!changed && !_runtimeSelectionFailed))
+                    if (_runtimeSelectionMode == UPilotServerRuntimeMode.Python && !UPilotSetupState.IsCompleted)
                     {
-                        var label = _runtimeSelectionBusy ? "正在应用并重启…" :
-                            _runtimeSelectionFailed && !changed ? "重试重启服务" : "应用并重启服务";
-                        if (GUILayout.Button(label, GUILayout.Height(26)))
-                            ApplyRuntimeSelection();
+                        if (GUILayout.Button("配置 Python 开发环境…", GUILayout.Height(26)))
+                            UPilotMainWindow.OpenPythonSetup(_runtimeSelectionPath);
+                    }
+                    else
+                    {
+                        using (new EditorGUI.DisabledScope(!changed && !_runtimeSelectionFailed))
+                        {
+                            var label = _runtimeSelectionBusy ? "正在应用并重启…" :
+                                _runtimeSelectionFailed && !changed ? "重试重启服务" : "应用并重启服务";
+                            if (GUILayout.Button(label, GUILayout.Height(26)))
+                                ApplyRuntimeSelection();
+                        }
                     }
                 }
 

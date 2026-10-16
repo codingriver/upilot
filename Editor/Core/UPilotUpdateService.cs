@@ -1172,7 +1172,9 @@ namespace CodingRiver.UPilot
                 var active = UPilotDownloadHelper.GetActiveSegmentCount(state);
                 var concurrency = state.MaxConcurrentSegmentRequests > 0
                     ? $" · 最多 {Math.Min(state.SegmentCount, state.MaxConcurrentSegmentRequests)} 并发" : "";
-                return $"{sizeText} · {state.SegmentCount} 分片下载 · 正在下载 {active}{concurrency} · 已完成 {completed}/{state.SegmentCount}";
+                var segmentSize = state.MaxSegmentSizeBytes > 0
+                    ? $" · 每片上限 {state.MaxSegmentSizeBytes / 1024d:0.###} KiB" : "";
+                return $"{sizeText} · {state.SegmentCount} 分片下载 · 正在下载 {active}{concurrency} · 已完成 {completed}/{state.SegmentCount}{segmentSize}";
             }
             if (state.SegmentCount == 1)
                 return $"{sizeText} · 单流下载";

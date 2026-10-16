@@ -87,6 +87,7 @@ namespace CodingRiver.UPilot
                 return;
 
             _setupCompletionRunning = true;
+            _setupRuntimeCompletionSucceeded = false;
             _setupCompletionMessage = "正在写入配置…";
             _setupCompletionMessageType = MessageType.Info;
             try

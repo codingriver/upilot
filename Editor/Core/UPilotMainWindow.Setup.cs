@@ -23,6 +23,7 @@ namespace CodingRiver.UPilot
             Python,
         }
 
+        private static readonly Color SetupPrimaryColor = new(0.25f, 0.56f, 0.90f);
         private static readonly Color SetupReadyColor = new(0.30f, 0.72f, 0.36f);
         private static readonly Color SetupBlockedColor = new(0.90f, 0.30f, 0.25f);
         private static readonly Color SetupNeutralColor = new(0.65f, 0.65f, 0.65f);
@@ -52,7 +53,6 @@ namespace CodingRiver.UPilot
         private bool _setupManifestLoading;
         private string _setupManifestError = "";
         private UPilotPythonProbeResult _setupPythonProbe;
-        private bool _showPythonAdvanced;
 
         private bool _setupWriteCodexConfig = true;
         private bool _setupWriteClaudeConfig;
@@ -84,14 +84,14 @@ namespace CodingRiver.UPilot
 
         private void InitializeSetupState()
         {
+            _usedSetupPorts.Clear();
+            _selectedSetupRecommendation = null;
             _setupInitialized = true;
             _setupRecoveryFailure = "";
             _showSetupRecoveryFailure = false;
             _setupStep = 0;
-            _setupRuntimeChoice = UPilotServerRuntimeService.Instance.GetConfiguredMode() == UPilotServerRuntimeMode.StandaloneExe
-                ? SetupRuntimeChoice.Managed : UPilotServerRuntimeService.IsSourceUpdateChannel()
-                    ? SetupRuntimeChoice.Python : SetupRuntimeChoice.Managed;
-            _showPythonAdvanced = _setupRuntimeChoice == SetupRuntimeChoice.Python;
+            ResetSetupRuntimeState();
+            InitializeSetupRuntimeChoice();
             _setupCompletionMessage = "";
             _setupCompletionMessageType = MessageType.None;
 
@@ -134,7 +134,16 @@ namespace CodingRiver.UPilot
                     EditorGUILayout.Space(8);
 
                     if (!string.IsNullOrWhiteSpace(_setupCompletionMessage))
-                        EditorGUILayout.HelpBox(_setupCompletionMessage, _setupCompletionMessageType);
+                    {
+                        var previousColor = GUI.backgroundColor;
+                        try
+                        {
+                            if (_setupRuntimeCompletionSucceeded)
+                                GUI.backgroundColor = SetupReadyColor;
+                            EditorGUILayout.HelpBox(_setupCompletionMessage, _setupCompletionMessageType);
+                        }
+                        finally { GUI.backgroundColor = previousColor; }
+                    }
 
                     if (!string.IsNullOrWhiteSpace(_setupRecoveryFailure))
                     {
@@ -162,10 +171,12 @@ namespace CodingRiver.UPilot
         {
             using (new EditorGUILayout.HorizontalScope())
             {
-                EditorGUILayout.LabelField("UPilot 首次设置", _titleStyle);
+                EditorGUILayout.LabelField(_setupRuntimeChoice == SetupRuntimeChoice.Python
+                    ? "UPilot 开发环境设置" : "UPilot 首次设置", _titleStyle);
                 GUILayout.FlexibleSpace();
                 if (GUILayout.Button("返回", GUILayout.Width(64), GUILayout.Height(24)))
                 {
+                    ClearSetupRuntimeContinuation();
                     _mainView = UPilotMainView.Dashboard;
                     RefreshSnapshot();
                 }
@@ -187,7 +198,7 @@ namespace CodingRiver.UPilot
         {
             var previous = GUI.backgroundColor;
             GUI.backgroundColor = step == _setupStep
-                ? SetupReadyColor
+                ? SetupPrimaryColor
                 : step < _setupStep ? new Color(0.45f, 0.65f, 0.48f) : SetupNeutralColor;
             GUILayout.Label(label, GUI.skin.button, GUILayout.Height(28));
             GUI.backgroundColor = previous;
@@ -195,6 +206,10 @@ namespace CodingRiver.UPilot
 
         private void SetSetupStep(int step)
         {
+            if (step != 1)
+                ClearSetupRuntimeContinuation();
+            else
+                _setupRuntimeCompletionSucceeded = false;
             _setupStep = Mathf.Clamp(step, 0, 2);
             _setupScroll = Vector2.zero;
             if (_setupStep == 1)

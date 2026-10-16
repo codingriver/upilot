@@ -3206,12 +3206,14 @@ namespace CodingRiver.UPilot.Tests
                 SegmentCount = 4,
                 CompletedSegments = 2,
                 ActiveSegmentRequests = 3,
+                MaxSegmentSizeBytes = 512 * 1024,
                 PlatformDisplayName = "Windows x64",
             };
 
             Assert.That(state.SegmentCount, Is.EqualTo(4));
             Assert.That(state.CompletedSegments, Is.EqualTo(2));
             Assert.That(state.ActiveSegmentRequests, Is.EqualTo(3));
+            Assert.That(state.MaxSegmentSizeBytes, Is.EqualTo(524288));
             Assert.That(UPilotDownloadHelper.GetCompletedSegmentCount(state), Is.EqualTo(2));
             Assert.That(UPilotDownloadHelper.GetActiveSegmentCount(state), Is.EqualTo(3));
             Assert.That(state.PlatformDisplayName, Is.EqualTo("Windows x64"));
@@ -3227,18 +3229,21 @@ namespace CodingRiver.UPilot.Tests
                 TotalBytes = 100,
                 CompletedSegments = 1,
                 ActiveSegmentRequests = 2,
+                MaxSegmentSizeBytes = 512 * 1024,
             };
             var unpublished = UPilotDownloadHelper.CloneDownloadState(published);
             unpublished.Phase = "new";
             unpublished.BytesReceived = 80;
             unpublished.CompletedSegments = 8;
             unpublished.ActiveSegmentRequests = 5;
+            unpublished.MaxSegmentSizeBytes = 1024 * 1024;
 
             var before = UPilotDownloadHelper.ReadDownloadStateSnapshot(ref published);
             Assert.That(before.Phase, Is.EqualTo("old"));
             Assert.That(before.BytesReceived, Is.EqualTo(10));
             Assert.That(before.CompletedSegments, Is.EqualTo(1));
             Assert.That(before.ActiveSegmentRequests, Is.EqualTo(2));
+            Assert.That(before.MaxSegmentSizeBytes, Is.EqualTo(524288));
 
             Volatile.Write(ref published, unpublished);
 
@@ -3247,6 +3252,7 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(after.BytesReceived, Is.EqualTo(80));
             Assert.That(after.CompletedSegments, Is.EqualTo(8));
             Assert.That(after.ActiveSegmentRequests, Is.EqualTo(5));
+            Assert.That(after.MaxSegmentSizeBytes, Is.EqualTo(1048576));
             Assert.That(UPilotDownloadHelper.GetProgress(after), Is.EqualTo(0.8f));
 
             after.Phase = "reader mutation";
@@ -3280,10 +3286,11 @@ namespace CodingRiver.UPilot.Tests
             var multiThread = new UPilotDownloadState
             {
                 Phase = "正在下载安装",
-                SegmentCount = 12,
-                MaxConcurrentSegmentRequests = 5,
+                SegmentCount = 40,
+                MaxSegmentSizeBytes = 512 * 1024,
+                MaxConcurrentSegmentRequests = 8,
                 CompletedSegments = 2,
-                ActiveSegmentRequests = 5,
+                ActiveSegmentRequests = 8,
                 BytesReceived = 10 * 1024 * 1024,
                 TotalBytes = 20 * 1024 * 1024,
             };
@@ -3298,10 +3305,10 @@ namespace CodingRiver.UPilot.Tests
 
             Assert.That(
                 UPilotUpdateService.FormatDownloadProgressLabel(multiThread),
-                Is.EqualTo("正在下载安装（12 分片，正在下载 5，最多 5 并发，已完成 2/12）"));
+                Is.EqualTo("正在下载安装（40 分片，正在下载 8，最多 8 并发，已完成 2/40）"));
             Assert.That(
                 UPilotUpdateService.FormatDownloadProgressDetail(multiThread),
-                Is.EqualTo("10.0 MB / 20.0 MB · 12 分片下载 · 正在下载 5 · 最多 5 并发 · 已完成 2/12"));
+                Is.EqualTo("10.0 MB / 20.0 MB · 40 分片下载 · 正在下载 8 · 最多 8 并发 · 已完成 2/40 · 每片上限 512 KiB"));
             Assert.That(
                 UPilotUpdateService.FormatDownloadProgressLabel(singleThread),
                 Is.EqualTo("正在下载安装（单流下载）"));

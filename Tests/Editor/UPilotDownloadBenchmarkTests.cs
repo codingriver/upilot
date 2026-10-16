@@ -39,7 +39,9 @@ namespace CodingRiver.UPilot.Tests
             public double verifiedMiBPerSecond;
             public string expectedSha256 = ExpectedSha256;
             public string actualSha256 = "";
-            public int configuredSegmentCount = UPilotServerRuntimeService.ParallelDownloadSegments;
+            public long maxSegmentSizeBytes = UPilotDownloadHelper.DefaultMaxSegmentSizeBytes;
+            public int configuredSegmentCount = UPilotDownloadHelper.CalculateSegmentCount(
+                ExpectedBytes, UPilotDownloadHelper.DefaultMaxSegmentSizeBytes);
             public int maxConcurrentSegmentRequests = UPilotDownloadHelper.DefaultMaxConcurrentSegmentRequests;
             public int segmentCount;
             public int completedSegments;
@@ -84,6 +86,7 @@ namespace CodingRiver.UPilot.Tests
             report.assetRelativePath = "Logs/UPilotDownloadBenchmark/" + report.runId + "/" + AssetName;
             var stopwatch = new Stopwatch();
             Exception failure = null;
+            UPilotDownloadState completedState = null;
             try
             {
                 if (Directory.Exists(runDirectory))
@@ -104,7 +107,7 @@ namespace CodingRiver.UPilot.Tests
                     {
                         stopwatch.Start();
                         // Exactly one invocation; no retry after failure, cancellation, or observation timeout.
-                        await UPilotServerRuntimeService.Instance.BenchmarkDownloadAsync(
+                        completedState = await UPilotServerRuntimeService.Instance.BenchmarkDownloadAsync(
                             CreateDownload(), target, deadline.Token);
                     }
                     report.outcome = "success";
@@ -124,7 +127,7 @@ namespace CodingRiver.UPilot.Tests
                 stopwatch.Stop();
                 report.elapsedMilliseconds = stopwatch.ElapsedMilliseconds;
                 report.finishedUtc = DateTime.UtcNow.ToString("o");
-                var state = UPilotServerRuntimeService.Instance.DownloadState;
+                var state = completedState ?? UPilotServerRuntimeService.Instance.DownloadState;
                 // A busy preflight belongs to another operation; do not attribute its progress here.
                 if (report.outcome != "not_run_download_busy" && report.outcome != "not_run_unsupported_platform")
                 {
@@ -133,6 +136,7 @@ namespace CodingRiver.UPilot.Tests
                     report.completedSegments = state.CompletedSegments;
                     report.phase = state.Phase;
                     report.configuredSegmentCount = state.ConfiguredSegmentCount;
+                    report.maxSegmentSizeBytes = state.MaxSegmentSizeBytes;
                     report.maxConcurrentSegmentRequests = state.MaxConcurrentSegmentRequests;
                     report.peakConcurrentSegmentRequests = state.PeakConcurrentSegmentRequests;
                     report.dedicatedThreadId = state.DedicatedThreadId;
@@ -167,13 +171,19 @@ namespace CodingRiver.UPilot.Tests
                 Assert.Fail("UPilot benchmark failed; inspect Logs/UPilotDownloadBenchmark/" + report.runId + "/report.json: " + report.error);
             Assert.That(report.actualSha256, Is.EqualTo(ExpectedSha256).IgnoreCase);
             Assert.That(report.fileBytes, Is.EqualTo(ExpectedBytes));
+            Assert.That(report.receivedBytes, Is.EqualTo(ExpectedBytes));
+            Assert.That(report.outcome, Is.EqualTo("success"));
             Assert.That(report.observedOwnedThreadCount, Is.EqualTo(1));
             Assert.That(report.threadConstraintViolationCount, Is.Zero);
-            Assert.That(report.configuredSegmentCount, Is.EqualTo(12));
-            Assert.That(report.maxConcurrentSegmentRequests, Is.EqualTo(5));
-            Assert.That(report.segmentCount, Is.EqualTo(12));
-            Assert.That(report.completedSegments, Is.EqualTo(12));
-            Assert.That(report.peakConcurrentSegmentRequests, Is.EqualTo(5));
+            Assert.That(report.maxSegmentSizeBytes, Is.GreaterThan(0));
+            Assert.That(report.maxConcurrentSegmentRequests, Is.GreaterThan(0));
+            var plannedSegments = UPilotDownloadHelper.CalculateSegmentCount(ExpectedBytes, report.maxSegmentSizeBytes);
+            Assert.That(report.configuredSegmentCount, Is.EqualTo(plannedSegments));
+            // A server without byte-range support may legitimately complete through one stream.
+            Assert.That(report.segmentCount, Is.EqualTo(1).Or.EqualTo(plannedSegments));
+            Assert.That(report.completedSegments, Is.EqualTo(report.segmentCount));
+            Assert.That(report.peakConcurrentSegmentRequests,
+                Is.InRange(1, Math.Min(report.segmentCount, report.maxConcurrentSegmentRequests)));
         }
 
         private static UPilotServerDownloadInfo CreateDownload() => new UPilotServerDownloadInfo

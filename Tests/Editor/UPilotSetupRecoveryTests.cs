@@ -310,19 +310,29 @@ namespace CodingRiver.UPilot.Tests
                 var window = ScriptableObject.CreateInstance<UPilotMainWindow>();
                 try
                 {
-                    var calls = 0;
-                    window.SelectOrConfigurePythonRuntime(selected =>
+                    var mainView = typeof(UPilotMainWindow).GetField("_mainView", BindingFlags.Instance | BindingFlags.NonPublic);
+                    mainView.SetValue(window, Enum.Parse(mainView.FieldType, "Setup"));
+                    SetField(window, "_setupStep", 1);
+                    window.SelectSetupPythonEnvironment(path);
+                    var calls = new List<string>();
+                    window.SelectExistingSetupPythonAsync(path, false, saved =>
                     {
-                        calls++;
-                        UPilotServerRuntimeService.SaveRuntimeSelection(UPilotServerRuntimeMode.Python, selected,
-                            saved => typeof(UPilotProjectConfig).GetField("_cached", BindingFlags.Static | BindingFlags.NonPublic)
-                                .SetValue(null, saved));
-                    });
-                    Assert.That(calls, Is.EqualTo(1));
+                        Assert.That(calls, Is.EqualTo(new[] { "validate" }));
+                        calls.Add("save");
+                        typeof(UPilotProjectConfig).GetField("_cached", BindingFlags.Static | BindingFlags.NonPublic)
+                            .SetValue(null, saved);
+                    }, selected =>
+                    {
+                        Assert.That(selected, Is.EqualTo(path));
+                        calls.Add("validate");
+                        return Task.CompletedTask;
+                    }).GetAwaiter().GetResult();
+                    Assert.That(calls, Is.EqualTo(new[] { "validate", "save" }));
                     Assert.That(UPilotProjectConfig.Current.runtime.mode, Is.EqualTo("python"));
                     Assert.That(UPilotProjectConfig.Current.runtime.pythonPath, Is.EqualTo(path));
                     Assert.That(UPilotServerRuntimeService.Instance.GetConfiguredMode(), Is.EqualTo(UPilotServerRuntimeMode.Python));
                     Assert.That(GetField(window, "_setupRuntimeChoice").ToString(), Is.EqualTo("Python"));
+                    Assert.That(GetField(window, "_setupStep"), Is.EqualTo(1));
                     Assert.That(original.runtime.mode, Is.EqualTo("exe"));
                 }
                 finally { UnityEngine.Object.DestroyImmediate(window); }
@@ -665,6 +675,199 @@ namespace CodingRiver.UPilot.Tests
                 Assert.That(Debug.unityLogger.logHandler, Is.SameAs(sink));
             }
             finally { Debug.unityLogger.logHandler = original; }
+        }
+
+        [Test]
+        public void SetupRecommendationChangesBothPortsWithoutReusingHistoryOrSaving()
+        {
+            WithSetupPortRecommendation((window, registry, key) =>
+            {
+                var used = new HashSet<int> { 18000, 19000 };
+                for (var i = 0; i < 20; i++)
+                {
+                    // A stale cached suggestion must never determine the next pair.
+                    SetField(window, "_recommendedWsPort", 18000);
+                    SetField(window, "_recommendedHttpPort", 19000);
+                    Assert.That(window.ApplyRecommendedSetupPorts(registry), Is.True);
+                    var ws = (int)GetField(window, "_setupWsPort");
+                    var http = (int)GetField(window, "_setupHttpPort");
+                    Assert.That(used.Add(ws), Is.True, "WS reused an earlier port.");
+                    Assert.That(used.Add(http), Is.True, "HTTP reused an earlier port.");
+                    Assert.That(UPilotPortAllocator.IsPortAvailable(ws), Is.True);
+                    Assert.That(UPilotPortAllocator.IsPortAvailable(http), Is.True);
+                    window.EvaluateSetupPorts();
+                    Assert.That(GetField(window, "_setupWsPort"), Is.EqualTo(ws));
+                    Assert.That(GetField(window, "_setupHttpPort"), Is.EqualTo(http));
+                    SetField(window, "_setupStep", 1);
+                    SetField(window, "_setupStep", 0);
+                    if (i == 10)
+                    {
+                        EditorPrefs.SetString(key, "other:" + ws + ":" + http);
+                        LogAssert.Expect(LogType.Log, "[UPilotPorts] 已清除参考端口登记：" + key + "；工程配置和运行中的服务不变。");
+                        registry.Clear();
+                    }
+                    Assert.That(EditorPrefs.HasKey(key), Is.False, "Recommendation must not register draft ports.");
+                }
+            });
+        }
+
+        [TestCase(65535, 65535)]
+        [TestCase(0, 0)]
+        [TestCase(-1, 65536)]
+        [TestCase(18000, 18001)]
+        public void SetupRecommendationHandlesBoundaryInvalidAndOverlappingInputs(int initialWs, int initialHttp)
+        {
+            WithSetupPortRecommendation((window, registry, key) =>
+            {
+                SetField(window, "_setupWsPort", initialWs);
+                SetField(window, "_setupHttpPort", initialHttp);
+                Assert.That(window.ApplyRecommendedSetupPorts(registry), Is.True);
+                var ws = (int)GetField(window, "_setupWsPort");
+                var http = (int)GetField(window, "_setupHttpPort");
+                Assert.That(ws, Is.InRange(1, 65535).And.Not.EqualTo(initialWs).And.Not.EqualTo(initialHttp));
+                Assert.That(http, Is.InRange(1, 65535).And.Not.EqualTo(initialWs).And.Not.EqualTo(initialHttp).And.Not.EqualTo(ws));
+            });
+        }
+
+        [Test]
+        public void SetupRecommendationFailureRetainsInputsAndCanRetry()
+        {
+            WithSetupPortRecommendation((window, registry, key) =>
+            {
+                var reject = true;
+                var unavailable = new UPilotPortRegistry(key, port => !reject && UPilotPortAllocator.IsPortAvailable(port));
+                SetField(window, "_setupPortsReady", true);
+                LogAssert.Expect(LogType.Error, new Regex(@"\[UPilotPorts\] 推荐可绑定端口失败：[\s\S]*本次搜索范围未找到可用端口"));
+                Assert.That(window.ApplyRecommendedSetupPorts(unavailable), Is.False);
+                Assert.That(GetField(window, "_setupWsPort"), Is.EqualTo(18000));
+                Assert.That(GetField(window, "_setupHttpPort"), Is.EqualTo(19000));
+                Assert.That(GetField(window, "_setupPortsReady"), Is.True);
+                Assert.That(GetField(window, "_recommendedWsPort"), Is.Zero);
+                Assert.That(GetField(window, "_setupStep"), Is.Zero);
+                reject = false;
+                Assert.That(window.ApplyRecommendedSetupPorts(unavailable), Is.True);
+            });
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void SetupRecommendationRegistrationFailureIsVisibleAndRetryable(bool corrupt)
+        {
+            WithSetupPortRecommendation((window, registry, key) =>
+            {
+                var failRead = !corrupt;
+                var observed = new UPilotPortRegistry(key, readRegistration: pref => failRead
+                    ? throw new IOException("injected registration read failure") : EditorPrefs.GetString(pref, ""));
+                if (corrupt) EditorPrefs.SetString(key, "broken");
+                LogAssert.Expect(LogType.Error, new Regex(@"\[UPilotPorts\] 推荐可绑定端口失败：[\s\S]*" +
+                    (corrupt ? "端口登记格式损坏" : "injected registration read failure")));
+                Assert.That(window.ApplyRecommendedSetupPorts(observed), Is.False);
+                Assert.That(GetField(window, "_setupWsPort"), Is.EqualTo(18000));
+                Assert.That(GetField(window, "_setupHttpPort"), Is.EqualTo(19000));
+                Assert.That(GetField(window, "_setupPortMessageType"), Is.EqualTo(MessageType.Error));
+                failRead = false;
+                EditorPrefs.DeleteKey(key);
+                Assert.That(window.ApplyRecommendedSetupPorts(observed), Is.True);
+            });
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void SetupRecommendationRechecksRegistrationAndActualBindingBeforeSaving(bool registered)
+        {
+            WithSetupPortRecommendation((window, registry, key) =>
+            {
+                Assert.That(window.ApplyRecommendedSetupPorts(registry), Is.True);
+                var ws = (int)GetField(window, "_setupWsPort");
+                var http = (int)GetField(window, "_setupHttpPort");
+                var listener = new TcpListener(IPAddress.Loopback, ws);
+                try
+                {
+                    if (registered) EditorPrefs.SetString(key, "other:" + http + ":" + ws);
+                    else listener.Start();
+                    var saves = 0;
+                    Action<string, int, int> save = (host, savedWs, savedHttp) =>
+                    {
+                        saves++;
+                        Assert.That((savedWs, savedHttp), Is.EqualTo((ws, http)));
+                    };
+                    LogAssert.Expect(LogType.Error, new Regex(@"\[UPilotPorts\] 保存前校验推荐端口失败：[\s\S]*" +
+                        (registered ? "已被登记" : "当前不可绑定")));
+                    Assert.That(window.TrySaveSetupPorts(registry, save), Is.False);
+                    Assert.That(saves, Is.Zero);
+                    Assert.That(GetField(window, "_setupWsPort"), Is.EqualTo(ws));
+                    Assert.That(GetField(window, "_setupHttpPort"), Is.EqualTo(http));
+                    Assert.That(GetField(window, "_setupStep"), Is.Zero);
+                    listener.Stop();
+                    EditorPrefs.DeleteKey(key);
+                    Assert.That(window.TrySaveSetupPorts(registry, save), Is.True);
+                    Assert.That(saves, Is.EqualTo(1));
+                }
+                finally { listener.Stop(); }
+            });
+        }
+
+        [Test]
+        public void SetupManualPortEditPreservesExistingSavePolicyWithBrokenRegistration()
+        {
+            WithSetupPortRecommendation((window, registry, key) =>
+            {
+                Assert.That(window.ApplyRecommendedSetupPorts(registry), Is.True);
+                var ws = (int)GetField(window, "_setupWsPort");
+                var http = (int)GetField(window, "_setupHttpPort");
+                SetField(window, "_setupWsPort", http);
+                SetField(window, "_setupHttpPort", ws);
+                EditorPrefs.SetString(key, "broken");
+                var saves = 0;
+                Assert.That(window.TrySaveSetupPorts(registry, (host, savedWs, savedHttp) =>
+                {
+                    saves++;
+                    Assert.That((savedWs, savedHttp), Is.EqualTo((http, ws)));
+                }), Is.True);
+                Assert.That(saves, Is.EqualTo(1));
+                Assert.That(EditorPrefs.GetString(key), Is.EqualTo("broken"));
+            });
+        }
+
+        [Test]
+        public void SetupRecommendationHistoryResetsOnlyWhenSetupIsReinitialized()
+        {
+            WithSetupPortRecommendation((window, registry, key) =>
+            {
+                Assert.That(window.ApplyRecommendedSetupPorts(registry), Is.True);
+                var first = ((int)GetField(window, "_setupWsPort"), (int)GetField(window, "_setupHttpPort"));
+                window.EnterSetupRecovery("test reinitialization");
+                SetField(window, "_setupWsPort", 18000);
+                SetField(window, "_setupHttpPort", 19000);
+                Assert.That(window.ApplyRecommendedSetupPorts(registry), Is.True);
+                Assert.That(((int)GetField(window, "_setupWsPort"), (int)GetField(window, "_setupHttpPort")), Is.EqualTo(first));
+            });
+        }
+
+        private static void WithSetupPortRecommendation(Action<UPilotMainWindow, UPilotPortRegistry, string> test)
+        {
+            var key = "upilot.setup-recommendation-tests." + Guid.NewGuid().ToString("N");
+            var config = File.ReadAllBytes(UPilotProjectConfig.ConfigPath);
+            var manager = UPilotMcpServerManager.Instance;
+            var endpoints = (manager.WsPort, manager.HttpPort);
+            var originalError = UPilotPortRegistration.LastError;
+            var originalWarning = UPilotPortRegistration.LastWarning;
+            var window = ScriptableObject.CreateInstance<UPilotMainWindow>();
+            try
+            {
+                SetField(window, "_setupWsPort", 18000);
+                SetField(window, "_setupHttpPort", 19000);
+                test(window, new UPilotPortRegistry(key), key);
+                Assert.That(File.ReadAllBytes(UPilotProjectConfig.ConfigPath), Is.EqualTo(config));
+                Assert.That((manager.WsPort, manager.HttpPort), Is.EqualTo(endpoints));
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(window);
+                EditorPrefs.DeleteKey(key);
+                UPilotPortRegistration.LastError = originalError;
+                UPilotPortRegistration.LastWarning = originalWarning;
+            }
         }
 
         private static string RepairErrorPattern(string attempt, string failure) =>

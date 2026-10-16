@@ -87,6 +87,28 @@ namespace CodingRiver.UPilot
 
         public static void OpenSetup() => OpenSetupWindow(null);
 
+        internal static void OpenPythonSetup(string interpreterPath)
+        {
+            try
+            {
+                var runtime = UPilotServerRuntimeService.Instance;
+                if (runtime.DownloadState.IsRunning || runtime.PythonEnvironmentState.IsRunning)
+                    return;
+                var window = GetWindow<UPilotMainWindow>("UPilot");
+                window.minSize = new Vector2(440, 400);
+                window.InitializeSetupState();
+                window.SelectSetupPythonEnvironment(interpreterPath);
+                window.EnterSetupView();
+                window.SetSetupStep(1);
+                window.Show();
+                window.Focus();
+            }
+            catch (Exception ex)
+            {
+                ReportMainWindowException("打开 Python 开发环境设置失败", ex);
+            }
+        }
+
         internal static void OpenSetupForRecovery(string failure) => OpenSetupWindow(failure);
 
         private static void OpenSetupWindow(string failure)
@@ -117,6 +139,7 @@ namespace CodingRiver.UPilot
             {
                 var window = GetWindow<UPilotMainWindow>("UPilot");
                 window.minSize = new Vector2(440, 400);
+                window.ClearSetupRuntimeContinuation();
                 window._mainView = UPilotMainView.Dashboard;
                 window.ShowNoticeForDuration(message, type, durationSeconds);
                 window.Show();
@@ -155,6 +178,7 @@ namespace CodingRiver.UPilot
         {
             try
             {
+                ClearSetupRuntimeContinuation();
                 EditorApplication.update -= OnEditorUpdate;
                 EditorApplication.delayCall -= ForceStopServicesForUpdate;
                 _updateStopScheduled = false;
@@ -169,6 +193,7 @@ namespace CodingRiver.UPilot
         {
             try
             {
+                RefreshSetupRuntimeContinuation();
                 if (EditorApplication.timeSinceStartup - _lastRepaint < UPilotTimingSettings.MainWindowRefreshMs / 1000d)
                     return;
 

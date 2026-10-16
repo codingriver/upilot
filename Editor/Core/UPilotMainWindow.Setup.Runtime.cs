@@ -1,10 +1,11 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // UPilot Editor - first setup runtime selection.
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
 
 using System;
 using System.IO;
+using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
 
@@ -12,172 +13,252 @@ namespace CodingRiver.UPilot
 {
     public sealed partial class UPilotMainWindow
     {
+        private enum SetupPythonEnvironmentChoice { Automatic, Existing }
+        private enum SetupRuntimeContinuation { None, ManagedDownload, PythonEnvironment }
+
+        private SetupPythonEnvironmentChoice _setupPythonEnvironmentChoice;
+        private SetupRuntimeContinuation _setupRuntimeContinuation;
+        private bool _setupRuntimeSourceChannel;
+        private bool _setupPythonInspectionRunning;
+        private bool _setupPythonValidationRunning;
+        private bool _setupLocalExeValidationRunning;
+        private bool _setupRuntimeCompletionSucceeded;
+        private int _setupRuntimeGeneration;
+        private double _setupRuntimeOperationStartedAt;
+        private string _setupExistingPythonPath = "";
+        private string _setupPythonValidatedPath = "";
+        private string _setupPythonEnvironmentPath = "";
+        private string _setupPythonEnvironmentScope = "";
+        private string _setupPythonEnvironmentPathError = "";
+        private string _setupRuntimeError = "";
+        private string _setupRuntimeNotice = "";
+
         internal static string GetRuntimeSelectionModeLabel(UPilotServerRuntimeMode mode) =>
             mode == UPilotServerRuntimeMode.StandaloneExe ? "本地 EXE" : "本机 Python";
 
-        private async void BeginRuntimeInspection()
+        private void ResetSetupRuntimeState()
         {
-            _setupPythonProbe ??= UPilotServerRuntimeService.Instance.ProbePython();
-            if (UPilotServerRuntimeService.IsSourceUpdateChannel())
+            ClearSetupRuntimeContinuation();
+            _setupRuntimeSourceChannel = UPilotServerRuntimeService.IsSourceUpdateChannel();
+            _setupRuntimeCompletionSucceeded = false;
+            _setupManifest = null;
+            _setupManifestError = "";
+            _setupPythonProbe = null;
+            _setupPythonEnvironmentChoice = SetupPythonEnvironmentChoice.Automatic;
+            _setupExistingPythonPath = "";
+            _setupPythonValidatedPath = "";
+            _setupPythonEnvironmentPath = "";
+            _setupPythonEnvironmentScope = "";
+            _setupPythonEnvironmentPathError = "";
+            _setupRuntimeError = "";
+            _setupRuntimeNotice = "";
+        }
+
+        private void InitializeSetupRuntimeChoice()
+        {
+            _setupRuntimeSourceChannel = UPilotServerRuntimeService.IsSourceUpdateChannel();
+            var config = UPilotProjectConfig.Current.runtime;
+            var mode = UPilotServerRuntimeService.Instance.GetConfiguredMode();
+            if (mode == UPilotServerRuntimeMode.Python && !string.IsNullOrWhiteSpace(config?.pythonPath))
+                SelectSetupPythonEnvironment(config.pythonPath);
+            else
+                _setupRuntimeChoice = mode == UPilotServerRuntimeMode.StandaloneExe
+                    ? SetupRuntimeChoice.Managed
+                    : _setupRuntimeSourceChannel ? SetupRuntimeChoice.Python : SetupRuntimeChoice.Managed;
+        }
+
+        internal void SelectSetupPythonEnvironment(string interpreterPath)
+        {
+            ClearSetupRuntimeContinuation();
+            _setupRuntimeChoice = SetupRuntimeChoice.Python;
+            _setupExistingPythonPath = (interpreterPath ?? "").Trim();
+            _setupPythonEnvironmentChoice = _setupExistingPythonPath.Length == 0
+                ? SetupPythonEnvironmentChoice.Automatic : SetupPythonEnvironmentChoice.Existing;
+            _setupPythonProbe = null;
+            _setupPythonValidatedPath = "";
+            _setupRuntimeCompletionSucceeded = false;
+            _setupRuntimeError = "";
+            _setupRuntimeNotice = "";
+        }
+
+        private void ClearSetupRuntimeContinuation()
+        {
+            _setupRuntimeContinuation = SetupRuntimeContinuation.None;
+            _setupRuntimeOperationStartedAt = 0;
+            _setupRuntimeGeneration++;
+            _setupManifestLoading = false;
+            _setupPythonInspectionRunning = false;
+        }
+
+        private void BeginRuntimeInspection() => _ = InspectSetupRuntimeAsync();
+
+        internal async Task InspectSetupRuntimeAsync(
+            Func<Task<UPilotReleaseManifest>> fetchManifest = null,
+            Func<UPilotPythonProbeResult> probePython = null)
+        {
+            var generation = _setupRuntimeGeneration;
+            if (_setupRuntimeChoice == SetupRuntimeChoice.Managed)
             {
-                _setupRuntimeChoice = UPilotServerRuntimeService.Instance.GetConfiguredMode() == UPilotServerRuntimeMode.StandaloneExe
-                    ? SetupRuntimeChoice.Managed : SetupRuntimeChoice.Python;
-                _showPythonAdvanced = true;
-                _setupManifest = null;
-                _setupManifestError = "";
-                _setupManifestLoading = false;
+                if (_setupRuntimeSourceChannel || _setupManifestLoading || _setupManifest != null ||
+                    !string.IsNullOrWhiteSpace(_setupManifestError))
+                    return;
+                _setupManifestLoading = true;
+                try
+                {
+                    var manifest = await (fetchManifest ?? UPilotServerRuntimeService.Instance.FetchReleaseManifestAsync)();
+                    if (this != null && generation == _setupRuntimeGeneration)
+                        _setupManifest = manifest;
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError("[UPilot] First setup service information failed.\nException=" + ex);
+                    if (this != null && generation == _setupRuntimeGeneration)
+                        _setupManifestError = ex.Message;
+                }
+                finally
+                {
+                    if (this != null && generation == _setupRuntimeGeneration)
+                    {
+                        _setupManifestLoading = false;
+                        Repaint();
+                    }
+                }
                 return;
             }
 
-            if (_setupManifestLoading || _setupManifest != null || !string.IsNullOrWhiteSpace(_setupManifestError))
+            if (_setupPythonEnvironmentChoice != SetupPythonEnvironmentChoice.Automatic ||
+                _setupPythonInspectionRunning || _setupPythonProbe != null ||
+                !string.IsNullOrWhiteSpace(_setupPythonEnvironmentPathError))
                 return;
-
-            _setupManifestLoading = true;
-            _setupManifestError = "";
+            _setupPythonInspectionRunning = true;
             try
             {
-                _setupManifest = await UPilotServerRuntimeService.Instance.FetchReleaseManifestAsync();
+                _setupPythonEnvironmentPath = UPilotServerRuntimeService.GetPythonEnvironmentPath(out _setupPythonEnvironmentScope);
+                var probe = await Task.Run(probePython ?? UPilotServerRuntimeService.Instance.ProbePython);
+                if (this != null && generation == _setupRuntimeGeneration)
+                    _setupPythonProbe = probe;
             }
             catch (Exception ex)
             {
-                _setupManifestError = ex.Message;
+                Debug.LogError("[UPilot] First setup Python inspection failed.\nException=" + ex);
+                if (this != null && generation == _setupRuntimeGeneration)
+                    _setupPythonEnvironmentPathError = ex.Message;
             }
             finally
             {
-                _setupManifestLoading = false;
-                Repaint();
+                if (this != null && generation == _setupRuntimeGeneration)
+                {
+                    _setupPythonInspectionRunning = false;
+                    Repaint();
+                }
             }
         }
 
         private void DrawSetupRuntimeStep()
         {
-            var sourceChannel = UPilotServerRuntimeService.IsSourceUpdateChannel();
             BeginRuntimeInspection();
-            if (sourceChannel)
-            {
-                EditorGUILayout.HelpBox(
-                    "当前是开发/source 安装，默认使用本机 Python；显式配置的本地 EXE 会被保留。自动管理下载仍只随正式 tag 版本发布。",
-                    MessageType.Info);
-                _setupRuntimeChoice = UPilotServerRuntimeService.Instance.GetConfiguredMode() == UPilotServerRuntimeMode.StandaloneExe
-                    ? SetupRuntimeChoice.Managed : SetupRuntimeChoice.Python;
-                _showPythonAdvanced = true;
-                if (_setupRuntimeChoice == SetupRuntimeChoice.Managed)
-                    EditorGUILayout.LabelField("已配置的本地 EXE", UPilotProjectConfig.Current.runtime?.serverExePath ?? "", EditorStyles.wordWrappedMiniLabel);
-                if (GUILayout.Button("选择本地 EXE"))
-                {
-                    var selected = EditorUtility.OpenFilePanel("选择本地 MCP Server", "", Application.platform == RuntimePlatform.WindowsEditor ? "exe" : "");
-                    if (!string.IsNullOrWhiteSpace(selected))
-                    {
-                        UPilotServerRuntimeService.Instance.SetStandaloneExeRuntime(selected);
-                        _setupRuntimeChoice = SetupRuntimeChoice.Managed;
-                    }
-                }
-                DrawPythonRuntimeSetup();
-            }
-            else
-            {
-                EditorGUILayout.HelpBox(
-                    "推荐由 UPilot 管理 MCP 服务。UPilot 会安装与当前版本匹配的服务，并在后续更新时保持版本一致。",
-                    MessageType.Info);
-
+            if (_setupRuntimeChoice == SetupRuntimeChoice.Managed)
                 DrawManagedRuntimeSetup();
-                EditorGUILayout.Space(6);
+            else
                 DrawPythonRuntimeSetup();
-            }
-            EditorGUILayout.Space(12);
 
-            var ready = SetupRuntimeReady(out _);
+            if (!string.IsNullOrWhiteSpace(_setupRuntimeError))
+                EditorGUILayout.HelpBox(_setupRuntimeError, MessageType.Error);
+            else if (!string.IsNullOrWhiteSpace(_setupRuntimeNotice))
+                EditorGUILayout.HelpBox(_setupRuntimeNotice, MessageType.Info);
+
+            var canContinue = CanContinueFromRuntimeStep(out var reason);
+            if (!canContinue && !string.IsNullOrWhiteSpace(reason))
+                EditorGUILayout.HelpBox(reason,
+                    IsSetupRuntimeBusy() || _setupManifestLoading || _setupPythonInspectionRunning
+                        ? MessageType.Info : MessageType.Warning);
+            EditorGUILayout.Space(12);
             using (new EditorGUILayout.HorizontalScope())
             {
                 DrawSetupButton("上一步", SetupNeutralColor, 112, () => SetSetupStep(0));
                 GUILayout.FlexibleSpace();
-                DrawSetupButton(
-                    "下一步",
-                    ready ? SetupReadyColor : SetupBlockedColor,
-                    132,
-                    ContinueFromRuntimeStep,
-                    !UPilotServerRuntimeService.Instance.DownloadState.IsRunning &&
-                    !UPilotServerRuntimeService.Instance.PythonEnvironmentState.IsRunning);
+                DrawSetupButton(GetSetupRuntimeActionLabel(), canContinue ? SetupPrimaryColor : SetupNeutralColor, 168,
+                    () => ContinueFromRuntimeStep(), canContinue);
             }
+        }
+
+        private string GetSetupRuntimeActionLabel()
+        {
+            var runtime = UPilotServerRuntimeService.Instance;
+            if (_setupPythonValidationRunning || _setupLocalExeValidationRunning) return "正在验证…";
+            if (runtime.DownloadState.IsRunning) return "正在安装…";
+            if (runtime.PythonEnvironmentState.IsRunning) return "正在配置…";
+            if (_setupRuntimeChoice == SetupRuntimeChoice.Managed)
+            {
+                if (_setupManifestLoading) return "正在获取服务信息…";
+                if (!string.IsNullOrWhiteSpace(_setupManifestError)) return "重试获取信息";
+                if (ManagedRuntimeReady(out _)) return "下一步";
+                if (_setupRuntimeSourceChannel) return "下一步";
+                return string.IsNullOrWhiteSpace(_setupRuntimeError) ? "下一步（下载安装）" : "重试安装";
+            }
+            if (_setupPythonInspectionRunning) return "正在检测环境…";
+            if (SetupRuntimeReady(out _)) return "下一步";
+            return _setupPythonEnvironmentChoice == SetupPythonEnvironmentChoice.Existing
+                ? "验证并继续" : "配置并继续";
         }
 
         private void DrawManagedRuntimeSetup()
         {
-            if (UPilotServerRuntimeService.IsSourceUpdateChannel())
-                return;
-
             var runtime = UPilotServerRuntimeService.Instance;
             var state = runtime.DownloadState;
-            var ready = ManagedRuntimeReady(out var statusMessage);
-
+            EditorGUILayout.HelpBox(_setupRuntimeSourceChannel
+                ? "当前为开发/source 安装，自动下载仅随正式 tag 版本发布。请选择本地服务文件。"
+                : "UPilot 服务是独立的 MCP 服务程序。点击下一步，将自动下载、校验并安装与当前 UPilot 版本匹配的服务。",
+                MessageType.Info);
             using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
             {
-                using (new EditorGUILayout.HorizontalScope())
-                {
-                    EditorGUILayout.LabelField("推荐：由 UPilot 管理服务", EditorStyles.boldLabel);
-                    GUILayout.FlexibleSpace();
-                    EditorGUILayout.LabelField(
-                        UPilotServerRuntimeService.CurrentPlatformDisplayName,
-                        EditorStyles.miniLabel,
-                        GUILayout.Width(150));
-                }
-
-                if (_setupManifestLoading)
-                    EditorGUILayout.HelpBox("正在获取适用于当前平台的服务信息…", MessageType.Info);
-                else if (!string.IsNullOrWhiteSpace(_setupManifestError))
+                EditorGUILayout.LabelField("由 UPilot 管理服务（推荐）", EditorStyles.boldLabel);
+                EditorGUILayout.LabelField("适用平台", UPilotServerRuntimeService.CurrentPlatformDisplayName, EditorStyles.miniLabel);
+                if (_setupManifest != null)
+                    EditorGUILayout.LabelField("服务版本", _setupManifest.ServerVersion, EditorStyles.miniLabel);
+                if (!string.IsNullOrWhiteSpace(_setupManifestError))
                     EditorGUILayout.HelpBox("无法获取服务信息：" + _setupManifestError, MessageType.Error);
-                else
-                {
-                    if (_setupManifest != null)
-                        EditorGUILayout.LabelField("推荐版本", _setupManifest.ServerVersion, EditorStyles.miniLabel);
-                    DrawManagedServerLocation(runtime);
-                    EditorGUILayout.HelpBox(statusMessage, ready ? MessageType.Info : MessageType.Warning);
-                }
+                DrawManagedServerLocation(runtime);
+                if (ManagedRuntimeReady(out var readyMessage))
+                    DrawSetupRuntimeSuccess(readyMessage);
+                else if (!_setupRuntimeSourceChannel && _setupManifest != null && string.IsNullOrWhiteSpace(_setupRuntimeError))
+                    EditorGUILayout.LabelField("尚未安装时，点击下一步即可下载安装。", EditorStyles.wordWrappedMiniLabel);
 
-                if (state.IsRunning || state.IsComplete || !string.IsNullOrEmpty(state.ErrorMessage))
+                if (state.IsRunning || state.IsComplete || state.IsCancelled || !string.IsNullOrEmpty(state.ErrorMessage))
                 {
-                    var progress = UPilotDownloadHelper.GetProgress(state);
-                    var progressLabel = UPilotUpdateService.FormatDownloadProgressLabel(state);
-                    var progressDetail = UPilotUpdateService.FormatDownloadProgressDetail(state);
-                    EditorGUI.ProgressBar(EditorGUILayout.GetControlRect(false, 20), progress, progressLabel);
-                    if (!string.IsNullOrWhiteSpace(progressDetail))
-                        EditorGUILayout.LabelField(progressDetail, EditorStyles.miniLabel);
-                    if (!string.IsNullOrEmpty(state.WarningMessage))
+                    EditorGUI.ProgressBar(EditorGUILayout.GetControlRect(false, 20),
+                        UPilotDownloadHelper.GetProgress(state), UPilotUpdateService.FormatDownloadProgressLabel(state));
+                    var detail = UPilotUpdateService.FormatDownloadProgressDetail(state);
+                    if (!string.IsNullOrWhiteSpace(detail))
+                        EditorGUILayout.LabelField(detail, EditorStyles.miniLabel);
+                    if (!string.IsNullOrWhiteSpace(state.WarningMessage))
                         EditorGUILayout.HelpBox(state.WarningMessage, MessageType.Warning);
-                    if (!string.IsNullOrEmpty(state.ErrorMessage))
+                    if (!string.IsNullOrWhiteSpace(state.ErrorMessage) && _setupRuntimeError != state.ErrorMessage)
                         EditorGUILayout.HelpBox(state.ErrorMessage, MessageType.Error);
                 }
 
                 using (new EditorGUILayout.HorizontalScope())
                 {
-                    using (new EditorGUI.DisabledScope(state.IsRunning || _setupManifestLoading))
+                    using (new EditorGUI.DisabledScope(IsSetupRuntimeBusy()))
                     {
-                        var previous = GUI.backgroundColor;
-                        GUI.backgroundColor = ready ? SetupNeutralColor : SetupBlockedColor;
-                        if (GUILayout.Button(ready ? "重新安装推荐服务" : "安装推荐服务", GUILayout.Height(30)))
+                        if (GUILayout.Button("选择本地服务文件", GUILayout.Height(30)))
                         {
-                            _setupRuntimeChoice = SetupRuntimeChoice.Managed;
-                            runtime.StartDownloadLatestServerExe();
+                            var selected = EditorUtility.OpenFilePanel("选择 UPilot MCP 服务文件", "",
+                                UPilotServerRuntimeService.CurrentPlatformFileExtension);
+                            if (!string.IsNullOrWhiteSpace(selected))
+                                _ = SelectLocalSetupExeAsync(selected);
                         }
-                        GUI.backgroundColor = previous;
+                        if (!_setupRuntimeSourceChannel && ManagedRuntimeReady(out _) &&
+                            GUILayout.Button("重新安装", GUILayout.Width(88), GUILayout.Height(30)))
+                            StartSetupManagedDownload(false);
                     }
-
                     using (new EditorGUI.DisabledScope(!state.IsRunning))
                     {
-                        if (GUILayout.Button("取消", GUILayout.Width(64), GUILayout.Height(30)))
-                            runtime.CancelDownload();
-                    }
-
-                    if (GUILayout.Button("选择本地服务文件", GUILayout.Width(128), GUILayout.Height(30)))
-                    {
-                        var selected = EditorUtility.OpenFilePanel(
-                            "选择 UPilot MCP 服务文件",
-                            "",
-                            UPilotServerRuntimeService.CurrentPlatformFileExtension);
-                        if (!string.IsNullOrEmpty(selected) && File.Exists(selected))
+                        if (GUILayout.Button("取消安装", GUILayout.Width(88), GUILayout.Height(30)))
                         {
-                            runtime.SetStandaloneExeRuntime(selected, _setupManifest?.ServerVersion ?? "");
-                            _setupRuntimeChoice = SetupRuntimeChoice.Managed;
+                            ClearSetupRuntimeContinuation();
+                            _setupRuntimeCompletionSucceeded = false;
+                            runtime.CancelDownload();
                         }
                     }
                 }
@@ -186,239 +267,499 @@ namespace CodingRiver.UPilot
 
         private static void DrawManagedServerLocation(UPilotServerRuntimeService runtime)
         {
-            runtime.GetConfiguredStandaloneRuntime(out var exePath, out var serverVersion);
-            var download = runtime.DownloadState;
-            if (string.IsNullOrWhiteSpace(exePath))
+            runtime.GetConfiguredStandaloneRuntime(out var path, out var version);
+            if (string.IsNullOrWhiteSpace(path))
+                EditorGUILayout.LabelField("安装目录", string.IsNullOrWhiteSpace(runtime.RuntimeCacheRoot)
+                    ? "当前系统用户目录不可用" : runtime.RuntimeCacheRoot, EditorStyles.miniLabel);
+            else
             {
-                var cacheRoot = runtime.RuntimeCacheRoot;
-                EditorGUILayout.LabelField(
-                    "自动下载目录",
-                    string.IsNullOrWhiteSpace(cacheRoot) ? "当前系统用户目录不可用" : cacheRoot,
-                    EditorStyles.miniLabel);
-                if (!string.IsNullOrWhiteSpace(download.ErrorMessage))
-                    EditorGUILayout.LabelField("最近安装失败", download.ErrorMessage, EditorStyles.miniLabel);
-                return;
+                EditorGUILayout.LabelField("当前服务版本", string.IsNullOrWhiteSpace(version) ? "未知" : version, EditorStyles.miniLabel);
+                EditorGUILayout.LabelField("当前服务文件", path, EditorStyles.wordWrappedMiniLabel);
             }
+        }
 
-            var version = string.IsNullOrWhiteSpace(serverVersion) ? "未知" : serverVersion;
-            var directory = Path.GetDirectoryName(exePath);
-            EditorGUILayout.LabelField("当前 EXE 版本", version, EditorStyles.miniLabel);
-            EditorGUILayout.LabelField("EXE 下载目录", string.IsNullOrWhiteSpace(directory) ? exePath : directory, EditorStyles.miniLabel);
-            if (!string.IsNullOrWhiteSpace(download.Sha256))
-                EditorGUILayout.LabelField("SHA256 状态", download.IsComplete ? "已验证" : "等待验证", EditorStyles.miniLabel);
-            if (!string.IsNullOrWhiteSpace(download.ErrorMessage))
-                EditorGUILayout.LabelField("最近安装失败", download.ErrorMessage, EditorStyles.miniLabel);
+        private static void DrawSetupRuntimeSuccess(string message)
+        {
+            var previous = GUI.backgroundColor;
+            try
+            {
+                GUI.backgroundColor = SetupReadyColor;
+                EditorGUILayout.HelpBox(message, MessageType.Info);
+            }
+            finally { GUI.backgroundColor = previous; }
         }
 
         private void DrawPythonRuntimeSetup()
         {
-            var sourceChannel = UPilotServerRuntimeService.IsSourceUpdateChannel();
-            if (sourceChannel)
-            {
-                EditorGUILayout.LabelField("使用本机 Python", EditorStyles.boldLabel);
-            }
-            else
-            {
-                _showPythonAdvanced = EditorGUILayout.Foldout(
-                    _showPythonAdvanced,
-                    "高级：使用本机 Python",
-                    true);
-                if (!_showPythonAdvanced)
-                    return;
-            }
-
-            _setupPythonProbe ??= UPilotServerRuntimeService.Instance.ProbePython();
             var runtime = UPilotServerRuntimeService.Instance;
-            var envState = runtime.PythonEnvironmentState;
-
+            var state = runtime.PythonEnvironmentState;
+            EditorGUILayout.HelpBox("Python 开发环境用于开发和调试 UPilot MCP 服务，需要 Python 3.11 或更高版本。", MessageType.Info);
             using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
             {
-                var messageType = _setupPythonProbe.InterpreterUsable ? MessageType.Info : MessageType.Warning;
-                EditorGUILayout.HelpBox(_setupPythonProbe.Message, messageType);
-                try
+                EditorGUILayout.LabelField("Python 开发环境", EditorStyles.boldLabel);
+                using (new EditorGUI.DisabledScope(IsSetupRuntimeBusy()))
                 {
-                    var environmentPath = UPilotServerRuntimeService.GetPythonEnvironmentPath(out var sharingScope);
-                    EditorGUILayout.LabelField(
-                        new GUIContent("Python 环境目录", "自动配置的目标目录；已有 Python 解释器配置保持不变。"),
-                        new GUIContent(environmentPath), EditorStyles.miniLabel);
-                    EditorGUILayout.LabelField("共享范围", sharingScope, EditorStyles.miniLabel);
-                }
-                catch (Exception ex)
-                {
-                    EditorGUILayout.HelpBox("无法确定 Python 自动配置目录：" + ex.Message, MessageType.Warning);
-                }
-                if (!string.IsNullOrWhiteSpace(_setupPythonProbe.PythonPath))
-                    EditorGUILayout.SelectableLabel(
-                        _setupPythonProbe.PythonPath,
-                        EditorStyles.textField,
-                        GUILayout.Height(EditorGUIUtility.singleLineHeight));
-
-                if (_setupPythonProbe.Dependencies.Count > 0)
-                {
-                    foreach (var dependency in _setupPythonProbe.Dependencies)
-                        EditorGUILayout.LabelField(dependency.Key, dependency.Value ? "已安装" : "缺失", EditorStyles.miniLabel);
-                }
-
-                if (envState.IsRunning || envState.IsComplete || !string.IsNullOrEmpty(envState.ErrorMessage))
-                {
-                    var phase = string.IsNullOrWhiteSpace(envState.Phase) ? "准备中" : envState.Phase;
-                    EditorGUI.ProgressBar(
-                        EditorGUILayout.GetControlRect(false, 20),
-                        GetSetupPythonProgress(envState),
-                        phase);
-                    if (!string.IsNullOrEmpty(envState.ErrorMessage))
-                        EditorGUILayout.HelpBox(envState.ErrorMessage, MessageType.Error);
-                }
-
-                using (new EditorGUILayout.HorizontalScope())
-                {
-                    if (GUILayout.Button("重新检测", GUILayout.Width(82), GUILayout.Height(30)))
-                        _setupPythonProbe = runtime.ProbePython();
-
-                    var pythonReady = _setupPythonProbe.IsUsable ||
-                                      runtime.IsPythonRuntimeConfigured(out _);
-                    var pythonLabel = pythonReady
-                        ? "使用本机 Python"
-                        : _setupPythonProbe.InterpreterUsable
-                            ? "配置并使用 Python"
-                            : "需要 Python 3.11+";
-                    var previous = GUI.backgroundColor;
-                    GUI.backgroundColor = pythonReady ? SetupReadyColor : SetupBlockedColor;
-                    using (new EditorGUI.DisabledScope(envState.IsRunning))
+                    var selected = (SetupPythonEnvironmentChoice)GUILayout.Toolbar((int)_setupPythonEnvironmentChoice,
+                        new[] { "自动配置环境", "使用已有环境" });
+                    if (selected != _setupPythonEnvironmentChoice)
                     {
-                        if (GUILayout.Button(pythonLabel, GUILayout.Height(30)))
-                            SelectOrConfigurePythonRuntime();
+                        SelectSetupPythonEnvironment(selected == SetupPythonEnvironmentChoice.Automatic ? "" :
+                            UPilotProjectConfig.Current.runtime?.pythonPath ?? "");
+                        _setupPythonEnvironmentChoice = selected;
+                        BeginRuntimeInspection();
                     }
-                    GUI.backgroundColor = previous;
+                }
 
-                    using (new EditorGUI.DisabledScope(!envState.IsRunning))
+                if (_setupPythonEnvironmentChoice == SetupPythonEnvironmentChoice.Existing)
+                {
+                    using (new EditorGUI.DisabledScope(IsSetupRuntimeBusy()))
                     {
-                        if (GUILayout.Button("取消", GUILayout.Width(64), GUILayout.Height(30)))
+                        var path = EditorGUILayout.TextField("Python 解释器", _setupExistingPythonPath);
+                        if (path != _setupExistingPythonPath)
+                        {
+                            SelectSetupPythonEnvironment(path);
+                            _setupPythonEnvironmentChoice = SetupPythonEnvironmentChoice.Existing;
+                        }
+                        if (GUILayout.Button("选择 Python 解释器", GUILayout.Height(30)))
+                        {
+                            var selected = EditorUtility.OpenFilePanel("选择已有 Python 解释器", "",
+                                Application.platform == RuntimePlatform.WindowsEditor ? "exe" : "");
+                            if (!string.IsNullOrWhiteSpace(selected))
+                                SelectSetupPythonEnvironment(selected);
+                        }
+                    }
+                    EditorGUILayout.HelpBox("仅验证所选解释器的版本、依赖和 pip check；不会切换到其它解释器，也不会修改已有环境。验证失败后，可人工修复环境，再点击验证并继续。", MessageType.Info);
+                    EditorGUILayout.LabelField("版本与依赖", SetupRuntimeReady(out _) ? "验证通过" : "待验证", EditorStyles.miniLabel);
+                }
+                else
+                {
+                    if (!string.IsNullOrWhiteSpace(_setupPythonEnvironmentPath))
+                    {
+                        EditorGUILayout.LabelField("环境目录", _setupPythonEnvironmentPath, EditorStyles.wordWrappedMiniLabel);
+                        EditorGUILayout.LabelField("共享范围", _setupPythonEnvironmentScope, EditorStyles.miniLabel);
+                    }
+                    if (!string.IsNullOrWhiteSpace(_setupPythonEnvironmentPathError))
+                        EditorGUILayout.HelpBox(_setupPythonEnvironmentPathError, MessageType.Error);
+                    else if (_setupPythonProbe != null && _setupPythonProbe.InterpreterUsable)
+                    {
+                        EditorGUILayout.LabelField("基础解释器", _setupPythonProbe.PythonPath, EditorStyles.wordWrappedMiniLabel);
+                        EditorGUILayout.LabelField("解释器版本", _setupPythonProbe.VersionText, EditorStyles.miniLabel);
+                    }
+                    EditorGUILayout.HelpBox("自动创建虚拟环境并安装依赖；已有自动环境先验证，验证失败时保留原文件并提示人工修复。", MessageType.Info);
+                    using (new EditorGUI.DisabledScope(IsSetupRuntimeBusy()))
+                    {
+                        if (GUILayout.Button("重新检测", GUILayout.Height(30)))
+                        {
+                            ClearSetupRuntimeContinuation();
+                            _setupPythonProbe = null;
+                            _setupPythonValidatedPath = "";
+                            _setupPythonEnvironmentPathError = "";
+                            _setupRuntimeError = "";
+                            BeginRuntimeInspection();
+                        }
+                    }
+                    if (state.IsRunning || state.IsComplete || state.IsCancelled || !string.IsNullOrWhiteSpace(state.ErrorMessage))
+                    {
+                        EditorGUI.ProgressBar(EditorGUILayout.GetControlRect(false, 20), GetSetupPythonProgress(state), state.Phase);
+                        if (!string.IsNullOrWhiteSpace(state.ErrorMessage) && state.ErrorMessage != _setupRuntimeError)
+                            EditorGUILayout.HelpBox(state.ErrorMessage, MessageType.Error);
+                    }
+                    using (new EditorGUI.DisabledScope(!state.IsRunning))
+                    {
+                        if (GUILayout.Button("取消配置", GUILayout.Height(30)))
+                        {
+                            ClearSetupRuntimeContinuation();
+                            _setupRuntimeCompletionSucceeded = false;
                             runtime.CancelPythonEnvironmentSetup();
+                        }
                     }
                 }
+                if (SetupRuntimeReady(out var readyMessage))
+                    DrawSetupRuntimeSuccess(readyMessage);
+            }
+        }
+
+        private bool IsSetupRuntimeBusy() => _setupPythonValidationRunning || _setupLocalExeValidationRunning ||
+            UPilotServerRuntimeService.Instance.DownloadState.IsRunning ||
+            UPilotServerRuntimeService.Instance.PythonEnvironmentState.IsRunning;
+
+        internal bool CanContinueFromRuntimeStep(out string reason)
+        {
+            if (IsSetupRuntimeBusy())
+            {
+                reason = "请等待当前安装或验证完成。";
+                return false;
+            }
+            if (_setupRuntimeChoice == SetupRuntimeChoice.Managed)
+            {
+                if (ManagedRuntimeReady(out reason)) return true;
+                if (!string.IsNullOrWhiteSpace(_setupManifestError)) return true;
+                return ManagedSetupDownloadAvailable(out reason);
+            }
+            if (_setupPythonEnvironmentChoice == SetupPythonEnvironmentChoice.Existing)
+            {
+                reason = "请先选择存在的 Python 解释器绝对路径，再验证环境。";
+                return Path.IsPathRooted(_setupExistingPythonPath) && File.Exists(_setupExistingPythonPath);
+            }
+            if (_setupPythonInspectionRunning)
+            {
+                reason = "正在检测 Python 环境…";
+                return false;
+            }
+            if (!string.IsNullOrWhiteSpace(_setupPythonEnvironmentPathError))
+            {
+                reason = "请先解决环境目录问题，再重新检测。";
+                return false;
+            }
+            if ((_setupPythonProbe?.InterpreterUsable ?? false) || HasAutomaticSetupPython())
+            {
+                reason = "";
+                return true;
+            }
+            reason = "未找到可用的 Python 3.11+。请先安装 Python，然后点击重新检测。";
+            return false;
+        }
+
+        private bool HasAutomaticSetupPython() => !string.IsNullOrWhiteSpace(_setupPythonEnvironmentPath) &&
+            File.Exists(Path.Combine(_setupPythonEnvironmentPath,
+                Application.platform == RuntimePlatform.WindowsEditor ? "Scripts/python.exe" : "bin/python"));
+
+        private bool ManagedSetupDownloadAvailable(out string reason)
+        {
+            if (_setupRuntimeSourceChannel)
+            {
+                reason = "当前安装不提供自动下载，请先选择本地服务文件。";
+                return false;
+            }
+            if (_setupManifestLoading || _setupManifest == null)
+            {
+                reason = "正在获取适用于当前平台的服务信息…";
+                return false;
+            }
+            if (!UPilotServerRuntimeService.IsVersionAtLeast(UPilotServerRuntimeService.UpmVersion, _setupManifest.MinCompatibleUpm))
+            {
+                reason = $"请先更新 UPilot 至 {_setupManifest.MinCompatibleUpm} 或更高版本。";
+                return false;
+            }
+            var download = UPilotServerRuntimeService.PickCurrentPlatformDownload(_setupManifest);
+            if (download == null || string.IsNullOrWhiteSpace(download.Sha256))
+            {
+                reason = "当前版本没有适用于此平台且带校验信息的服务文件。";
+                return false;
+            }
+            reason = "";
+            return true;
+        }
+
+        internal void ContinueFromRuntimeStep(Action startDownload = null, Func<UPilotDownloadState> readDownloadState = null)
+        {
+            if (!CanContinueFromRuntimeStep(out _)) return;
+            if (SetupRuntimeReady(out _))
+            {
+                ClearSetupRuntimeContinuation();
+                SetSetupStep(2);
+                return;
+            }
+            if (_setupRuntimeChoice == SetupRuntimeChoice.Python)
+            {
+                if (_setupPythonEnvironmentChoice == SetupPythonEnvironmentChoice.Existing)
+                    _ = SelectExistingSetupPythonAsync(_setupExistingPythonPath, true);
+                else
+                    StartAutomaticSetupPython(true);
+                return;
+            }
+            if (!string.IsNullOrWhiteSpace(_setupManifestError))
+            {
+                ClearSetupRuntimeContinuation();
+                _setupManifest = null;
+                _setupManifestError = "";
+                BeginRuntimeInspection();
+                return;
+            }
+            StartSetupManagedDownload(true, startDownload, readDownloadState);
+        }
+
+        private void StartSetupManagedDownload(bool continueAfter, Action startDownload = null,
+            Func<UPilotDownloadState> readDownloadState = null)
+        {
+            var runtime = UPilotServerRuntimeService.Instance;
+            var readState = readDownloadState ?? (() => runtime.DownloadState);
+            if (IsSetupRuntimeBusy() || readState().IsRunning || !ManagedSetupDownloadAvailable(out _)) return;
+            ClearSetupRuntimeContinuation();
+            _setupRuntimeCompletionSucceeded = false;
+            _setupRuntimeError = "";
+            _setupRuntimeNotice = "";
+            var previousStartedAt = readState().StartedAt;
+            try
+            {
+                (startDownload ?? runtime.StartDownloadLatestServerExe)();
+                var state = readState();
+                if (continueAfter && state.StartedAt > 0 && state.StartedAt != previousStartedAt)
+                {
+                    _setupRuntimeContinuation = SetupRuntimeContinuation.ManagedDownload;
+                    _setupRuntimeOperationStartedAt = state.StartedAt;
+                }
+            }
+            catch (Exception ex)
+            {
+                _setupRuntimeError = ex.Message;
+                Debug.LogError("[UPilot] First setup service installation failed.\nException=" + ex);
+                ClearSetupRuntimeContinuation();
+            }
+        }
+
+        private void StartAutomaticSetupPython(bool continueAfter)
+        {
+            var runtime = UPilotServerRuntimeService.Instance;
+            if (IsSetupRuntimeBusy()) return;
+            ClearSetupRuntimeContinuation();
+            _setupRuntimeCompletionSucceeded = false;
+            _setupPythonValidatedPath = "";
+            _setupRuntimeError = "";
+            _setupRuntimeNotice = "";
+            var previousStartedAt = runtime.PythonEnvironmentState.StartedAt;
+            try
+            {
+                runtime.StartAutoConfigurePythonEnvironment();
+                var state = runtime.PythonEnvironmentState;
+                if (continueAfter && state.StartedAt > 0 && state.StartedAt != previousStartedAt)
+                {
+                    _setupRuntimeContinuation = SetupRuntimeContinuation.PythonEnvironment;
+                    _setupRuntimeOperationStartedAt = state.StartedAt;
+                }
+            }
+            catch (Exception ex)
+            {
+                _setupRuntimeError = ex.Message;
+                Debug.LogError("[UPilot] First setup Python environment configuration failed.\nException=" + ex);
+                ClearSetupRuntimeContinuation();
             }
         }
 
         internal void SelectOrConfigurePythonRuntime(Action<string> selectPython = null)
         {
-            var runtime = UPilotServerRuntimeService.Instance;
-            if (runtime.IsPythonRuntimeConfigured(out var configuredPython))
+            if (_setupPythonEnvironmentChoice == SetupPythonEnvironmentChoice.Existing ||
+                UPilotServerRuntimeService.Instance.IsPythonRuntimeConfigured(out _))
             {
-                (selectPython ?? runtime.SetPythonRuntime)(configuredPython);
-                _setupRuntimeChoice = SetupRuntimeChoice.Python;
-                return;
+                var path = string.IsNullOrWhiteSpace(_setupExistingPythonPath)
+                    ? UPilotProjectConfig.Current.runtime?.pythonPath ?? "" : _setupExistingPythonPath;
+                _ = SelectExistingSetupPythonAsync(path, false,
+                    selectPython == null ? null : config => selectPython(config.runtime.pythonPath));
             }
-
-            if (_setupPythonProbe == null || !_setupPythonProbe.InterpreterUsable)
-            {
-                EditorUtility.DisplayDialog(
-                    "需要 Python 3.11+",
-                    "未找到可用的 Python 3.11 或更高版本。请先安装 Python，然后返回此处重新检测。",
-                    "知道了");
-                return;
-            }
-
-            _setupRuntimeChoice = SetupRuntimeChoice.Python;
-            if (_setupPythonProbe.IsUsable)
-                (selectPython ?? runtime.SetPythonRuntime)(_setupPythonProbe.PythonPath);
-            else
-                runtime.StartAutoConfigurePythonEnvironment();
+            else if (CanContinueFromRuntimeStep(out _))
+                StartAutomaticSetupPython(false);
         }
 
-        private void ContinueFromRuntimeStep()
+        internal async Task SelectExistingSetupPythonAsync(string path, bool continueAfter,
+            Action<UPilotProjectConfigData> save = null, Func<string, Task> validatePython = null)
         {
-            if (SetupRuntimeReady(out _))
+            if (IsSetupRuntimeBusy()) return;
+            SelectSetupPythonEnvironment(path);
+            var generation = _setupRuntimeGeneration;
+            _setupPythonValidationRunning = true;
+            try
             {
-                SetSetupStep(2);
+                await UPilotServerRuntimeService.Instance.ApplyRuntimeSelectionAsync(UPilotServerRuntimeMode.Python,
+                    _setupExistingPythonPath, config =>
+                    {
+                        if (this == null || generation != _setupRuntimeGeneration)
+                            throw new OperationCanceledException("已离开当前环境验证，未保存运行方式。");
+                        (save ?? (value => UPilotProjectConfig.Save(value)))(config);
+                    }, validatePython);
+                if (this == null || generation != _setupRuntimeGeneration) return;
+                _setupPythonValidatedPath = _setupExistingPythonPath;
+                _setupRuntimeNotice = "所选解释器的版本、依赖和 pip check 已通过验证。";
+                if (continueAfter && _mainView == UPilotMainView.Setup && _setupStep == 1)
+                {
+                    if (!SetupRuntimeReady(out var reason))
+                        throw new InvalidOperationException("环境验证完成，但运行配置尚未保存：" + reason);
+                    CompleteSetupRuntimeOperation(true);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                if (this != null && generation == _setupRuntimeGeneration)
+                    _setupRuntimeNotice = "已取消环境验证，未保存运行方式。";
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[UPilot] First setup Python validation failed.\nPath=" + path + "\nException=" + ex);
+                if (this != null && generation == _setupRuntimeGeneration)
+                    _setupRuntimeError = ex.Message;
+            }
+            finally
+            {
+                if (this != null)
+                {
+                    _setupPythonValidationRunning = false;
+                    Repaint();
+                }
+            }
+        }
+
+        internal async Task SelectLocalSetupExeAsync(string path, Action<string, string> save = null,
+            Func<string, string> computeSha256 = null)
+        {
+            if (IsSetupRuntimeBusy()) return;
+            ClearSetupRuntimeContinuation();
+            _setupRuntimeCompletionSucceeded = false;
+            _setupRuntimeError = "";
+            _setupRuntimeNotice = "";
+            _setupLocalExeValidationRunning = true;
+            var generation = _setupRuntimeGeneration;
+            try
+            {
+                path = (path ?? "").Trim();
+                if (!Path.IsPathRooted(path) || !File.Exists(path))
+                    throw new FileNotFoundException("请选择存在的服务文件绝对路径。", path);
+                if (_setupRuntimeSourceChannel)
+                {
+                    await UPilotServerRuntimeService.Instance.ApplyRuntimeSelectionAsync(UPilotServerRuntimeMode.StandaloneExe,
+                        path, config =>
+                        {
+                            if (this == null || generation != _setupRuntimeGeneration)
+                                throw new OperationCanceledException("已离开当前服务选择，未保存运行方式。");
+                            if (save != null) save(config.runtime.serverExePath, config.runtime.serverVersion);
+                            else UPilotProjectConfig.Save(config);
+                        });
+                    _setupRuntimeNotice = "已选择本地服务文件，部署身份将在启动后验证。";
+                }
+                else
+                {
+                    if (!ManagedSetupDownloadAvailable(out var reason))
+                        throw new InvalidOperationException(reason);
+                    var manifest = _setupManifest;
+                    var expected = UPilotServerRuntimeService.PickCurrentPlatformDownload(manifest).Sha256;
+                    var actual = await Task.Run(() => (computeSha256 ?? UPilotServerRuntimeService.ComputeSha256)(path));
+                    if (!string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidOperationException($"本地服务文件 SHA256 与推荐版本不匹配。\nPath={path}\nExpected={expected}\nActual={actual}");
+                    if (this == null || generation != _setupRuntimeGeneration) return;
+                    (save ?? UPilotServerRuntimeService.Instance.SetStandaloneExeRuntime)(path, manifest.ServerVersion);
+                    _setupRuntimeNotice = "本地服务文件已通过推荐版本 SHA256 校验。";
+                }
+                if (this != null && generation == _setupRuntimeGeneration)
+                    _setupRuntimeChoice = SetupRuntimeChoice.Managed;
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex)
+            {
+                Debug.LogError("[UPilot] First setup local service validation failed.\nPath=" + path + "\nException=" + ex);
+                if (this != null && generation == _setupRuntimeGeneration)
+                    _setupRuntimeError = ex.Message;
+            }
+            finally
+            {
+                if (this != null)
+                {
+                    _setupLocalExeValidationRunning = false;
+                    Repaint();
+                }
+            }
+        }
+
+        private void RefreshSetupRuntimeContinuation() => ObserveSetupRuntimeOperation(
+            UPilotServerRuntimeService.Instance.DownloadState, UPilotServerRuntimeService.Instance.PythonEnvironmentState);
+
+        internal void ObserveSetupRuntimeOperation(UPilotDownloadState download, UPilotPythonEnvironmentState python)
+        {
+            if (_setupRuntimeContinuation == SetupRuntimeContinuation.None) return;
+            if (_mainView != UPilotMainView.Setup || _setupStep != 1)
+            {
+                ClearSetupRuntimeContinuation();
                 return;
             }
-
-            if (_setupRuntimeChoice == SetupRuntimeChoice.Python)
+            var isPython = _setupRuntimeContinuation == SetupRuntimeContinuation.PythonEnvironment;
+            if (isPython != (_setupRuntimeChoice == SetupRuntimeChoice.Python) ||
+                (isPython ? python?.StartedAt : download?.StartedAt) != _setupRuntimeOperationStartedAt)
             {
-                _showPythonAdvanced = true;
-                SelectOrConfigurePythonRuntime();
+                ClearSetupRuntimeContinuation();
                 return;
             }
-
-            if (_setupManifestLoading)
-                return;
-            if (!string.IsNullOrWhiteSpace(_setupManifestError))
+            if (isPython ? python.IsRunning : download.IsRunning) return;
+            var error = isPython ? python.ErrorMessage : download.ErrorMessage;
+            var cancelled = isPython ? python.IsCancelled : download.IsCancelled;
+            var complete = isPython ? python.IsComplete : download.IsComplete;
+            if (cancelled || !complete || !string.IsNullOrWhiteSpace(error))
             {
-                _setupManifest = null;
-                BeginRuntimeInspection();
+                _setupRuntimeCompletionSucceeded = false;
+                _setupRuntimeError = error ?? "";
+                _setupRuntimeNotice = cancelled ? "操作已取消，可以重试。" : "";
+                if (!cancelled && !complete && string.IsNullOrWhiteSpace(error))
+                {
+                    _setupRuntimeError = "操作已结束，但安装或配置结果未确认，请重试。";
+                    Debug.LogError("[UPilot] First setup runtime outcome is unconfirmed.\nStartedAt=" +
+                                   _setupRuntimeOperationStartedAt + "\nOperation=" + _setupRuntimeContinuation);
+                }
+                ClearSetupRuntimeContinuation();
                 return;
             }
-
-            if (UPilotServerRuntimeService.IsSourceUpdateChannel())
+            if (isPython)
+                _setupPythonValidatedPath = python.InterpreterPath;
+            if (!SetupRuntimeReady(out var reason))
             {
-                EditorUtility.DisplayDialog("本地运行文件未就绪", "请重新选择本地 EXE，或选择本机 Python。不会自动下载或切换运行方式。", "知道了");
+                _setupRuntimeCompletionSucceeded = false;
+                _setupRuntimeError = "操作已结束，但运行配置尚未验证：" + reason;
+                Debug.LogError("[UPilot] First setup runtime completion could not be verified.\n" + _setupRuntimeError);
+                ClearSetupRuntimeContinuation();
                 return;
             }
-            var version = _setupManifest?.ServerVersion ?? "当前版本";
-            if (!EditorUtility.DisplayDialog(
-                    "安装推荐服务？",
-                    $"当前没有安装与 UPilot 匹配的服务。将下载并安装适用于 {UPilotServerRuntimeService.CurrentPlatformDisplayName} 的 {version} 服务。",
-                    "开始安装",
-                    "取消"))
-                return;
+            CompleteSetupRuntimeOperation(isPython);
+        }
 
-            UPilotServerRuntimeService.Instance.StartDownloadLatestServerExe();
+        private void CompleteSetupRuntimeOperation(bool isPython)
+        {
+            ClearSetupRuntimeContinuation();
+            _setupRuntimeCompletionSucceeded = true;
+            _setupRuntimeError = "";
+            _setupCompletionMessage = isPython ? "Python 开发环境配置完成" : "服务安装完成";
+            _setupCompletionMessageType = MessageType.Info;
+            SetSetupStep(2);
         }
 
         private bool SetupRuntimeReady(out string reason)
         {
-            if (_setupRuntimeChoice == SetupRuntimeChoice.Python)
-            {
-                var ready = UPilotServerRuntimeService.Instance.IsPythonRuntimeConfigured(out _);
-                reason = ready ? "本机 Python 已配置。" : "本机 Python 尚未配置完成。";
-                return ready;
-            }
-
-            return ManagedRuntimeReady(out reason);
+            if (_setupRuntimeChoice != SetupRuntimeChoice.Python)
+                return ManagedRuntimeReady(out reason);
+            var config = UPilotProjectConfig.Current.runtime;
+            var selectedPath = _setupPythonEnvironmentChoice == SetupPythonEnvironmentChoice.Existing
+                ? _setupExistingPythonPath : _setupPythonValidatedPath;
+            var ready = !string.IsNullOrWhiteSpace(_setupPythonValidatedPath) &&
+                        UPilotDeploymentDiagnostics.SamePath(_setupPythonValidatedPath, selectedPath) &&
+                        UPilotDeploymentDiagnostics.SamePath(_setupPythonValidatedPath, config?.pythonPath) &&
+                        UPilotServerRuntimeService.Instance.GetConfiguredMode() == UPilotServerRuntimeMode.Python &&
+                        File.Exists(_setupPythonValidatedPath);
+            reason = ready ? "Python 环境已验证并保存。" : "Python 环境尚未完成验证和保存。";
+            return ready;
         }
 
         private bool ManagedRuntimeReady(out string reason)
         {
-            if (UPilotServerRuntimeService.IsSourceUpdateChannel())
+            var runtime = UPilotServerRuntimeService.Instance;
+            var configured = runtime.GetConfiguredMode() == UPilotServerRuntimeMode.StandaloneExe &&
+                             runtime.IsStandaloneExeConfigured(out _);
+            if (_setupRuntimeSourceChannel)
             {
-                var configured = UPilotServerRuntimeService.Instance.GetConfiguredMode() == UPilotServerRuntimeMode.StandaloneExe &&
-                    UPilotServerRuntimeService.Instance.IsStandaloneExeConfigured(out _);
-                reason = configured ? "已显式配置本地 EXE，部署身份将在启动后验证。" : "请配置本地 EXE 或使用默认 Python。";
+                reason = configured ? "已配置本地服务文件，部署身份将在启动后验证。" : "请先选择本地服务文件。";
                 return configured;
             }
-
             if (_setupManifest == null)
             {
-                reason = _setupManifestLoading ? "正在获取服务信息…" : "尚未获取服务信息。";
+                reason = "尚未获取服务信息。";
                 return false;
             }
-
-            if (!UPilotServerRuntimeService.IsVersionAtLeast(
-                    UPilotServerRuntimeService.UpmVersion,
-                    _setupManifest.MinCompatibleUpm))
+            if (!UPilotServerRuntimeService.IsVersionAtLeast(UPilotServerRuntimeService.UpmVersion, _setupManifest.MinCompatibleUpm))
             {
-                reason = $"当前 UPilot 包版本过低，需要 {_setupManifest.MinCompatibleUpm} 或更高版本。";
+                reason = $"请先更新 UPilot 至 {_setupManifest.MinCompatibleUpm} 或更高版本。";
                 return false;
             }
-
-            var runtime = UPilotServerRuntimeService.Instance;
-            if (runtime.GetConfiguredMode() != UPilotServerRuntimeMode.StandaloneExe ||
-                !runtime.IsStandaloneExeConfigured(out _))
+            var version = UPilotProjectConfig.Current.runtime?.serverVersion ?? "";
+            if (!configured || string.IsNullOrWhiteSpace(version) ||
+                UPilotServerRuntimeService.CompareVersions(version, _setupManifest.ServerVersion) != 0)
             {
-                reason = $"尚未安装适用于 {UPilotServerRuntimeService.CurrentPlatformDisplayName} 的推荐服务。";
+                reason = "尚未安装与当前 UPilot 版本匹配的服务。";
                 return false;
             }
-
-            var configuredVersion = UPilotProjectConfig.Current.runtime?.serverVersion ?? "";
-            if (string.IsNullOrWhiteSpace(configuredVersion) ||
-                UPilotServerRuntimeService.CompareVersions(configuredVersion, _setupManifest.ServerVersion) != 0)
-            {
-                reason = $"当前服务版本 {configuredVersion} 与推荐版本 {_setupManifest.ServerVersion} 不匹配。";
-                return false;
-            }
-
-            reason = $"推荐服务 {_setupManifest.ServerVersion} 已安装并通过验证。";
+            reason = $"已配置匹配的服务版本 {_setupManifest.ServerVersion}。";
             return true;
         }
 

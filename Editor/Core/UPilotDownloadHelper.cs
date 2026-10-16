@@ -29,6 +29,7 @@ namespace CodingRiver.UPilot
         public string RangeProbeDetail = "";
         public long BytesReceived;
         public long TotalBytes;
+        public long MaxSegmentSizeBytes;
         public int ConfiguredSegmentCount;
         public int MaxConcurrentSegmentRequests;
         public int SegmentCount;
@@ -54,6 +55,7 @@ namespace CodingRiver.UPilot
         public string Outcome = "";
         public long BytesReceived;
         public long TotalBytes;
+        public long MaxSegmentSizeBytes;
         public int ConfiguredSegmentCount;
         public int MaxConcurrentSegmentRequests;
         public int SegmentCount;
@@ -73,8 +75,7 @@ namespace CodingRiver.UPilot
 
     internal sealed class UPilotDownloadOptions
     {
-        public int ParallelThresholdBytes = UPilotDownloadHelper.DefaultParallelThresholdBytes;
-        public int SegmentCount = UPilotDownloadHelper.DefaultSegmentCount;
+        public long MaxSegmentSizeBytes = UPilotDownloadHelper.DefaultMaxSegmentSizeBytes;
         public int MaxConcurrentSegmentRequests = UPilotDownloadHelper.DefaultMaxConcurrentSegmentRequests;
         public int SegmentRetryCount = UPilotDownloadHelper.DefaultSegmentRetryCount;
         public int BufferSize = UPilotDownloadHelper.DefaultBufferSize;
@@ -83,9 +84,8 @@ namespace CodingRiver.UPilot
 
     internal static class UPilotDownloadHelper
     {
-        internal const int DefaultParallelThresholdBytes = 8 * 1024 * 1024;
-        internal const int DefaultSegmentCount = 12;
-        internal const int DefaultMaxConcurrentSegmentRequests = 5;
+        internal const long DefaultMaxSegmentSizeBytes = 512 * 1024;
+        internal const int DefaultMaxConcurrentSegmentRequests = 8;
         internal const int DefaultSegmentRetryCount = 2;
         internal const int DefaultBufferSize = 128 * 1024;
 
@@ -116,6 +116,7 @@ namespace CodingRiver.UPilot
                 PlatformDisplayName = source.PlatformDisplayName,
                 BytesReceived = source.BytesReceived,
                 TotalBytes = source.TotalBytes,
+                MaxSegmentSizeBytes = source.MaxSegmentSizeBytes,
                 SegmentCount = source.SegmentCount,
                 CompletedSegments = source.CompletedSegments,
                 ActiveSegmentRequests = source.ActiveSegmentRequests,
@@ -197,7 +198,19 @@ namespace CodingRiver.UPilot
                 throw new ArgumentOutOfRangeException(nameof(expectedBytes));
             if (!IsSha256(expectedSha256))
                 throw new ArgumentException("Expected SHA-256 must contain 64 hexadecimal characters.", nameof(expectedSha256));
+            if (options == null)
+                throw new ArgumentNullException(nameof(options));
+            options = new UPilotDownloadOptions
+            {
+                MaxSegmentSizeBytes = options.MaxSegmentSizeBytes,
+                MaxConcurrentSegmentRequests = options.MaxConcurrentSegmentRequests,
+                SegmentRetryCount = options.SegmentRetryCount,
+                BufferSize = options.BufferSize,
+                RetryDelayMilliseconds = options.RetryDelayMilliseconds,
+            };
             ValidateOptions(options);
+            // Validate the complete plan before starting a thread or issuing a request.
+            CalculateSegmentCount(expectedBytes, options.MaxSegmentSizeBytes);
 
             var completion = new TaskCompletionSource<DownloadResult>(TaskCreationOptions.RunContinuationsAsynchronously);
             var sessionNumber = Interlocked.Increment(ref _sessionSequence);
@@ -321,7 +334,7 @@ namespace CodingRiver.UPilot
                 cancellationToken.ThrowIfCancellationRequested();
                 session.SetPhase("probing_ranges");
                 session.TransferStopwatch.Start();
-                var useSegments = session.ExpectedBytes >= session.Options.ParallelThresholdBytes &&
+                var useSegments = session.ExpectedBytes > session.Options.MaxSegmentSizeBytes &&
                                   await SupportsRangeDownloadAsync(session, http, url, cancellationToken);
                 session.CheckThread("range probe continuation");
                 if (session.RangeProbeOutcome.Length != 0) session.Report();
@@ -358,7 +371,7 @@ namespace CodingRiver.UPilot
             try
             {
                 session.CheckThread("cleanup start");
-                CleanupSegmentFiles(targetPath, session.Options.SegmentCount);
+                CleanupSegmentFiles(targetPath);
                 session.CheckThread("cleanup complete");
             }
             catch (Exception ex)
@@ -451,7 +464,7 @@ namespace CodingRiver.UPilot
             string targetPath, CancellationToken token)
         {
             session.CheckThread("segments start");
-            var count = (int)Math.Min(session.Options.SegmentCount, session.ExpectedBytes);
+            var count = session.ConfiguredSegmentCount;
             session.SegmentCount = count;
             session.SetPhase("downloading");
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(token);
@@ -519,6 +532,7 @@ namespace CodingRiver.UPilot
                     session.CheckThread("segment slot acquired");
                     try
                     {
+                        linked.Token.ThrowIfCancellationRequested();
                         DeleteIfExists(path);
                         using var request = new HttpRequestMessage(HttpMethod.Get, url);
                         request.Headers.Range = new RangeHeaderValue(start, end);
@@ -624,9 +638,34 @@ namespace CodingRiver.UPilot
                 FileOptions.Asynchronous | FileOptions.SequentialScan);
         }
 
-        internal static void CleanupSegmentFiles(string targetPath, int count)
+        internal static int CalculateSegmentCount(long expectedBytes, long maxSegmentSizeBytes)
         {
-            for (var index = 0; index < count; index++) DeleteIfExists(targetPath + ".part" + index);
+            if (expectedBytes <= 0) throw new ArgumentOutOfRangeException(nameof(expectedBytes));
+            if (maxSegmentSizeBytes <= 0) throw new ArgumentOutOfRangeException(nameof(maxSegmentSizeBytes));
+            var count = expectedBytes / maxSegmentSizeBytes;
+            if (expectedBytes % maxSegmentSizeBytes != 0) count++;
+            return checked((int)count);
+        }
+
+        internal static void CleanupSegmentFiles(string targetPath)
+        {
+            var fullPath = Path.GetFullPath(targetPath);
+            var directory = Path.GetDirectoryName(fullPath);
+            if (!Directory.Exists(directory)) return;
+            var prefix = Path.GetFileName(fullPath) + ".part";
+            foreach (var path in Directory.EnumerateFiles(directory))
+            {
+                var name = Path.GetFileName(path);
+                if (!name.StartsWith(prefix, StringComparison.Ordinal) || name.Length == prefix.Length) continue;
+                var isSegment = true;
+                for (var index = prefix.Length; index < name.Length; index++)
+                {
+                    if (name[index] >= '0' && name[index] <= '9') continue;
+                    isSegment = false;
+                    break;
+                }
+                if (isSegment) DeleteIfExists(path);
+            }
         }
 
         private static void DeleteIfExists(string path)
@@ -646,7 +685,7 @@ namespace CodingRiver.UPilot
         private static void ValidateOptions(UPilotDownloadOptions options)
         {
             if (options == null) throw new ArgumentNullException(nameof(options));
-            if (options.ParallelThresholdBytes <= 0 || options.SegmentCount <= 0 ||
+            if (options.MaxSegmentSizeBytes <= 0 ||
                 options.MaxConcurrentSegmentRequests <= 0 ||
                 options.SegmentRetryCount < 0 || options.BufferSize <= 0 || options.RetryDelayMilliseconds < 0)
                 throw new ArgumentOutOfRangeException(nameof(options));
@@ -666,7 +705,7 @@ namespace CodingRiver.UPilot
                 DedicatedThreadId = Thread.CurrentThread.ManagedThreadId;
                 ExpectedBytes = expectedBytes;
                 Options = options;
-                ConfiguredSegmentCount = options.SegmentCount;
+                ConfiguredSegmentCount = CalculateSegmentCount(expectedBytes, options.MaxSegmentSizeBytes);
                 MaxConcurrentSegmentRequests = options.MaxConcurrentSegmentRequests;
                 TotalBytes = expectedBytes;
                 _reportProgress = reportProgress;
@@ -755,6 +794,7 @@ namespace CodingRiver.UPilot
                 {
                     Success = IsComplete && Outcome == "success", Outcome = Outcome,
                     BytesReceived = BytesReceived, TotalBytes = TotalBytes,
+                    MaxSegmentSizeBytes = Options.MaxSegmentSizeBytes,
                     ConfiguredSegmentCount = ConfiguredSegmentCount,
                     MaxConcurrentSegmentRequests = MaxConcurrentSegmentRequests, SegmentCount = SegmentCount,
                     CompletedSegments = CompletedSegments, ActiveSegmentRequests = ActiveSegmentRequests,
@@ -779,6 +819,7 @@ namespace CodingRiver.UPilot
                     Phase = Phase, Outcome = Outcome, ErrorMessage = ErrorMessage,
                     RangeProbeOutcome = RangeProbeOutcome, RangeProbeDetail = RangeProbeDetail,
                     BytesReceived = BytesReceived, TotalBytes = TotalBytes,
+                    MaxSegmentSizeBytes = Options.MaxSegmentSizeBytes,
                     ConfiguredSegmentCount = ConfiguredSegmentCount,
                     MaxConcurrentSegmentRequests = MaxConcurrentSegmentRequests, SegmentCount = SegmentCount,
                     CompletedSegments = CompletedSegments, ActiveSegmentRequests = ActiveSegmentRequests,

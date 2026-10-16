@@ -36,12 +36,59 @@ namespace CodingRiver.UPilot.Tests
             if (Directory.Exists(_directory)) Directory.Delete(_directory, true);
         }
 
-        [Test, Timeout(15000)]
-        public async Task TwelveSegmentsUseAtMostFiveRequestsOnOneThread()
+        [Test]
+        public void DefaultOptionsUse512KiBSegmentsAndEightConcurrentRequests()
         {
-            var bytes = Encoding.UTF8.GetBytes("thirteen unequal parts of a download");
+            var options = new UPilotDownloadOptions();
+            Assert.That(options.MaxSegmentSizeBytes, Is.EqualTo(512 * 1024));
+            Assert.That(options.MaxConcurrentSegmentRequests, Is.EqualTo(8));
+        }
+
+        [TestCase(1L, 524288L, 1)]
+        [TestCase(524288L, 524288L, 1)]
+        [TestCase(524289L, 524288L, 2)]
+        [TestCase(1048576L, 524288L, 2)]
+        [TestCase(26942250L, 524288L, 52)]
+        [TestCase(long.MaxValue, long.MaxValue, 1)]
+        [TestCase(long.MaxValue, long.MaxValue - 1, 2)]
+        [TestCase(2147483647L, 1L, int.MaxValue)]
+        public void SegmentCountRoundsUpWithoutOverflow(long bytes, long limit, int expected)
+        {
+            Assert.That(UPilotDownloadHelper.CalculateSegmentCount(bytes, limit), Is.EqualTo(expected));
+        }
+
+        [TestCase(0L, 1L)]
+        [TestCase(-1L, 1L)]
+        [TestCase(1L, 0L)]
+        [TestCase(1L, -1L)]
+        public void SegmentCountRejectsNonpositiveSizes(long bytes, long limit)
+        {
+            Assert.Throws<ArgumentOutOfRangeException>(() => UPilotDownloadHelper.CalculateSegmentCount(bytes, limit));
+        }
+
+        [Test]
+        public void UnrepresentableSegmentCountFailsBeforeAnyNetworkRequest()
+        {
+            var issued = 0;
+            using var handler = new Handler((request, token) =>
+            {
+                Interlocked.Increment(ref issued);
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK));
+            });
+            using var http = new HttpClient(handler);
+            Assert.Throws<OverflowException>(() => UPilotDownloadHelper.DownloadAsync(http, Url, Target,
+                2147483648L, new string('0', 64), null, CancellationToken.None,
+                new UPilotDownloadOptions { MaxSegmentSizeBytes = 1 }));
+            Assert.That(issued, Is.Zero);
+            Assert.That(File.Exists(Target), Is.False);
+        }
+
+        [Test, Timeout(15000)]
+        public async Task SixteenSegmentsUseAtMostEightRequestsOnOneThread()
+        {
+            var bytes = Enumerable.Range(0, 64).Select(index => (byte)index).ToArray();
             var mainThread = Thread.CurrentThread.ManagedThreadId;
-            var reachedFive = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var reachedEight = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var issued = 0;
             var active = 0;
@@ -50,7 +97,7 @@ namespace CodingRiver.UPilot.Tests
                 var range = request.Headers.Range?.Ranges.Single();
                 if (range?.From == 0 && range.To == 0) return Segment(bytes, 0, 0);
                 Interlocked.Increment(ref issued);
-                if (Interlocked.Increment(ref active) == 5) reachedFive.TrySetResult(true);
+                if (Interlocked.Increment(ref active) == 8) reachedEight.TrySetResult(true);
                 try
                 {
                     await release.Task;
@@ -59,41 +106,41 @@ namespace CodingRiver.UPilot.Tests
                 finally { Interlocked.Decrement(ref active); }
             });
             using var http = new HttpClient(handler);
-            var options = new UPilotDownloadOptions { ParallelThresholdBytes = 1, BufferSize = 3 };
-            Assert.That(options.SegmentCount, Is.EqualTo(12));
-            Assert.That(options.MaxConcurrentSegmentRequests, Is.EqualTo(5));
+            var options = new UPilotDownloadOptions { MaxSegmentSizeBytes = 4, BufferSize = 3 };
             DownloadProgress last = null;
-            var reportedFive = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var reportedEight = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var maxReportedActive = 0;
             var download = UPilotDownloadHelper.DownloadAsync(http, Url, Target, bytes.Length, Hash(bytes),
                 p =>
                 {
                     last = p;
                     maxReportedActive = Math.Max(maxReportedActive, p.ActiveSegmentRequests);
-                    if (p.ActiveSegmentRequests == 5)
-                        reportedFive.TrySetResult(true);
+                    if (p.ActiveSegmentRequests == 8)
+                        reportedEight.TrySetResult(true);
                 }, CancellationToken.None, options);
-            await Bounded(reachedFive.Task);
-            await Bounded(reportedFive.Task);
-            Assert.That(issued, Is.EqualTo(5), "Seven queued slices must not start a network request yet.");
+            await Bounded(reachedEight.Task);
+            await Bounded(reportedEight.Task);
+            Assert.That(issued, Is.EqualTo(8), "Eight queued slices must not start a network request yet.");
             Assert.That(download.IsCompleted, Is.False);
             release.TrySetResult(true);
             var result = await Bounded(download);
             await AssertExited(result.DedicatedThread);
             Assert.That(Thread.CurrentThread.ManagedThreadId, Is.EqualTo(mainThread));
-            Assert.That(issued, Is.EqualTo(12));
+            Assert.That(issued, Is.EqualTo(16));
             Assert.That(last.RangeProbeOutcome, Is.EqualTo("supported"));
             Assert.That(last.RangeProbeDetail, Does.Contain("HTTP 206"));
             LogAssert.Expect(LogType.Log, new System.Text.RegularExpressions.Regex("Range 探测成功.*分片下载"));
             UPilotServerRuntimeService.LogRangeProbeOutcome(last);
-            Assert.That(result.ConfiguredSegmentCount, Is.EqualTo(12));
-            Assert.That(result.MaxConcurrentSegmentRequests, Is.EqualTo(5));
-            Assert.That(result.SegmentCount, Is.EqualTo(12));
-            Assert.That(result.CompletedSegments, Is.EqualTo(12));
-            Assert.That(maxReportedActive, Is.EqualTo(5));
+            Assert.That(result.MaxSegmentSizeBytes, Is.EqualTo(4));
+            Assert.That(last.MaxSegmentSizeBytes, Is.EqualTo(4));
+            Assert.That(result.ConfiguredSegmentCount, Is.EqualTo(16));
+            Assert.That(result.MaxConcurrentSegmentRequests, Is.EqualTo(8));
+            Assert.That(result.SegmentCount, Is.EqualTo(16));
+            Assert.That(result.CompletedSegments, Is.EqualTo(16));
+            Assert.That(maxReportedActive, Is.EqualTo(8));
             Assert.That(last.ActiveSegmentRequests, Is.Zero);
             Assert.That(result.ActiveSegmentRequests, Is.Zero);
-            Assert.That(result.PeakConcurrentSegmentRequests, Is.EqualTo(5));
+            Assert.That(result.PeakConcurrentSegmentRequests, Is.EqualTo(8));
             Assert.That(result.ObservedOwnedThreadCount, Is.EqualTo(1));
             Assert.That(result.ThreadConstraintViolationCount, Is.Zero);
             Assert.That(File.ReadAllBytes(Target), Is.EqualTo(bytes));
@@ -101,10 +148,10 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test, Timeout(15000)]
-        public async Task CancelWhileSevenSlicesWaitForSlotsSettlesAndCleansUp()
+        public async Task CancelWhileEightSlicesWaitForSlotsSettlesAndCleansUp()
         {
-            var bytes = Encoding.UTF8.GetBytes("cancel twelve parallel ranges");
-            var reachedFive = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var bytes = Enumerable.Range(0, 64).Select(index => (byte)index).ToArray();
+            var reachedEight = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var issued = 0;
             DownloadProgress last = null;
             using var cts = new CancellationTokenSource();
@@ -112,31 +159,147 @@ namespace CodingRiver.UPilot.Tests
             {
                 var range = request.Headers.Range?.Ranges.Single();
                 if (range?.From == 0 && range.To == 0) return Segment(bytes, 0, 0);
-                if (Interlocked.Increment(ref issued) == 5) reachedFive.TrySetResult(true);
+                if (Interlocked.Increment(ref issued) == 8) reachedEight.TrySetResult(true);
                 await Task.Delay(Timeout.Infinite, token);
                 return Segment(bytes, range.From.Value, range.To.Value);
             });
             using var http = new HttpClient(handler);
             var download = UPilotDownloadHelper.DownloadAsync(http, Url, Target, bytes.Length, Hash(bytes),
-                p => last = p, cts.Token, new UPilotDownloadOptions { ParallelThresholdBytes = 1 });
-            await Bounded(reachedFive.Task);
-            Assert.That(issued, Is.EqualTo(5));
+                p => last = p, cts.Token, new UPilotDownloadOptions { MaxSegmentSizeBytes = 4 });
+            await Bounded(reachedEight.Task);
+            Assert.That(issued, Is.EqualTo(8));
             cts.Cancel();
             try { await Bounded(download); Assert.Fail("Cancellation should propagate."); }
             catch (OperationCanceledException) { }
-            Assert.That(issued, Is.EqualTo(5));
+            Assert.That(issued, Is.EqualTo(8));
             Assert.That(last.Outcome, Is.EqualTo("cancelled"));
             Assert.That(last.ActiveSegmentRequests, Is.Zero);
-            Assert.That(last.PeakConcurrentSegmentRequests, Is.EqualTo(5));
+            Assert.That(last.PeakConcurrentSegmentRequests, Is.EqualTo(8));
             Assert.That(last.ThreadConstraintViolationCount, Is.Zero);
             await AssertExited(last.DedicatedThread);
+            AssertNoParts();
+        }
+
+        [TestCase(12, 3)]
+        [TestCase(11, 3)]
+        [TestCase(10, 4)]
+        [Timeout(15000)]
+        public async Task AutomaticRangesCoverFileExactlyWithinConfiguredLimit(int length, int limit)
+        {
+            var bytes = Enumerable.Range(0, length).Select(index => (byte)index).ToArray();
+            var ranges = new List<(long Start, long End)>();
+            using var handler = new Handler((request, token) =>
+            {
+                var range = request.Headers.Range.Ranges.Single();
+                if (range.From != 0 || range.To != 0)
+                    ranges.Add((range.From.Value, range.To.Value));
+                return Task.FromResult(Segment(bytes, range.From.Value, range.To.Value));
+            });
+            using var http = new HttpClient(handler);
+            var result = await Bounded(UPilotDownloadHelper.DownloadAsync(http, Url, Target, bytes.Length,
+                Hash(bytes), null, CancellationToken.None, new UPilotDownloadOptions { MaxSegmentSizeBytes = limit }));
+            await AssertExited(result.DedicatedThread);
+            var count = UPilotDownloadHelper.CalculateSegmentCount(bytes.Length, limit);
+            Assert.That(result.ConfiguredSegmentCount, Is.EqualTo(count));
+            Assert.That(result.SegmentCount, Is.EqualTo(count));
+            Assert.That(result.CompletedSegments, Is.EqualTo(count));
+            Assert.That(ranges.Count, Is.EqualTo(count));
+            long nextStart = 0;
+            foreach (var range in ranges.OrderBy(range => range.Start))
+            {
+                Assert.That(range.Start, Is.EqualTo(nextStart));
+                Assert.That(range.End - range.Start + 1, Is.InRange(1L, (long)limit));
+                nextStart = range.End + 1;
+            }
+            Assert.That(nextStart, Is.EqualTo(bytes.Length));
+            Assert.That(File.ReadAllBytes(Target), Is.EqualTo(bytes));
+            AssertNoParts();
+        }
+
+        [TestCase(7)]
+        [TestCase(8)]
+        [Timeout(15000)]
+        public async Task FileWithinSegmentLimitUsesSingleStreamWithoutRangeProbe(int length)
+        {
+            var bytes = Enumerable.Range(0, length).Select(index => (byte)index).ToArray();
+            var issued = 0;
+            var rangeRequests = 0;
+            DownloadProgress last = null;
+            using var handler = new Handler((request, token) =>
+            {
+                Interlocked.Increment(ref issued);
+                if (request.Headers.Range != null) Interlocked.Increment(ref rangeRequests);
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) });
+            });
+            using var http = new HttpClient(handler);
+            var result = await Bounded(UPilotDownloadHelper.DownloadAsync(http, Url, Target, bytes.Length,
+                Hash(bytes), progress => last = progress, CancellationToken.None,
+                new UPilotDownloadOptions { MaxSegmentSizeBytes = 8 }));
+            await AssertExited(result.DedicatedThread);
+            Assert.That(issued, Is.EqualTo(1));
+            Assert.That(rangeRequests, Is.Zero);
+            Assert.That(last.RangeProbeOutcome, Is.Empty);
+            Assert.That(result.ConfiguredSegmentCount, Is.EqualTo(1));
+            Assert.That(result.SegmentCount, Is.EqualTo(1));
+            Assert.That(result.CompletedSegments, Is.EqualTo(1));
+            Assert.That(File.ReadAllBytes(Target), Is.EqualTo(bytes));
+        }
+
+        [Test, Timeout(15000)]
+        public async Task OptionsAreFrozenForCurrentDownloadAndReReadForNextDownload()
+        {
+            var bytes = Enumerable.Range(0, 16).Select(index => (byte)index).ToArray();
+            var probeStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseProbe = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var handler = new Handler(async (request, token) =>
+            {
+                var range = request.Headers.Range.Ranges.Single();
+                if (range.From == 0 && range.To == 0)
+                {
+                    probeStarted.TrySetResult(true);
+                    await releaseProbe.Task;
+                }
+                return Segment(bytes, range.From.Value, range.To.Value);
+            });
+            using var http = new HttpClient(handler);
+            var options = new UPilotDownloadOptions
+            {
+                MaxSegmentSizeBytes = 4,
+                MaxConcurrentSegmentRequests = 2,
+                BufferSize = 3,
+                SegmentRetryCount = 0,
+            };
+            var firstDownload = UPilotDownloadHelper.DownloadAsync(http, Url, Target, bytes.Length,
+                Hash(bytes), null, CancellationToken.None, options);
+            await Bounded(probeStarted.Task);
+            options.MaxSegmentSizeBytes = 8;
+            options.MaxConcurrentSegmentRequests = 1;
+            options.BufferSize = 7;
+            releaseProbe.TrySetResult(true);
+            var first = await Bounded(firstDownload);
+            await AssertExited(first.DedicatedThread);
+            Assert.That(first.MaxSegmentSizeBytes, Is.EqualTo(4));
+            Assert.That(first.MaxConcurrentSegmentRequests, Is.EqualTo(2));
+            Assert.That(first.ConfiguredSegmentCount, Is.EqualTo(4));
+            Assert.That(first.SegmentCount, Is.EqualTo(4));
+            Assert.That(File.ReadAllBytes(Target), Is.EqualTo(bytes));
+
+            var secondPath = Path.Combine(_directory, "second.bin");
+            var second = await Bounded(UPilotDownloadHelper.DownloadAsync(http, Url, secondPath, bytes.Length,
+                Hash(bytes), null, CancellationToken.None, options));
+            await AssertExited(second.DedicatedThread);
+            Assert.That(second.MaxSegmentSizeBytes, Is.EqualTo(8));
+            Assert.That(second.MaxConcurrentSegmentRequests, Is.EqualTo(1));
+            Assert.That(second.ConfiguredSegmentCount, Is.EqualTo(2));
+            Assert.That(second.SegmentCount, Is.EqualTo(2));
+            Assert.That(File.ReadAllBytes(secondPath), Is.EqualTo(bytes));
             AssertNoParts();
         }
 
         [Test, Timeout(15000)]
         public async Task FourRequestsOverlapAndCompleteOnOneDedicatedThread()
         {
-            var bytes = Encoding.UTF8.GetBytes("eleven bytes!");
+            var bytes = Encoding.UTF8.GetBytes("123456789AB");
             var mainThread = Thread.CurrentThread.ManagedThreadId;
             var reached = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -200,6 +363,7 @@ namespace CodingRiver.UPilot.Tests
             LogAssert.Expect(LogType.Warning, new System.Text.RegularExpressions.Regex(
                 "Range 探测未通过.*已降级"));
             UPilotServerRuntimeService.LogRangeProbeOutcome(last);
+            Assert.That(result.ConfiguredSegmentCount, Is.EqualTo(5));
             Assert.That(result.SegmentCount, Is.EqualTo(1));
             Assert.That(result.CompletedSegments, Is.EqualTo(1));
             Assert.That(maxActive, Is.EqualTo(1));
@@ -279,7 +443,7 @@ namespace CodingRiver.UPilot.Tests
         [Test, Timeout(15000)]
         public async Task CancellationWaitsForChildrenCleansFilesAndExitsThread()
         {
-            var bytes = Encoding.UTF8.GetBytes("cancel me now");
+            var bytes = Encoding.UTF8.GetBytes("cancel range");
             var reached = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var requests = 0;
             DownloadProgress last = null;
@@ -362,6 +526,28 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(second.Success, Is.True);
         }
 
+        [Test]
+        public void CleanupRemovesAllNumericPartsAndPreservesNeighborFiles()
+        {
+            var parts = new[] { ".part0", ".part12", ".part999", ".part0007", ".part999999999999999999999" };
+            var neighbors = new[] { "", ".part", ".part1.backup", ".part-1", ".part\u0661", ".part\uff11", ".part1a", ".other.part1" };
+            foreach (var suffix in parts) File.WriteAllText(Target + suffix, "old segment");
+            foreach (var suffix in neighbors) File.WriteAllText(Target + suffix, "preserve");
+            var otherFile = Path.Combine(_directory, "other.bin.part1");
+            File.WriteAllText(otherFile, "preserve");
+            var segmentDirectory = Target + ".part77";
+            Directory.CreateDirectory(segmentDirectory);
+            var nestedPart = Path.Combine(segmentDirectory, Path.GetFileName(Target) + ".part1");
+            File.WriteAllText(nestedPart, "preserve");
+
+            UPilotDownloadHelper.CleanupSegmentFiles(Target);
+
+            foreach (var suffix in parts) Assert.That(File.Exists(Target + suffix), Is.False, suffix);
+            foreach (var suffix in neighbors) Assert.That(File.ReadAllText(Target + suffix), Is.EqualTo("preserve"), suffix);
+            Assert.That(File.ReadAllText(otherFile), Is.EqualTo("preserve"));
+            Assert.That(File.ReadAllText(nestedPart), Is.EqualTo("preserve"));
+        }
+
         private void AssertNoParts()
         {
             Assert.That(Directory.GetFiles(_directory, "*.part*"), Is.Empty);
@@ -369,8 +555,7 @@ namespace CodingRiver.UPilot.Tests
 
         private static UPilotDownloadOptions SegmentedOptions() => new UPilotDownloadOptions
         {
-            ParallelThresholdBytes = 1,
-            SegmentCount = 4,
+            MaxSegmentSizeBytes = 3,
             MaxConcurrentSegmentRequests = 4,
             SegmentRetryCount = 2,
             RetryDelayMilliseconds = 1,

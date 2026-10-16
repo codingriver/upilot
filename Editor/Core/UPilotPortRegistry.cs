@@ -82,8 +82,46 @@ namespace CodingRiver.UPilot
             }
         }
 
-        internal (int wsPort, int httpPort) Recommend(string project, int ws, int http, int attempts) =>
-            UPilotPortAllocator.FindAvailablePair(ws, http, attempts, _available);
+        internal (int wsPort, int httpPort) Recommend(string project, int ws, int http, int attempts,
+            IEnumerable<int> excluded = null)
+        {
+            var registered = ReadRegisteredPorts();
+            if (excluded != null) registered.UnionWith(excluded);
+            return UPilotPortAllocator.FindAvailablePair(ws, http, attempts, _available, registered, wrap: true);
+        }
+
+        // Registration remains advisory for manual configuration, but recommendations must avoid it.
+        private HashSet<int> ReadRegisteredPorts()
+        {
+            var value = _readRegistration(_prefsKey) ?? throw new InvalidDataException("端口登记读取结果为空。");
+            var ports = new HashSet<int>();
+            foreach (var line in value.Split('\n'))
+            {
+                var entry = line.Trim();
+                if (entry.Length == 0) continue;
+                var fields = entry.Split(':');
+                if (fields.Length != 3 || string.IsNullOrWhiteSpace(fields[0]) ||
+                    !int.TryParse(fields[1], out var ws) || !int.TryParse(fields[2], out var http))
+                    throw new InvalidDataException($"端口登记格式损坏：registry={_prefsKey}；请检查或清除端口登记。");
+                ValidatePorts(ws, http);
+                ports.Add(ws);
+                ports.Add(http);
+            }
+            return ports;
+        }
+
+        internal void ValidateRecommendation(int ws, int http)
+        {
+            ValidatePorts(ws, http);
+            var registered = ReadRegisteredPorts();
+            foreach (var port in new[] { ws, http })
+            {
+                if (registered.Contains(port))
+                    throw new IOException($"推荐端口 {port} 已被登记，请重新推荐。");
+                if (!_available(port))
+                    throw new IOException($"推荐端口 {port} 当前不可绑定，请重新推荐。");
+            }
+        }
 
         // Only the actual project configuration and bind probes can block saving or startup.
         internal static UPilotProjectConfigData ValidateConfig(string project, UPilotProjectConfigData requested = null,

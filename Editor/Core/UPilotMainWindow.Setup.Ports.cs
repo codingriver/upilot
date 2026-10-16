@@ -4,6 +4,7 @@
 // -----------------------------------------------------------------------
 
 using System;
+using System.Collections.Generic;
 using UnityEditor;
 using UnityEngine;
 
@@ -12,6 +13,8 @@ namespace CodingRiver.UPilot
     public sealed partial class UPilotMainWindow
     {
         private double _nextSetupPortCheckAt;
+        private readonly HashSet<int> _usedSetupPorts = new HashSet<int>();
+        private (int wsPort, int httpPort)? _selectedSetupRecommendation;
 
         private void DrawSetupPortStep()
         {
@@ -24,10 +27,16 @@ namespace CodingRiver.UPilot
             {
                 EditorGUI.BeginChangeCheck();
                 _setupHost = EditorGUILayout.TextField("Host", _setupHost);
+                var previousWs = _setupWsPort;
+                var previousHttp = _setupHttpPort;
                 _setupWsPort = EditorGUILayout.IntField("Unity Bridge WS 端口", _setupWsPort);
                 _setupHttpPort = EditorGUILayout.IntField(McpPortLabel, _setupHttpPort);
                 if (EditorGUI.EndChangeCheck())
+                {
+                    if (_setupWsPort != previousWs || _setupHttpPort != previousHttp)
+                        _selectedSetupRecommendation = null;
                     EvaluateSetupPorts();
+                }
 
                 if (!string.IsNullOrEmpty(_setupPortMessage))
                     EditorGUILayout.HelpBox(_setupPortMessage, _setupPortMessageType);
@@ -41,15 +50,13 @@ namespace CodingRiver.UPilot
                     if (GUILayout.Button("清除端口登记", GUILayout.Height(26)))
                         UPilotPortRegistry.ForUser().Clear();
 
-                    using (new EditorGUI.DisabledScope(_setupPortsReady || _recommendedWsPort <= 0 || _recommendedHttpPort <= 0))
-                    {
-                        if (GUILayout.Button("使用推荐端口", GUILayout.Height(26)))
-                            ApplyRecommendedSetupPorts();
-                    }
+                    if (GUILayout.Button("使用推荐端口", GUILayout.Height(26)))
+                        ApplyRecommendedSetupPorts();
                 }
             }
 
             EditorGUILayout.LabelField("端口登记仅供参考；清除不修改工程端口，不影响运行中的服务。", EditorStyles.miniLabel);
+            EditorGUILayout.LabelField("推荐会避开已登记端口；点击下一步保存。", EditorStyles.miniLabel);
             EditorGUILayout.Space(12);
             using (new EditorGUILayout.HorizontalScope())
             {
@@ -144,20 +151,22 @@ namespace CodingRiver.UPilot
             return problem;
         }
 
-        private void FindRecommendedSetupPorts()
+        private static int NextSetupPort(int port, int fallback) =>
+            port > 0 && port <= 65535 ? port == 65535 ? 1 : port + 1 : fallback;
+
+        private bool FindRecommendedSetupPorts(UPilotPortRegistry registry = null)
         {
-            var startWs = _setupWsPort > 0 && _setupWsPort <= 65535
-                ? _setupWsPort
-                : UPilotBridge.DefaultWsPort;
-            var startHttp = _setupHttpPort > 0 && _setupHttpPort <= 65535
-                ? _setupHttpPort
-                : UPilotBridge.DefaultHttpPort;
+            var startWs = NextSetupPort(_setupWsPort, UPilotBridge.DefaultWsPort);
+            var startHttp = NextSetupPort(_setupHttpPort, UPilotBridge.DefaultHttpPort);
             try
             {
-                var pair = UPilotPortAllocator.FindAvailablePair(startWs, startHttp);
+                var excluded = new HashSet<int>(_usedSetupPorts) { _setupWsPort, _setupHttpPort };
+                var pair = (registry ?? UPilotPortRegistry.ForUser()).Recommend(
+                    UPilotProjectConfig.ProjectRoot, startWs, startHttp, 100, excluded);
                 _recommendedWsPort = pair.wsPort;
                 _recommendedHttpPort = pair.httpPort;
                 _setupPortMessage = FormatSetupPortMessage(_setupPortMessage, pair.wsPort, pair.httpPort);
+                return true;
             }
             catch (Exception ex)
             {
@@ -165,22 +174,59 @@ namespace CodingRiver.UPilot
                 _setupPortMessage = FormatSetupPortMessage(_setupPortMessage, 0, 0, ex.Message);
                 _setupPortMessageType = MessageType.Error;
                 Debug.LogError($"[UPilotPorts] 推荐可绑定端口失败：{ex}");
+                return false;
             }
         }
 
-        private void ApplyRecommendedSetupPorts()
+        internal bool ApplyRecommendedSetupPorts(UPilotPortRegistry registry = null)
         {
-            if (_recommendedWsPort <= 0 || _recommendedHttpPort <= 0)
-                FindRecommendedSetupPorts();
-            if (_recommendedWsPort <= 0 || _recommendedHttpPort <= 0)
-                return;
+            _setupPortMessage = "正在查找新的推荐端口。";
+            if (!FindRecommendedSetupPorts(registry)) return false;
+            _usedSetupPorts.Add(_setupWsPort);
+            _usedSetupPorts.Add(_setupHttpPort);
             _setupWsPort = _recommendedWsPort;
             _setupHttpPort = _recommendedHttpPort;
+            _usedSetupPorts.Add(_setupWsPort);
+            _usedSetupPorts.Add(_setupHttpPort);
+            _selectedSetupRecommendation = (_setupWsPort, _setupHttpPort);
             EvaluateSetupPorts();
+            return true;
+        }
+
+        private bool ValidateRecommendedSetupPorts(UPilotPortRegistry registry = null)
+        {
+            if (!_selectedSetupRecommendation.HasValue) return true;
+            if (_selectedSetupRecommendation.Value != (_setupWsPort, _setupHttpPort))
+            {
+                _selectedSetupRecommendation = null;
+                return true;
+            }
+            try
+            {
+                (registry ?? UPilotPortRegistry.ForUser()).ValidateRecommendation(_setupWsPort, _setupHttpPort);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _setupPortsReady = false;
+                _setupPortMessage = "推荐端口校验失败，请重新推荐。\n" + ex.Message;
+                _setupPortMessageType = MessageType.Error;
+                Debug.LogError($"[UPilotPorts] 保存前校验推荐端口失败：{ex}");
+                return false;
+            }
+        }
+
+        internal bool TrySaveSetupPorts(UPilotPortRegistry registry = null, Action<string, int, int> saveEndpoints = null)
+        {
+            if (!ValidateRecommendedSetupPorts(registry)) return false;
+            SaveSetupPorts(saveEndpoints);
+            _selectedSetupRecommendation = null;
+            return true;
         }
 
         private void ContinueFromPortStep()
         {
+            if (!ValidateRecommendedSetupPorts()) return;
             EvaluateSetupPorts();
             if (!_setupPortsReady)
             {
@@ -192,13 +238,11 @@ namespace CodingRiver.UPilot
                         "取消"))
                     return;
 
-                ApplyRecommendedSetupPorts();
-                if (!_setupPortsReady)
+                if (!ApplyRecommendedSetupPorts() || !_setupPortsReady)
                     return;
             }
 
-            SaveSetupPorts();
-            SetSetupStep(1);
+            if (TrySaveSetupPorts()) SetSetupStep(1);
         }
     }
 }

@@ -1375,3 +1375,41 @@ V04最新复验原Task task-83b34019-815b-4fa5-8f0f-09f065916c9f、runGuid 4cf4c
 - 根因/改进：`RefreshStatusAsync` 在填充 `status.Health` 前调用接管身份验证；已验证接管会跳过 OS 进程探测，空 Health 使 PID/ownership 无法回填。仅前移 Health 赋值，保留存活句柄、端口、PID、实例与精确项目限制。扩展既有真实只读恢复测试，覆盖接管后连续两次完整刷新及 PID/实例/项目不符拒绝。
 - 验证/状态：已修复并通过规范工程 Unity 编译（0E/1条既有 CS0618）及8/8定向 EditMode；Task `task-ec8022ba-633d-4b76-9afe-414a90006d73` / run `2edf2e00-bf5c-43d5-90e3-d484ac1243a3`，acceptancePassed/cleanupVerified/testIdentityVerified/sourceUnchanged 均 true。实际窗口截图已观察绿色“已就绪”，Unity38044/Server39464未重启，最终权威Ready且队列为空。
 - 证据/边界：`Tests~/UPilotTest/Log/P0P1/StartupRecoveredIdentity-20261016/verification.json` 保存红测、原批编译、验收报告及截图身份/哈希；未跑完整EditMode、Unity2022.3或重启Unity进程，不外推这些覆盖。
+
+## UPilot-20261016-GeneralDownloadSettings：用户通用下载配置与自动分片
+
+- 问题/影响：MCP Server 安装更新固定12分片、最多5并发，没有设置入口；按片数清理也无法覆盖自动分片或旧参数遗留文件。
+- 改进：高级设置新增“通用设置”，以用户目录 .upilot/settings.json 跨项目保存分片大小上限和最大并发，默认512 KiB/8；片数按文件长度向上取整，每次下载冻结配置，清理仅匹配当前目标的 .part<数字> 文件。
+- 范围：自管 MCP Server 安装、更新和重新下载；项目偏好与UPM包更新保持既有行为。配置读写失败使用红色Error并保留原文件与异常栈，测试隔离真实用户配置。
+- 验证/状态：已实现并通过定向67/67 EditMode，Task task-c30e57a6-6417-443a-b0d4-c0328a284deb / run 4bd57785-ad6f-48f0-8634-fa0d7fe0ed07；acceptancePassed、cleanupVerified、testIdentityVerified、sourceUnchanged 均 true。最终本任务批次 wb-375a8908-2cc8-4c5d-accb-321056003013 的 correlationVerified/errorsVerified 均 true，Unity编译0E/0W。红测发现的连续JSON根对象误接受与取消排队竞争均已修复，原失败报告保留。
+- 证据/边界：Tests~/UPilotTest/Logs/UPilot/Reports/GeneralSettings-20261016/ 保存初始批次、修复批次、各次权威报告及通用设置实图；原批次 wb-d6f9373a-ff9b-4218-9e6f-c0d84402d2ab 被Server重启中断，仍为aborted，不计通过。中途复核run 466065e8-673b-4617-b46a-5da331283847 的67项亦通过，但并行端口源码写入导致sourceUnchanged=false，整体验收未通过。并行修改后最终复核 Task task-49b8b1d4-823f-499c-a74a-61e99ac65505 / run 2d013655-8c1e-4304-9fdf-d4ffc292d58a 再次67/67，acceptancePassed/cleanupVerified/testIdentityVerified/sourceUnchanged均true，权威报告SHA256=7e10a2aeaa31fd30b2fda183971e7f0a337ca3bc1aac6dde933627d21b48a653。未运行完整EditMode或真实网络测速，未写真实用户配置。
+
+## UPilot-20261016-CompileConsoleBoundary / P2：已验证写入批次缺少Console关联边界
+
+- 观察/影响：本任务最终批次 wb-375a8908-2cc8-4c5d-accb-321056003013 已权威verified且errorsVerified/correlationVerified=true；unity_compile_errors(req-f625a1ad-574c-45f2-9fa2-89f7cb12a375) 返回终态0E/0W，但 unity_console_search_logs(compileOperationId=569b65dab146434886ceed2db7941072) 返回 CONSOLE_EVIDENCE_NOT_FOUND。编译判断仍有结构化证据，额外Console关联审查无法完成。
+- 建议：核对共享编译轮次、Domain Reload与批次终态写入时Console边界持久化的一致性；保证原编译身份可查询到完整或明确标记缺口的边界，不借用其他轮次日志。
+- 证据/状态：GeneralSettings-20261016 最终核验文件保留原工具响应；待诊断，尚未确认丢失原因，本次未修改编译或Console框架。
+
+## UPilot-20261016-ServiceSetupWizard / P2：服务安装向导的默认动作与状态语义（已实现并通过定向验收）
+
+- 观察/影响：2026-10-16 用户截图中，正式版首次设置的服务安装页将“尚未安装”显示为警告，“安装推荐服务”和“下一步”均为红色；独立安装按钮、下一步确认与页面内 Python 入口混在一起，使正常首次安装看起来像失败，并增加用户确认成本。
+- 改进/实施范围：正式版默认独立 EXE，点击蓝色“下一步”直接下载、校验与保存，成功后进入 Agent 配置；页面不展示 Python 内容、不触发 Python 探测。下载/配置中禁止重复提交，取消、失败、离页及历史成功不能误触发自动跳转。等待、进度、成功、前置条件缺失与真实错误分别采用蓝、蓝、绿、黄、红状态，失败后的重试按钮保持蓝色。
+- 开发方式：源码安装默认 Python，正式版开发者经“UPilot > 高级设置 > 服务运行方式”进入；复用自动环境创建及指定解释器严格验证，要求 Python 3.11+，损坏的既有环境保留文件并报告具体原因，不以其他 Python 检测结果代替。已配置项目保留“应用并重启服务”流程。
+- 证据/验收：规范 Tests~/UPilotTest（Unity PID 38044）写入批次 wb-3262fa4f-87f1-4959-b4fd-251b8f05f750 已 verified，correlationVerified/errorsVerified=true；compileRequestId=req-f011c06c-ab76-453b-b1a3-84d5382dc234，完成校验时间 1792139457791 晚于批次创建时间 1792139443370，0 错误、1 条既有 AssemblyBuilder 废弃警告。向导 fixture 25 项及严格解释器、保存失败、环境保留等直接回归 11 项共 36/36 通过，runGuid=65eef091-927c-402f-bf8a-154ea77cebfe；acceptancePassed、cleanupVerified、testIdentityVerified、sourceUnchanged 均为 true。另补充源码安装下显式 EXE 空路径仍保留运行方式的回归用例。
+- 产物/边界：权威报告 Tests~/UPilotTest/Logs/UPilot/Reports/Acceptance/1792139509859_req-9a5534da-de77-4927-b8d0-e8b55b1f7313/summary.json，717197 字节，SHA256=fdb0ea34abec674b9d47b39bbd745712b4b4c2a847a54e1ea9c030a316889d0e，已核对本地字节与哈希。Console 整体范围查询未返回 Error，测试阶段边界标记 partial（console_cursor_clear_or_reload_not_detectable），不宣称完整阶段日志覆盖。未运行全量 EditMode、真实联网下载/依赖安装或安装页面现场交互验收。
+- 当前状态：本次向导交互问题已完成实现与定向验收闭环；README 首次配置、故障排查和 Python 开发环境教程已更新。高级已配置项目保留原应用并重启分支，未启动或重启真实服务。
+
+## UPilot-20261016-RepeatPortRecommendations：设置向导连续推荐空闲、未登记端口（已完成）
+
+- 观察/复现：当前端口可用时“使用推荐端口”被禁用，原推荐只探测绑定能力且忽略全局登记；可用但已分配的端口会再次被推荐。
+- 改进：按钮保持可点击，每次重新读取登记并更换 WS/HTTP；统一跳过全部登记、当前输入及本次设置已采用端口。内部搜索支持边界回绕且保留每协议100个候选预算；失败保留原输入并显示红色错误与异常栈。仅“下一步”保存，推荐未被手动修改时保存前复查登记与实际绑定；普通手动配置/Quick Start 行为保留，无端口预占或服务重启。
+- 编译/测试：规范 Tests~/UPilotTest 原批 wb-9aeca5f3-1790-4758-91cc-6dd7800fbdef / req-0d30b8c3-176a-48c3-bbbb-38df930d1081，correlationVerified/errorsVerified=true、0错误/1条既有 DiagnosticModuleTamperTests.cs:88 CS0618。定向 EditMode run 511005af-2974-4304-89b1-22d97413ea72：75/75通过、0失败/跳过、resultAuthoritative/cleanupSucceeded/cleanupResourcesReleased=true。原 run 6d6d4b19-2c2e-4354-a119-f20fcb8a8d6f 为74/75，新回绕测试将合法组合顺序误写为(1,2)，按实际重叠搜索行为修正为(2,1)后复测通过；原失败证据保留。
+- 实际UI：精确 UPilotMainWindow instanceId=568105589213754634，Unity PID38044，连续三次真实按钮点击得到8770/8016、8771/8017、8772/8018；配置文件SHA256前后均44363339e00a22f3e1c7c867edc02507cfddb8b6f106e7103e0fc250e2a60a59。截图 Logs/UPilot/PortRecommendation-20261016/after/ports-after-three-clicks.53400e52.color.png（442x463，40662字节，SHA256 b401b9a9f3a5f069d1803c99b78d62ce8da6c38e5e63b3ba576851f57abbb88b）；acceptedAsEvidence/pixelSourceVerified=true、occlusionSensitive/degraded=false，Win32.PrintWindow，HWND141326，foreground/minimized=false。
+- 状态/边界：已实现并完成定向测试与实际UI验证；未运行完整EditMode或Unity2022.3矩阵。推荐空闲性仅对应探测时刻，不承诺跨进程抢占隔离。保留本次任务前及其他会话的工作区修改。
+
+## UPilot-20261016-WindowInputContentCoordinates / P2：截图与鼠标坐标的内容区域映射（待评估）
+
+- 观察/证据：同一精确窗口的Snapshot裁剪为内容区，rootVisualElement.worldBound.y=26；按截图按钮中心(371,252)发送unity_mouse_event，返回dispatched=true但端口没有变化。使用已读取的根区域偏移转换为(371,278)后真实点击成功；同期Domain Reload使一个截图返回WINDOW_DOMAIN_MISMATCH，已重新读取身份，没有重放不确定点击。
+- 改进建议：为unity_mouse_event明确坐标空间并提供从Snapshot内容区坐标到目标窗口输入坐标的语义转换，或为设置向导注册可按文字定位的IMGUI控件；以具体窗口身份、布局/域版本与点击后业务状态证明效果，避免把dispatched当作生效。
+- 状态：仅记录，不在本次端口推荐改动中扩大UI输入协议范围。
+
