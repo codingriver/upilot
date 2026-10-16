@@ -527,6 +527,18 @@ namespace CodingRiver.UPilot.Tests
                 Assert.That(UPilotUserSettings.GetLockName(ConfigPath.ToUpperInvariant()), Is.EqualTo(UPilotUserSettings.GetLockName(ConfigPath)));
         }
 
+        [TestCase("{\"projectPorts\":[]}")]
+        [TestCase("{\"projectPorts\":{\"relative\":[8765,8011]}}")]
+        public void RegistryReadFailureIncludesSettingsPathAndOriginalException(string json)
+        {
+            WriteConfig(json);
+            var error = Assert.Throws<InvalidDataException>(() => UPilotUserSettings.ReadProjectPorts(ConfigPath));
+            Assert.That(error.Message, Does.Contain(ConfigPath));
+            Assert.That(error.InnerException, Is.Not.Null);
+            Assert.That(error.InnerException.StackTrace, Does.Contain("ReadProjectPorts"));
+            Assert.That(File.ReadAllText(ConfigPath), Is.EqualTo(json));
+        }
+
         [Test]
         public void RegistryReadFailureThrowsInsteadOfReturningAnEmptyRegistry()
         {

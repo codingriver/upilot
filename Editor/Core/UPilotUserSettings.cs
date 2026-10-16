@@ -77,8 +77,14 @@ namespace CodingRiver.UPilot
 
         // Registry failures are deliberately thrown to its caller, which reports the operation
         // and settings path without changing the authoritative project-configuration result.
-        internal static Dictionary<string, int[]> ReadProjectPorts(string path) =>
-            ReadProjectPorts(ReadDocument(path));
+        internal static Dictionary<string, int[]> ReadProjectPorts(string path)
+        {
+            try { return ReadProjectPorts(ReadDocument(path)); }
+            catch (Exception ex)
+            {
+                throw new InvalidDataException($"读取端口登记失败：path={path}; error={ex.Message}", ex);
+            }
+        }
 
         internal static void SetProjectPorts(string path, string project, int ws, int http)
         {
@@ -157,7 +163,8 @@ namespace CodingRiver.UPilot
                     root.WriteTo(writer);
                     writer.Flush();
                 }
-                UPilotPortRegistry.AtomicWrite(path, Encoding.UTF8.GetString(stream.ToArray()));
+                // Escaped slashes are equivalent JSON, but project path keys should remain readable.
+                UPilotPortRegistry.AtomicWrite(path, Encoding.UTF8.GetString(stream.ToArray()).Replace("\\/", "/"));
             }
             finally { mutex.ReleaseMutex(); }
         }

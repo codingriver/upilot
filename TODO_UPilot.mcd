@@ -1413,3 +1413,10 @@ V04最新复验原Task task-83b34019-815b-4fa5-8f0f-09f065916c9f、runGuid 4cf4c
 - 改进建议：为unity_mouse_event明确坐标空间并提供从Snapshot内容区坐标到目标窗口输入坐标的语义转换，或为设置向导注册可按文字定位的IMGUI控件；以具体窗口身份、布局/域版本与点击后业务状态证明效果，避免把dispatched当作生效。
 - 状态：仅记录，不在本次端口推荐改动中扩大UI输入协议范围。
 
+## UPilot-20261016-UserSettingsProjectPorts：端口登记统一到用户 JSON（已完成）
+
+- 观察/影响：端口登记原存 EditorPrefs 的路径哈希，不能直读项目路径；下载设置整文档保存及多个 Unity 进程独立写入会覆盖共享配置。框架 JSON reader 还会接受尾随逗号等损坏内容。
+- 改进：以 ~/.upilot/settings.json 的 projectPorts 保存绝对项目路径到 [WS, HTTP]；各区保存统一使用5秒命名互斥锁、锁内重读及原子写入，保留其他字段。旧 EditorPrefs 停读停写，成功登记后删除；严格校验 JSON，保留失败原文及带路径、原异常栈的红色错误。
+- 验证/状态：规范 UPilotTest 关联编译通过，167/167 定向 EditMode 通过；Task task-43b8d908-eab9-4d24-81bc-6ac327f8ed9d / run 8f14a571-6e62-4e40-9d2c-53ee8ec0f817，acceptancePassed、cleanupVerified、testIdentityVerified、sourceUnchanged 均 true。覆盖并行写入、外进程持锁超时、分区独立、损坏文件保留和旧key删除。首轮161/163的原失败保留，路径异常上下文及JSON路径可读性已修复，未删除断言或放宽门槛。
+- 证据/边界：Tests~/UPilotTest/Logs/UPilot/Reports/ProjectPorts-20261016/；权威报告1787412字节，SHA256 fc6cfd5629ecb30e6135319eff6f3af770bce8f76b3f7bf9d3a8fed36c6f096f。未创建真实用户 settings.json，项目实际端口配置 SHA256 前后相同；未跑完整 EditMode 或两个真实Unity项目端到端验证。Console阶段覆盖标记partial，保留原缺口说明。
+
