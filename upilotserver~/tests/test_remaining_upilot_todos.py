@@ -116,6 +116,7 @@ def test_operation_milestones_persist_deduplicate_and_invalidate() -> None:
 def test_operation_milestone_remains_visible_in_public_state_after_later_poll() -> None:
     service = TaskDomainService()
     state = {
+        "jobSpec": {},
         "operationId": "op-public",
         "displayName": "fixture",
         "status": "Running",
