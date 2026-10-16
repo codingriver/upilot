@@ -1153,8 +1153,8 @@ namespace CodingRiver.UPilot
                     status.HealthIdentifiesUPilot = stats.IdentifiesUPilot;
                     status.HealthServerProcessId = stats.HealthServerProcessId;
                     status.HealthProjectPath = stats.HealthProjectPath;
-                    TryApplyRecoveredProcessOwnership(ref status);
                     status.Health = stats.Health;
+                    TryApplyRecoveredProcessOwnership(ref status);
                     status.FailureKind = stats.FailureKind;
                     ApplyEditorObservation(ref status, stats.Health?.editor_observation);
                     status.StatusFailureStage = stats.HealthEndpointResponded ? "" : "health_query";

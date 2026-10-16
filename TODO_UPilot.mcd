@@ -1,5 +1,13 @@
 # UPilot 活动改进清单
 
+## UPilot-20261016-StaleEditorCapabilityDiagnostics / P2：工具发现与 Editor 实时执行门槛一致性
+
+- 日期/场景：2026-10-16（Asia/Shanghai），trunk 弹道 Editor 事件目录关联编译；待评估，本轮出现 1 次，未实施产品改动。
+- 观察：`unity_mcp_status(forceFresh=true)` 在 Bridge 连接存活时报告 `EditorContextStale/ready=false/authoritative=false`，Unity 主线程 pump 长期未更新；关联 WriteBatch `wb-07dc6d21-3b22-49c6-8ab4-10330cf9bc1a` 为 deferred/stale。`unity_tools_find` 对 `unity_test_run` 仍返回 `available=true/callableNow=true`，调用者需要自行结合 context 判断无法执行。本轮没有发送测试或重启 Editor/Server。
+- 期望能力/收益：工具发现的可调用性应与统一实时门槛使用相同事实，并展示具体原因、Bridge 心跳和主线程 pump 的独立时效；只读诊断入口保持可用，不把网络在线等同 Editor Ready。减少无效测试请求、重复状态检查与旧编译结果误用，不添加自动重放或自动维护。
+- 验收标准：规范 `D:/upilot/Tests~/UPilotTest` 通过可控时钟/状态 fixture 覆盖网络心跳新鲜但主线程快照过期、真实忙碌、恢复及旧编译终态；工具发现与实际拒绝一致，原 WriteBatch 身份保持，旧失败不作为新编译结果。当前只观察 trunk 现场，未运行此通用验收。
+- 双向引用：`F:/trunk/TODO_UPilot.mcd` / `UPilot-20261016-StaleEditorCapabilityDiagnostics`；通用优先级与状态以本条为准。
+
 2026-10-13 范围撤销：按用户要求移除窗口历史整套功能，V13/D12 不再作为活动验收项；处置类型是功能移除，不是测试通过，旧双版本矩阵及非 Deep Profile A/B 不再要求补验。过往开发、编译、测试及现场证据保留在下方 V13/D12 历史段；后续源码移除的验证单独记录。下文 46/16 等总数保留对应日期的历史口径，不据此改写其他父项状态。
 
 核对日期：2026-10-08。已按当日交付记录和保存的终态/产物更新状态：5项可独立结项工作（含既有编号子项）已归档，9组活动父项仅部分完成；不把子项通过写成整项完成。完整当日清单见 `Documentation~/Stage4-Delivery-20260930.md` 的“2026-10-08 当日完成清单与 TODO 状态核对”。本文件继续只保留未完成工作；Tooltip/N05 保持 P5 暂缓。 后续V12两项确认缺口及当前版本的结果回调边界取消后真实Reload收尾子项已完成修复/验收，父项仍保留其他Unity/UTF版本矩阵与全Server模块加载鉴证；详见同交付记录续验章节。 D20代码修复、关联编译、定向及当前版本真实暂停/恢复收尾已通过，仅保留已注明的部署鉴证边界，活动父项仍为47；不把当前现场通过写成全模块加载已验证。 D07当前版本成功/预期失败Task在线对照、摘要字节预算修复及独立产物核验已完成，父项仅保留加载来源鉴证，活动父项仍为47。 D18既有三尺寸GameView的视觉与产物独立复核已归档，首次视觉证据子项不再待验；真正捕获中Reload等余项仍开放，父项数量保持47。 2026-10-09续验：V17多轮恢复/失败清理5/5及36作业独立核验已归档，四份原PNG人工复核通过；仅剩已注明的前台单项回归，父项仍开放、总数47。
@@ -1352,3 +1360,18 @@ V04最新复验原Task task-83b34019-815b-4fa5-8f0f-09f065916c9f、runGuid 4cf4c
 - 痛点/期望能力：保留sourceUnchanged门槛和原任务终态，为 unity_upilot_acceptance_run 的失败摘要补充验收开始后已知的写批次ID、变化路径及中断阶段；识别“测试未启动/执行期失败/用例全过但源码变化”，减少人工查大报告和误把并行环境冲突当产品回归。
 - 收益/验收：在 Tests~/UPilotTest 以自有并行写入fixture定向覆盖上述三个阶段，按原Task给出明确有界证据；不自动重放Start、不延长期限、不取消其他任务、不弱化源码一致性检查。
 - 状态：待评估，本轮仅记录；不影响已完成的Step框架交付。双向引用 F:/trunk/TODO_UPilot.mcd / UPilot-AcceptanceConcurrentSourceChanges。通用优先级、实施状态以本条为准。
+
+### UPilot-ReleaseTagPushDiagnostics / P2：发布 tag 推送失败的状态与诊断
+
+- 日期/问题：2026-10-16，发布准备 run 38859245024 已将版本提交 fd5b6434406c452b2023d14835e872360423c784 推送 main，随后 v0.3.47 tag 被远端拒绝，仅输出 remote rejected (failed)；远端 tag/Release 均不存在，下游构建未启动。
+- 影响：prepare-release.yml 分别推送 main 和 tag，会留下版本已更新但未发布的状态，通用拒绝信息不足以区分临时远端故障、权限与规则限制。本次有效 contents: write、ruleset/rule-suite 查询为空；确切拒绝原因仍未确认。
+- 建议：评估 main 与 tag 的原子推送，并在失败时保留脱敏的 Git 返回值、远端 main/tag/Release 身份和原 run 链接；观察实际结果后由已获授权的恢复流程决定后续动作，避免重复派发或覆盖现有 tag/Release。
+- 证据：artifacts/release-run-38859245024/；恢复发布 prepare 38859677561、build 38859768222，完整核验见 artifacts/release-v0.3.48/verification-summary.json。
+- 状态：发布已通过原工作流恢复为 v0.3.48，tag/build=86d247e2177517b89efae86accb2b4f5f183036c，三份资产及版本/本地EXE身份/哈希已验证；本条诊断与原子推送改进待评估，未改变工作流、权限或门禁策略，未将疑似临时故障写成已确认根因。
+
+## UPilot-20261016-RecoveredServerStatusIdentity / P1：启动接管后刷新丢失服务身份（已修复）
+
+- 观察/复现：规范 `Tests~/UPilotTest` 启动日志确认复用 Server PID 39464，Bridge 认证及实际只读往返已验证；窗口仍显示“需修复／监听 PID 未知”，`BuildRepairMessage` 返回 Server/Unity 待确认。真实恢复后的首次完整刷新回归测试失败：Expected CurrentUPilot, But Unknown；原 run `ccb4293e-60da-4b48-a4af-633a01bcf495`，清理完成、权威结果保留。
+- 根因/改进：`RefreshStatusAsync` 在填充 `status.Health` 前调用接管身份验证；已验证接管会跳过 OS 进程探测，空 Health 使 PID/ownership 无法回填。仅前移 Health 赋值，保留存活句柄、端口、PID、实例与精确项目限制。扩展既有真实只读恢复测试，覆盖接管后连续两次完整刷新及 PID/实例/项目不符拒绝。
+- 验证/状态：已修复并通过规范工程 Unity 编译（0E/1条既有 CS0618）及8/8定向 EditMode；Task `task-ec8022ba-633d-4b76-9afe-414a90006d73` / run `2edf2e00-bf5c-43d5-90e3-d484ac1243a3`，acceptancePassed/cleanupVerified/testIdentityVerified/sourceUnchanged 均 true。实际窗口截图已观察绿色“已就绪”，Unity38044/Server39464未重启，最终权威Ready且队列为空。
+- 证据/边界：`Tests~/UPilotTest/Log/P0P1/StartupRecoveredIdentity-20261016/verification.json` 保存红测、原批编译、验收报告及截图身份/哈希；未跑完整EditMode、Unity2022.3或重启Unity进程，不外推这些覆盖。

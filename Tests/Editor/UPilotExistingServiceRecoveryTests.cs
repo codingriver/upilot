@@ -135,6 +135,37 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(Get<string>("_recoveredServiceInstanceId"), Is.EqualTo(status.Health.server_instance_id));
             Assert.That(status.LifecyclePhase, Is.EqualTo(UPilotServerLifecyclePhase.None));
             Assert.That(status.LastSuccessfulStatusAtUtcMs, Is.GreaterThan(0));
+
+            // A later full refresh must preserve the verified recovered identity too.
+            for (var refresh = 0; refresh < 2; refresh++)
+            {
+                var refreshed = await _manager.GetFreshStatusAsync(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 10000);
+                Assert.That(refreshed.StatusQueryCompleted && refreshed.HealthEndpointResponded, Is.True);
+                Assert.That(refreshed.ProcessOwnership, Is.EqualTo(McpProcessOwnership.CurrentUPilot),
+                    "A healthy recovered Server must remain identified after a full status refresh.");
+                Assert.That(refreshed.ProcessId, Is.EqualTo(status.ProcessId));
+                Assert.That(refreshed.Health.server_instance_id, Is.EqualTo(status.Health.server_instance_id));
+                Assert.That(UPilotHealthAssessment.HasServiceIdentity(refreshed), Is.True);
+                Assert.That(UPilotQuickStart.BuildRepairMessage(before, refreshed, ""),
+                    Does.StartWith("Server：正常｜Bridge：已连接"));
+            }
+            // Current health must still match the exact recovered PID, instance and project.
+            foreach (var mismatch in new[] { "pid", "instance", "project" })
+            {
+                var candidate = status;
+                candidate.ProcessOwnership = McpProcessOwnership.Unknown;
+                candidate.ProcessId = null;
+                candidate.ProcessOwnershipEvidence = null;
+                candidate.Health = new UPilotServerHealth { server_instance_id = status.Health.server_instance_id };
+                if (mismatch == "pid") candidate.HealthServerProcessId = 0;
+                if (mismatch == "instance") candidate.Health.server_instance_id = "different-instance";
+                if (mismatch == "project") candidate.HealthProjectPath = Path.Combine(UPilotProjectConfig.ProjectRoot, "other-project");
+                var arguments = new object[] { candidate };
+                Assert.That((bool)Call("TryApplyRecoveredProcessOwnership", arguments), Is.False, mismatch);
+                var rejected = (McpServerStatus)arguments[0];
+                Assert.That(rejected.ProcessOwnership, Is.EqualTo(McpProcessOwnership.Unknown), mismatch);
+                Assert.That(rejected.ProcessId, Is.Null, mismatch);
+            }
             AssertRecoveryDidNotStopOrLaunch();
         }
 
