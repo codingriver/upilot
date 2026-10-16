@@ -1,5 +1,13 @@
 # UPilot 活动改进清单
 
+## UPilot-20261016-ShutdownHelloResetProtection / P1：停服握手重置保护与生命周期诊断
+
+- 现场：trunk 2026-10-16 的两个用户指定日志显示，旧服务停止观察在约 2.61 秒处被 `service_reset` 终止，尚未取得进程退出和双端口释放证据；8 秒复用窗口内“收到认证响应”和主线程应用无法区分。原 hello 在首次空绑定或服务换代时直接重置任务，未检查停止操作及旧回调身份。
+- 实现：关闭准备前建立 owner/代次/期限保护；hello 固定实际连接 socket、周期、会话及操作快照，接收和主线程提交均核验，旧回调不重放。首次绑定和同代重连不重置；新服务经实例与真实进程核验后复用所属操作的一次清理结果，包括部分失败。清理前撤销旧恢复所有权；历史失败仅经当前身份及实际只读验证解除 UI 提示，保留历史和禁止自动重放门槛。
+- 诊断：内部 Logger 生命周期入口以普通 Log 双写 Console/每日文件，绕过信息过滤但不改全局设置；拦截事件包含来源栈、执行栈及固定事件 ID。新增扫描、等待续体、停止证据变化、终止派发、启动核验和恢复结果打点；敏感字段、nonce、URL 查询脱敏；写入失败不递归且不阻断停服。
+- 验证状态：24份C#最终hash冻结；生产编译原批次 `wb-23a24136-f588-454e-a684-2d9da25ede2f` 通过。首轮Task `task-42607770-c7e3-44ab-b11c-d8e03f5ea720` 已终态564/588通过、24例因未声明强制普通Log失败；保留失败历史及所有有效断言，仅补3份测试的精确日志预期。最终晚写补登记批次 `wb-4e9d03f9-89ef-4e9e-82d2-c839956f10d3` verified/passed，关联/错误核验通过，Unity结构化0错误、1条既有CS0618警告；编译Console独立边界缺失仍保留。24叶子复验Task `task-f6f48c5e-9366-46da-ab50-855302406bf1` / runGuid `4dec1aa8-5853-4bac-b7d1-fd03fd2fa8ec` 权威24/24通过，清理/测试身份/源码未变化均通过；产物hash已独立核验，最终Capture=0、完整新鲜队列为空。实现及定向验收完成；真实trunk部署启动、真实停服/强杀中Reload端到端竞态未验收，未重启服务/操作SVN。详见 `Documentation~/ShutdownHelloResetProtection-20261016.md` 与规范工程 `Log/P0P1/reset-guard-delivery-20261016.json`。
+- 双向引用：`F:/trunk/TODO_UPilot.mcd` / `UPilot-20261016-ShutdownHelloResetProtection`；产品状态以本条为准。
+
 ## UPilot-20261016-StaleEditorCapabilityDiagnostics / P2：工具发现与 Editor 实时执行门槛一致性
 
 - 日期/场景：2026-10-16（Asia/Shanghai），trunk 弹道 Editor 事件目录关联编译；待评估，本轮出现 1 次，未实施产品改动。
@@ -1420,3 +1428,20 @@ V04最新复验原Task task-83b34019-815b-4fa5-8f0f-09f065916c9f、runGuid 4cf4c
 - 验证/状态：规范 UPilotTest 关联编译通过，167/167 定向 EditMode 通过；Task task-43b8d908-eab9-4d24-81bc-6ac327f8ed9d / run 8f14a571-6e62-4e40-9d2c-53ee8ec0f817，acceptancePassed、cleanupVerified、testIdentityVerified、sourceUnchanged 均 true。覆盖并行写入、外进程持锁超时、分区独立、损坏文件保留和旧key删除。首轮161/163的原失败保留，路径异常上下文及JSON路径可读性已修复，未删除断言或放宽门槛。
 - 证据/边界：Tests~/UPilotTest/Logs/UPilot/Reports/ProjectPorts-20261016/；权威报告1787412字节，SHA256 fc6cfd5629ecb30e6135319eff6f3af770bce8f76b3f7bf9d3a8fed36c6f096f。未创建真实用户 settings.json，项目实际端口配置 SHA256 前后相同；未跑完整 EditMode 或两个真实Unity项目端到端验证。Console阶段覆盖标记partial，保留原缺口说明。
 
+
+## UPilot-20261016-InlineResultDiagnostic：结果内联失败缺少实际类型和处理指引（已修复，定向验收 9/9 通过）
+
+- 现场证据：H:/trunk3/Logs/UPilot/McpCalls/csharp_eval-2026-10-16.log 第 5–6 行保存原命令 cmd-5628617f-becf-4b94-9ed3-d0eea869e2c2，失败时间 2026-10-16 19:32:19.275 +08:00。请求返回 object[]，三项为 BattleDebug.Mask.ToString()、ActorStatusHeroIdFilter.ToString() 和 EditorApplication.isPlaying；mode=statements、executionBackend=interpret、resultMode=inline、无 sessionId。响应证明 3 次 getter、2 次方法调用已发生，随后编码失败。
+- 根因：数组内联按声明元素类型判断，System.Object 不在白名单，实际元素是字符串/布尔值也不会改变 object[] 的拒绝结果。现场常量对照 req-683cff74-1d4c-49ea-a905-ceae673c9d6b 复现 RESULT_NOT_INLINEABLE，string[] 对照 req-0f79b25f-52b9-4454-a468-14fb1509a9d1 成功。未找到持久业务调用方，此次为临时 MCP 请求。
+- 调用修正：确认相关 getter 只读后，在用户授权修复下将返回值改为 string[]，第三项调用 ToString；精确核实 8014/mcp 项目为 H:/trunk3 并检查 ready 后，独立修正请求 req-a2a55517-32b1-4170-a8cd-aee25fe4dc37 成功返回 System.String[] / inline / ["0","0","False"]，无资源诊断。该次现场已为 EditMode，未切换模式或重放原失败请求。
+- 产品修复：UPilotExecutionService.EncodeResult 的现有红色错误消息和结构化详情增加 resultTypeName、resultMode、数组秩/元素类型上下文及 nextAction；指引返回支持的标量/一维数组，复杂对象使用持久 session + handle，并明确可能已执行、禁止自动重试。ToErrorDetail 同时保留先前丢失的 actualBytes/limitBytes。严格 inline 契约、错误码和原异常保留；未自动序列化任意对象或调用结果对象的 ToString。
+- 示例及回归：QuickDebug 的 foreach-array 示例从不支持的 object[] 改为 int[] 投影，完整结果为 [6,1,2,3,4]。覆盖 object[] 拒绝与错误字段 JSON 往返、string[] 成功、非有限浮点数、超限结果、执行一次后编码失败不重放，以及实际内置示例。
+- 验收：canonical D:/upilot/Tests~/UPilotTest 定向 EditMode 9/9 通过、0 失败/跳过；task-f91fef2d-0986-499f-b68e-cab42cecf841，run d29448e9-a1f7-4145-8fca-51c96ada03fe，acceptancePassed/cleanupVerified/testIdentityVerified/sourceUnchanged 均 true。官方流程复用已验证的最新 Unity 编译 5124035eadb1467db061363c52da843b（errorsVerified=true、0 errors，reusedVerifiedCompile=true），未额外触发编译或完整套件。源码摘要 d3e286ea83aeaf11c5644c30713d243ad03ff403e7d63c4e1dc171f930017c86（含已有并行改动）。
+- 证据：Tests~/UPilotTest/Logs/UPilot/Reports/Acceptance/1792152737693_req-3e2536ec-81d5-4b48-a94d-38734c8ec495/summary.json，965223 字节，实际文件 SHA256 7b90a3e9463af021ac93c52567ad878079e09e14cafdf55e9dcbacf002c186eb。测试区间 Console 覆盖 complete，阶段覆盖 partial（console_cursor_clear_or_reload_not_detectable），不宣称阶段日志完整。
+- 历史失败/交付边界：首次写入批次 wb-7838f36c-8c93-43f8-99df-84c46512d088 因人工服务恢复而 aborted/service_restarted，未伪报关联编译成功；首次验收 task-60b2652d-7173-4746-9724-9437263b76c2 在编译工具调用处 INTERNAL_ERROR/会话未认证，未启动测试，原失败报告保留。曾请求服务恢复但返回 COMMAND_TIMEOUT/not_sent，未重试。H:/trunk3 仍使用原 0.3.50 包；未修改其 PackageCache、升级、发布或运行业务回归。后续包升级属于独立交付。
+
+## UPilot-20261016-StepWindowWriteBatchAuth / P2：Domain Reload 后批次中止与编译终态不一致（待诊断）
+
+- 观察/影响：调整 Step 管理窗口时，批次 wb-19431040-ca81-4277-a185-42bceaa98baf 在 Domain Reload 后变为 aborted，error=会话未认证，correlationVerified/errorsVerified=false，terminalSnapshot=null；相同 compileRequestId=req-746bcc3c-d577-491d-89bc-4da68f5689e6 的 live compile.errors 返回 completed、errorsVerified=true、0E/0W，校验时间 1792152788421 晚于批次创建时间 1792152770937。无法按原批次规则确认完整编译验收。
+- 建议：检查自动批次观察器在正常 Domain Reload 与重新认证期间如何处理暂时性认证错误，保留原批次身份、固定截止时间及后续真实终态；明确区分暂时不可用与终态失败，不自动重编译或伪造关联成功。
+- 证据/状态：规范项目 Tests~/UPilotTest，Unity PID 38044，编译操作 a5290899e2044d2e9afdee398a6b66da。仅登记已观察的不一致，根因未确认；本次不修改认证或编译框架。

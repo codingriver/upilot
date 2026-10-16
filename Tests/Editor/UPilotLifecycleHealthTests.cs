@@ -51,7 +51,7 @@ namespace CodingRiver.UPilot.Tests
             try
             {
                 LogAssert.Expect(UnityEngine.LogType.Log,
-                    $"[UPilotMcpServerManager] 生命周期：生命周期操作结束；PID=0；operationId={operationId}。");
+                    new System.Text.RegularExpressions.Regex("event=server_lifecycle_phase[\\s\\S]*phase=None[\\s\\S]*operationId=" + operationId));
                 type.GetMethod("CancelPendingRestart", fields).Invoke(manager, new object[]
                     { false, Enum.Parse(typeof(UPilotServerStopOrigin), origin), "", null, 0L, 0, 0L });
                 Assert.That(type.GetField("_lifecyclePhase", fields).GetValue(manager), Is.EqualTo(UPilotServerLifecyclePhase.None));
@@ -275,6 +275,116 @@ namespace CodingRiver.UPilot.Tests
             status.EditorObservationHeartbeatAgeMs = 100;
             status.EditorObservationPumpAgeMs = 100;
             return status;
+        }
+
+        [Test]
+        public void FailedExistingRecoveryNeedsVerifiedIdentityAndKeepsStartupReplayBlocked()
+        {
+            WithIsolatedHealthUi(() =>
+            {
+                var manager = FailedRecoveryManager(out var record);
+                var status = Responsive(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                PopulateDeploymentIdentity(status.Health);
+                var bridge = new BridgeStatus { IsStarted = true, IsWsOpen = true, IsAuthenticated = true, SessionId = "session-a" };
+                var flags = BindingFlags.Static | BindingFlags.NonPublic;
+                var autoKey = (string)typeof(UPilotQuickStart).GetProperty("AutoAttemptKey", flags).GetValue(null);
+                var generation = (int)typeof(UPilotQuickStart).GetField("_repairGeneration", flags).GetValue(null);
+                EditorPrefs.SetBool(autoKey, true);
+                Assert.That(UPilotQuickStart.EvaluateExistingServiceRecoveryFailure(manager, bridge, status)?.State,
+                    Is.EqualTo(UPilotMainState.NeedsRepair));
+                Assert.That(UPilotQuickStart.CanObserveFailedExistingServiceRecovery(manager), Is.True);
+
+                Assert.That(UPilotQuickStart.CompleteObservedRecovery(status, bridge.SessionId, generation, "",
+                    bridge, status, manager, record.id), Is.True);
+                Assert.That(UPilotQuickStart.EvaluateExistingServiceRecoveryFailure(manager, bridge, status), Is.Null);
+                Assert.That(record.status, Is.EqualTo("failed"));
+                Assert.That(record.error, Is.EqualTo("historical cleanup failure"));
+                Assert.That(manager.CanAutomaticallyStartServer, Is.False);
+                Assert.That(manager.CanAutomaticallyRepairDeployment, Is.False);
+                Assert.That(EditorPrefs.GetBool(autoKey, false), Is.True,
+                    "Read-only verification must not reopen automatic repair permission.");
+            });
+        }
+
+        [TestCase("recovery")]
+        [TestCase("pid")]
+        [TestCase("instance")]
+        [TestCase("session")]
+        [TestCase("generation")]
+        [TestCase("observation")]
+        public void ChangedIdentityOrObservationRejectsFailedRecoveryVerification(string changed)
+        {
+            WithIsolatedHealthUi(() =>
+            {
+                var manager = FailedRecoveryManager(out var record);
+                var expected = Responsive(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                PopulateDeploymentIdentity(expected.Health);
+                var latest = Responsive(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                PopulateDeploymentIdentity(latest.Health);
+                var bridge = new BridgeStatus { IsStarted = true, IsWsOpen = true, IsAuthenticated = true, SessionId = "session-a" };
+                var generation = (int)typeof(UPilotQuickStart).GetField("_repairGeneration",
+                    BindingFlags.Static | BindingFlags.NonPublic).GetValue(null);
+                var originalRecoveryId = record.id;
+                ChangeRecoveryIdentity(changed, record, ref bridge, ref latest);
+                if (changed == "generation") ++generation;
+                if (changed == "observation") latest.EditorObservationObservedAtUtcMs = 1;
+                Assert.That(UPilotQuickStart.CompleteObservedRecovery(expected, "session-a", generation, "",
+                    bridge, latest, manager, originalRecoveryId), Is.False, changed);
+                Assert.That(UPilotQuickStart.EvaluateExistingServiceRecoveryFailure(manager, bridge, latest)?.State,
+                    Is.EqualTo(UPilotMainState.NeedsRepair));
+                Assert.That(record.status, Is.EqualTo("failed"));
+            });
+        }
+
+        [TestCase("recovery")]
+        [TestCase("pid")]
+        [TestCase("instance")]
+        [TestCase("session")]
+        [TestCase("project")]
+        public void VerifiedFailureMarkerDoesNotApplyToAnotherCurrentIdentity(string changed)
+        {
+            WithIsolatedHealthUi(() =>
+            {
+                var manager = FailedRecoveryManager(out var record);
+                var status = Responsive(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                PopulateDeploymentIdentity(status.Health);
+                var bridge = new BridgeStatus { IsStarted = true, IsWsOpen = true, IsAuthenticated = true, SessionId = "session-a" };
+                var generation = (int)typeof(UPilotQuickStart).GetField("_repairGeneration",
+                    BindingFlags.Static | BindingFlags.NonPublic).GetValue(null);
+                Assert.That(UPilotQuickStart.CompleteObservedRecovery(status, "session-a", generation, "",
+                    bridge, status, manager, record.id), Is.True);
+                ChangeRecoveryIdentity(changed, record, ref bridge, ref status);
+                Assert.That(UPilotQuickStart.EvaluateExistingServiceRecoveryFailure(manager, bridge, status)?.State,
+                    Is.EqualTo(UPilotMainState.NeedsRepair), changed);
+                Assert.That(record.status, Is.EqualTo("failed"));
+            });
+        }
+
+        private static UPilotMcpServerManager FailedRecoveryManager(out UPilotMcpServerManager.ExistingServiceRecoveryRecord record)
+        {
+            var type = typeof(UPilotMcpServerManager);
+            var manager = (UPilotMcpServerManager)System.Runtime.Serialization.FormatterServices.GetUninitializedObject(type);
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+            type.GetField("_statusLock", flags).SetValue(manager, new object());
+            type.GetField("_initialServiceRecoveryCompleted", flags).SetValue(manager, true);
+            record = new UPilotMcpServerManager.ExistingServiceRecoveryRecord {
+                id = "ui-recovery-" + Guid.NewGuid().ToString("N"), status = "failed", error = "historical cleanup failure",
+            };
+            type.GetField("_existingServiceRecovery", flags).SetValue(manager, record);
+            manager.StopDiscoveryOverride = (_, _, _) => throw new InvalidOperationException("UI observation cannot stop a service.");
+            manager.StopTerminationOverride = _ => throw new InvalidOperationException("UI observation cannot terminate a service.");
+            manager.ExistingServiceReplacementStartOverride = _ => throw new InvalidOperationException("UI observation cannot start a service.");
+            return manager;
+        }
+
+        private static void ChangeRecoveryIdentity(string changed, UPilotMcpServerManager.ExistingServiceRecoveryRecord record,
+            ref BridgeStatus bridge, ref McpServerStatus status)
+        {
+            if (changed == "recovery") record.id += "-next";
+            if (changed == "pid") { status.ProcessId = 43; status.Health.server_pid = 43; }
+            if (changed == "instance") status.Health.server_instance_id = "server-next";
+            if (changed == "session") { bridge.SessionId = "session-next"; status.Health.bridge_session_id = "session-next"; }
+            if (changed == "project") status.Health.configured_project_path = System.IO.Path.Combine(UPilotProjectConfig.ProjectRoot, "other");
         }
 
         [Test]
@@ -640,7 +750,7 @@ namespace CodingRiver.UPilot.Tests
         private static void WithIsolatedHealthUi(Action test)
         {
             const BindingFlags flags = BindingFlags.Static | BindingFlags.NonPublic;
-            var sessionKeys = new[] { "HealthRecoveryKey", "VerifiedHealthKey", "VerifiedRestartHistoryKey" }
+            var sessionKeys = new[] { "HealthRecoveryKey", "VerifiedHealthKey", "VerifiedRestartHistoryKey", "VerifiedExistingRecoveryKey" }
                 .Select(name => (string)typeof(UPilotQuickStart).GetProperty(name, flags).GetValue(null)).ToArray();
             var sessions = sessionKeys.Select(key => SessionState.GetString(key, "")).ToArray();
             var failureKey = (string)typeof(UPilotQuickStart).GetProperty("FailureKey", flags).GetValue(null);

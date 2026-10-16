@@ -94,6 +94,51 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(calls, Is.EqualTo(new[] { "setup", "dialog", "setup", "dialog" }));
         }
 
+        [TestCase(false)]
+        [TestCase(true)]
+        public void PreflightFailureShowsItsOwnEvidenceWithoutUsingUnrelatedRestartHistory(bool statusReturned)
+        {
+            var attempt = "setup-recovery-test-" + Guid.NewGuid().ToString("N");
+            const string failure = "无法安全确定当前项目 Server，未停止任何进程。";
+            McpServerStatus? status = statusReturned ? new McpServerStatus
+            {
+                StatusQueryCompleted = true, StatusGeneration = 17, ProcessId = 1234,
+                ProcessOwnership = McpProcessOwnership.Unknown, HttpPortListening = true,
+                WsPortListening = true, HealthEndpointResponded = true,
+                ProcessCommandLine = "private-command-line-must-not-appear"
+            } : (McpServerStatus?)null;
+            var diagnosis = UPilotQuickStart.RepairPreflightDiagnosis(attempt, "确认项目、进程与真实来源",
+                "当前项目进程归属核验", status);
+            string displayed = null;
+            using (ExpectRepairError(attempt, failure))
+                UPilotQuickStart.ShowRepairFailureOnce(attempt, failure, _ => { },
+                    (_, message) => displayed = message,
+                    new UPilotServerRestartRecord { operationId = "unrelated-history", error = "unrelated-error" },
+                    preflightDiagnosis: diagnosis);
+            Assert.That(displayed, Does.Contain("尚未产生重启记录").And.Contain("当前项目进程归属核验"));
+            Assert.That(displayed, Does.Contain("实际只读 status probe：未执行"));
+            Assert.That(displayed, Does.Not.Contain("重启诊断记录与此次尝试不匹配"));
+            Assert.That(displayed, Does.Not.Contain("unrelated-history").And.Not.Contain("unrelated-error"));
+            Assert.That(displayed, Does.Not.Contain("private-command-line-must-not-appear"));
+            if (statusReturned)
+                Assert.That(displayed, Does.Contain("Server PID：1234").And.Contain("statusGeneration=17"));
+            else
+                Assert.That(displayed, Does.Contain("本地状态采集：未返回").And.Contain("最后通过的验证门：未知"));
+            LogAssert.NoUnexpectedReceived();
+        }
+
+        [TestCase(false, "this-attempt", "superseded", false)]
+        [TestCase(true, "old-attempt", "superseded", false)]
+        [TestCase(true, "this-attempt", "failed", false)]
+        [TestCase(true, "this-attempt", "superseded", true)]
+        public void SupersededHistoryCannotSuppressANewPreflightFailure(bool submitted, string recordId,
+            string status, bool expected)
+        {
+            var record = new UPilotServerRestartRecord { operationId = recordId, status = status };
+            Assert.That(UPilotQuickStart.IsRepairSuperseded(submitted, "this-attempt", record), Is.EqualTo(expected));
+            Assert.That(UPilotQuickStart.IsRepairSuperseded(submitted, "this-attempt", null), Is.False);
+        }
+
         [Test]
         public void RecoveryFromFinalStepReturnsToPortsWithStartupEnabledAndHistoricalFailure()
         {

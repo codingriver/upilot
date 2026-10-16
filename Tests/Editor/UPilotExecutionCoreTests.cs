@@ -821,6 +821,10 @@ namespace CodingRiver.UPilot.Tests
                 encode.Invoke(service, new[] { evaluation.Value, "", "inline", (object)1048576 }));
             Assert.That(invocation.InnerException, Is.TypeOf<ExecutionContractException>());
             Assert.That(((ExecutionContractException)invocation.InnerException).Code, Is.EqualTo("RESULT_NOT_INLINEABLE"));
+            var detail = CodingRiver.UPilot.UPilotExecutionService.ToErrorDetail(
+                (ExecutionContractException)invocation.InnerException, "unsupported-result", "csharp.eval");
+            Assert.That(detail.resultTypeName, Is.EqualTo(typeof(ExecutionDisposableFixture).FullName));
+            Assert.That(detail.nextAction, Does.Contain("do not retry automatically"));
             Assert.That(ExecutionConversionFixture.InvocationCount, Is.EqualTo(1));
         }
 

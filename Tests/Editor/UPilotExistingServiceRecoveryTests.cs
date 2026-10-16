@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+﻿// SPDX-License-Identifier: MIT
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -182,6 +182,10 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(_record.status, Is.EqualTo("failed"));
             Assert.That(_record.error, Is.Not.Null.And.Not.Empty);
             Assert.That(_record.reuseDeadline, Is.LessThanOrEqualTo(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
+            Assert.That(_record.validationAttemptCount, Is.Zero);
+            Assert.That(_record.validationStage, Is.EqualTo("discovery"));
+            Assert.That(_record.lastBlockReason, Is.Not.Empty);
+            Assert.That(_record.healthElapsedMs + _record.readOnlyElapsedMs, Is.Zero);
             Assert.That(_manager.GetStatus().LifecyclePhase, Is.EqualTo(UPilotServerLifecyclePhase.None));
             var startup = (UPilotStartupRecord)StartupField("s_record").GetValue(null);
             Assert.That(startup.blockingReasons.Exists(item => item.code == "existing_service_recovery_failed"), Is.True);
@@ -198,6 +202,349 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(_record.error, Is.Empty);
             Assert.That(_manager.GetStatus().LifecyclePhase, Is.EqualTo(UPilotServerLifecyclePhase.None));
             AssertRecoveryDidNotStopOrLaunch();
+        }
+
+        [TestCase("verifying")]
+        [TestCase("cleaning")]
+        public void SupersedingResetRevokesRecoveryBeforeItsStopWaiterCanResume(string phase)
+        {
+            using var cancellation = new CancellationTokenSource();
+            var record = new UPilotMcpServerManager.ExistingServiceRecoveryRecord {
+                id = "superseded-" + Guid.NewGuid().ToString("N"), status = phase,
+                deadline = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 30000,
+                spec = new ServerLaunchSpec { httpPort = _manager.HttpPort, wsPort = _manager.WsPort },
+                projectPath = UPilotProjectConfig.ProjectRoot,
+            };
+            Set("_existingServiceRecovery", record);
+            Set("_existingServiceRecoveryCancellation", cancellation);
+            Set("_startInProgress", true);
+            _manager.CancelExistingServiceRecoveryForReset("");
+
+            Assert.That(record.status, Is.EqualTo("stopped"));
+            Assert.That(cancellation.IsCancellationRequested, Is.True);
+            Assert.That(Get<CancellationTokenSource>("_existingServiceRecoveryCancellation"), Is.Null);
+            Assert.That((bool)Call("OwnsExistingServiceRecovery", record, cancellation), Is.False,
+                "The old stop continuation must lose ownership before ResetStopObservation completes it.");
+
+            var nextLaunch = new ServerLaunchSpec { httpPort = 9991, wsPort = 9992 };
+            Set("_pendingLaunchSpec", nextLaunch);
+            Set("_pendingLaunchDeadline", 123456L);
+            Set("_startInProgress", true);
+            Call("FinishExistingServiceRecoveryWork", record, cancellation);
+            Assert.That(Get<ServerLaunchSpec>("_pendingLaunchSpec"), Is.SameAs(nextLaunch));
+            Assert.That(Get<long>("_pendingLaunchDeadline"), Is.EqualTo(123456));
+            Assert.That(Get<bool>("_startInProgress"), Is.True, "The superseded finally must not clear the next owner.");
+            Assert.That(record.replacementStarted, Is.False);
+            Assert.That(_stopDispatches + _terminations, Is.Zero);
+        }
+
+        [TestCase("verifying", true)]
+        [TestCase("cleaning", true)]
+        [TestCase("replacement_starting", false)]
+        [TestCase("replacement_started", false)]
+        [TestCase("failed", false)]
+        [TestCase("succeeded", false)]
+        public void ResetPreservesAuthorizedOwnerAndReplacementOrTerminalRecords(string phase, bool preserveOwner)
+        {
+            using var cancellation = new CancellationTokenSource();
+            var record = new UPilotMcpServerManager.ExistingServiceRecoveryRecord {
+                id = "preserved-" + Guid.NewGuid().ToString("N"), status = phase, error = "historical evidence",
+                replacementStarted = phase.StartsWith("replacement", StringComparison.Ordinal), replacementPid = 42,
+            };
+            var pending = new ServerLaunchSpec();
+            Set("_existingServiceRecovery", record);
+            Set("_existingServiceRecoveryCancellation", cancellation);
+            Set("_pendingLaunchSpec", pending);
+            Set("_startInProgress", true);
+            _manager.CancelExistingServiceRecoveryForReset(preserveOwner ? record.id : "");
+            Assert.That(record.status, Is.EqualTo(phase));
+            Assert.That(record.error, Is.EqualTo("historical evidence"));
+            Assert.That(record.replacementPid, Is.EqualTo(42));
+            Assert.That(cancellation.IsCancellationRequested, Is.False);
+            Assert.That(Get<CancellationTokenSource>("_existingServiceRecoveryCancellation"), Is.SameAs(cancellation));
+            Assert.That(Get<ServerLaunchSpec>("_pendingLaunchSpec"), Is.SameAs(pending));
+            Assert.That(Get<bool>("_startInProgress"), Is.True);
+            Set("_existingServiceRecoveryCancellation", null);
+        }
+
+        [TestCase("current", true)]
+        [TestCase("unknown", false)]
+        [TestCase("project", false)]
+        [TestCase("lifetime", false)]
+        [TestCase("unity_pid", false)]
+        [TestCase("stop_id", false)]
+        [TestCase("request_id", false)]
+        [TestCase("shutdown_owner", false)]
+        [TestCase("stop_lifetime", false)]
+        [TestCase("standalone_stop", false)]
+        [TestCase("expired", false)]
+        [TestCase("deadline", false)]
+        [TestCase("replacement_started", false)]
+        public void RestoredCleanupReceiptRequiresExplicitOriginalIdentity(string changed, bool expected)
+        {
+            var record = CreateCleanupReceiptRecord(out var stop);
+            // This is the production SessionState representation, with no old-domain manager fields.
+            record = JsonUtility.FromJson<UPilotMcpServerManager.ExistingServiceRecoveryRecord>(JsonUtility.ToJson(record));
+            if (changed == "unknown") { record.resetPerformed = false; record.resetError = ""; }
+            if (changed == "project") record.projectPath = Path.Combine(record.projectPath, "another-project");
+            if (changed == "lifetime") record.resetLifetime += "-old";
+            if (changed == "unity_pid") ++record.resetUnityPid;
+            if (changed == "stop_id") stop.id += "-old";
+            if (changed == "request_id") stop.requestId += "-old";
+            if (changed == "shutdown_owner") stop.shutdownOwnerId += "-old";
+            if (changed == "stop_lifetime") stop.lifetime += "-old";
+            if (changed == "standalone_stop") stop.preserveShutdown = false;
+            if (changed == "expired") record.deadline = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 1;
+            if (changed == "deadline") stop.deadline = record.deadline + 1;
+            if (changed == "replacement_started") record.replacementStarted = true;
+            Assert.That(UPilotMcpServerManager.CanRestoreExistingServiceResetReceipt(record, stop,
+                UPilotProjectConfig.ProjectRoot, UPilotServiceLifetime.Id, System.Diagnostics.Process.GetCurrentProcess().Id,
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), out var reason), Is.EqualTo(expected), reason);
+            if (expected) Assert.That(record.resetError, Is.EqualTo("original_partial_cleanup_failure"));
+        }
+
+        [Test]
+        public void ResumeCleaningRestoresReceiptBeforeSingleReplacementWithoutRepeatingReset()
+        {
+            var record = CreateCleanupReceiptRecord(out var stop);
+            stop.status = "succeeded"; stop.processesExited = stop.portsAvailable = true;
+            var stopDeadline = stop.deadline;
+            Set("_existingServiceRecovery", record);
+            Set("_stopObservation", stop);
+            _manager.BeginServiceShutdown(record.id, "stop_restored", stop.deadline);
+            var resetAttempts = 0;
+            var replacements = 0;
+            _manager.ServiceWorkResetOverride = _ => { ++resetAttempts; return "unexpected_reset"; };
+            _manager.ExistingServiceReplacementStartOverride = current =>
+            {
+                ++replacements;
+                var receipt = _manager.ResetActiveWorkForServiceOwner(current.id, "replacement_test_observer");
+                Assert.That(receipt.Performed, Is.True);
+                Assert.That(receipt.Error, Is.EqualTo("original_partial_cleanup_failure"));
+                current.replacementPid = 42;
+                current.status = "replacement_started";
+                Set("_launchState", new ServerLaunchState { launcherPid = 42, deadlineUtcMs = current.deadline });
+                Call("AllowServiceReplacement", current.id);
+            };
+            Call("ResumeExistingServiceRecovery");
+            Assert.That(replacements, Is.EqualTo(1));
+            Assert.That(resetAttempts + _stopDispatches + _terminations, Is.Zero);
+            Assert.That(_manager.CaptureServiceShutdown().DeadlineUtcMs, Is.EqualTo(record.deadline));
+            Assert.That(stop.deadline, Is.EqualTo(stopDeadline));
+            Assert.That(_manager.IsOwnedResetVerificationPending(_manager.CaptureServiceShutdown()), Is.True);
+            Assert.That(record.resetError, Is.EqualTo("original_partial_cleanup_failure"));
+            Assert.That(Get<CancellationTokenSource>("_existingServiceRecoveryCancellation"), Is.Null);
+        }
+
+        [Test]
+        public void ResumeCleaningWithUnknownLegacyReceiptFailsWithoutRepeatingResetOrLaunch()
+        {
+            StartupField("s_record").SetValue(null, new UPilotStartupRecord { failureSummaryLogged = true });
+            StartupField("s_path").SetValue(null, null);
+            var record = CreateCleanupReceiptRecord(out var stop);
+            record.resetPerformed = false;
+            record.resetError = "";
+            stop.status = "succeeded"; stop.processesExited = stop.portsAvailable = true;
+            Set("_existingServiceRecovery", record);
+            Set("_stopObservation", stop);
+            var resetAttempts = 0;
+            var replacements = 0;
+            _manager.ServiceWorkResetOverride = _ => { ++resetAttempts; return ""; };
+            _manager.ExistingServiceReplacementStartOverride = _ => ++replacements;
+            LogAssert.Expect(LogType.Error, new Regex("遗留服务恢复结束；recoveryId=" + Regex.Escape(record.id)));
+            Call("ResumeExistingServiceRecovery");
+            Assert.That(record.status, Is.EqualTo("failed"));
+            Assert.That(record.error, Does.Contain("reset_receipt_unknown"));
+            Assert.That(resetAttempts + replacements + _stopDispatches + _terminations, Is.Zero);
+            Assert.That(record.replacementStarted, Is.False);
+            Assert.That(Get<CancellationTokenSource>("_existingServiceRecoveryCancellation"), Is.Null);
+            LogAssert.NoUnexpectedReceived();
+        }
+
+        [TestCase("current", true)]
+        [TestCase("unknown", false)]
+        [TestCase("project", false)]
+        [TestCase("lifetime", false)]
+        [TestCase("unity_pid", false)]
+        [TestCase("operation", false)]
+        [TestCase("starting", false)]
+        [TestCase("not_dispatched", false)]
+        [TestCase("blocked", false)]
+        [TestCase("expired", false)]
+        [TestCase("deadline", false)]
+        [TestCase("missing_spec", false)]
+        [TestCase("changed_spec", false)]
+        [TestCase("invalid_spec", false)]
+        [TestCase("launcher_pid", false)]
+        [TestCase("launcher_created", false)]
+        [TestCase("missing_created", false)]
+        [TestCase("terminal", false)]
+        public void DispatchedRecoveryReceiptRequiresFrozenLaunchAndOriginalIdentity(string changed, bool expected)
+        {
+            var record = CreateDispatchedReceiptRecord(out var state);
+            record = JsonUtility.FromJson<UPilotMcpServerManager.ExistingServiceRecoveryRecord>(JsonUtility.ToJson(record));
+            if (changed == "unknown") { record.resetPerformed = false; record.resetError = ""; }
+            if (changed == "project") record.projectPath = Path.Combine(record.projectPath, "another-project");
+            if (changed == "lifetime") record.resetLifetime += "-old";
+            if (changed == "unity_pid") ++record.resetUnityPid;
+            if (changed == "operation") record.id = "";
+            if (changed == "starting") record.status = "replacement_starting";
+            if (changed == "not_dispatched") record.replacementStarted = false;
+            if (changed == "blocked") record.replacementRestoreBlocked = true;
+            if (changed == "expired") record.deadline = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 1;
+            if (changed == "deadline") ++state.deadlineUtcMs;
+            if (changed == "missing_spec") record.replacementSpec = null;
+            if (changed == "changed_spec") ++record.replacementSpec.httpPort;
+            if (changed == "invalid_spec") { record.replacementSpec.environmentKeys = null; state.spec.environmentKeys = null; }
+            if (changed == "launcher_pid") ++record.replacementPid;
+            if (changed == "launcher_created") ++record.replacementLauncherCreatedAt;
+            if (changed == "missing_created") record.replacementLauncherCreatedAt = 0;
+            if (changed == "terminal") state.terminal = true;
+            Assert.That(UPilotMcpServerManager.CanRestoreExistingServiceReplacementResetReceipt(record, state,
+                UPilotProjectConfig.ProjectRoot, UPilotServiceLifetime.Id, System.Diagnostics.Process.GetCurrentProcess().Id,
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), out var reason), Is.EqualTo(expected), reason);
+            if (expected) Assert.That(record.resetError, Is.EqualTo("original_partial_cleanup_failure"));
+        }
+
+        [Test]
+        public void ReplacementDispatchPersistsActualFrozenLaunchWithoutResetOrLaunchReplay()
+        {
+            var record = CreateDispatchedReceiptRecord(out var state);
+            record.status = "replacement_starting";
+            record.replacementPid = 0; record.replacementSpec = null; record.replacementLauncherCreatedAt = 0;
+            Set("_existingServiceRecovery", record);
+            Set("_launchState", state);
+            Call("RecordExistingServiceReplacement", state.launcherPid);
+            var persisted = JsonUtility.FromJson<UPilotMcpServerManager.ExistingServiceRecoveryRecord>(SessionState.GetString(RecoveryKey, ""));
+            Assert.That(persisted.status, Is.EqualTo("replacement_started"));
+            Assert.That(persisted.replacementPid, Is.EqualTo(state.launcherPid));
+            Assert.That(persisted.replacementLauncherCreatedAt, Is.EqualTo(state.launcherCreatedAt));
+            Assert.That(JsonUtility.ToJson(persisted.replacementSpec), Is.EqualTo(JsonUtility.ToJson(state.spec)));
+            Assert.That(persisted.deadline, Is.EqualTo(record.deadline));
+            Assert.That(persisted.resetError, Is.EqualTo("original_partial_cleanup_failure"));
+            Assert.That(ReferenceEquals(record.replacementSpec, state.spec), Is.False);
+            Assert.That(_stopDispatches + _terminations, Is.Zero);
+        }
+
+        [TestCase("replacement_starting", false)]
+        [TestCase("replacement_started", false)]
+        [TestCase("replacement_started", true)]
+        public void UncertainDispatchedRecoveryKeepsAdmissionClosedWithoutResetOrLaunch(string status, bool missingSpec)
+        {
+            StartupField("s_record").SetValue(null, new UPilotStartupRecord { failureSummaryLogged = true });
+            StartupField("s_path").SetValue(null, null);
+            var restartField = typeof(UPilotServerRestartDiagnostics).GetField("s_record", StaticFields);
+            var previousRestart = restartField.GetValue(null);
+            var maintenanceField = typeof(UPilotServiceMaintenance).GetField("_journal", StaticFields);
+            var previousMaintenance = maintenanceField.GetValue(null);
+            try
+            {
+                restartField.SetValue(null, new UPilotServerRestartRecord { status = "succeeded" });
+                maintenanceField.SetValue(null, FormatterServices.GetUninitializedObject(typeof(ServiceMaintenanceJournal)));
+                var record = CreateDispatchedReceiptRecord(out _);
+                record.status = status;
+                if (missingSpec) record.spec = null;
+                SessionState.SetString(RecoveryKey, JsonUtility.ToJson(record));
+                SessionState.SetString(LaunchKey, "");
+                var resets = 0;
+                _manager.ServiceWorkResetOverride = _ => { ++resets; return "unexpected"; };
+                LogAssert.Expect(LogType.Log, new Regex(@"^\[UPilot\]\[Lifecycle\] utc=\S+ pid=\d+ thread=\d+ eventId=[0-9a-f]{32} event=shutdown_protection_started\n" +
+                    @"shutdownGeneration=1 ownerId=" + Regex.Escape(record.id) + @" phase=recovery_reload_receipt_verifying stopping=True replacementEligible=False " +
+                    @"deadlineUtcMs=" + record.deadline + @" remainingBudgetMs=\d+ shutdownElapsedMs=\d+$"));
+                LogAssert.Expect(LogType.Error, new Regex("遗留服务恢复结束；recoveryId=" + Regex.Escape(record.id)));
+                Call("RestoreExistingServiceRecovery");
+                var restored = Get<UPilotMcpServerManager.ExistingServiceRecoveryRecord>("_existingServiceRecovery");
+                var shutdown = _manager.CaptureServiceShutdown();
+                Assert.That(restored.status, Is.EqualTo("failed"));
+                Assert.That(restored.replacementRestoreBlocked, Is.True);
+                Assert.That(shutdown.OwnerId, Is.EqualTo(record.id));
+                Assert.That(shutdown.DeadlineUtcMs, Is.EqualTo(record.deadline));
+                Assert.That(shutdown.Stopping, Is.True);
+                Assert.That(_manager.ExistingServiceReplacementNeedsReceiptRestore, Is.True);
+                Assert.That(_manager.CanApplyHello(shutdown, out var reason), Is.False);
+                Assert.That(reason, Is.EqualTo("shutdown_in_progress"));
+                Assert.That(resets + _stopDispatches + _terminations, Is.Zero);
+                Assert.That(Get<ServerLaunchState>("_launchState"), Is.Null);
+                Assert.That(restored.resetError, Is.EqualTo("original_partial_cleanup_failure"));
+                LogAssert.NoUnexpectedReceived();
+            }
+            finally
+            {
+                restartField.SetValue(null, previousRestart);
+                maintenanceField.SetValue(null, previousMaintenance);
+            }
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void HistoricalBlockedRecoveryDoesNotDisplaceCurrentRestartOrMaintenance(bool maintenance)
+        {
+            var restartField = typeof(UPilotServerRestartDiagnostics).GetField("s_record", StaticFields);
+            var maintenanceField = typeof(UPilotServiceMaintenance).GetField("_journal", StaticFields);
+            var previousRestart = restartField.GetValue(null);
+            var previousMaintenance = maintenanceField.GetValue(null);
+            try
+            {
+                restartField.SetValue(null, new UPilotServerRestartRecord { status = maintenance ? "succeeded" : "running", operationId = "current-restart" });
+                var journal = (ServiceMaintenanceJournal)FormatterServices.GetUninitializedObject(typeof(ServiceMaintenanceJournal));
+                if (maintenance)
+                    typeof(ServiceMaintenanceJournal).GetField("<Current>k__BackingField", InstanceFields).SetValue(journal,
+                        new ServiceMaintenanceRecord { status = "running", maintenanceId = "current-maintenance" });
+                maintenanceField.SetValue(null, journal);
+                var record = CreateDispatchedReceiptRecord(out _);
+                record.status = "failed"; record.error = "original_recovery_failure"; record.replacementRestoreBlocked = true;
+                SessionState.SetString(RecoveryKey, JsonUtility.ToJson(record));
+                Call("RestoreExistingServiceRecovery");
+                var shutdown = _manager.CaptureServiceShutdown();
+                Assert.That(shutdown.Stopping || shutdown.ReplacementEligible, Is.False);
+                Assert.That(string.IsNullOrEmpty(shutdown.OwnerId), Is.True);
+                var restored = Get<UPilotMcpServerManager.ExistingServiceRecoveryRecord>("_existingServiceRecovery");
+                Assert.That(restored.status, Is.EqualTo("failed"));
+                Assert.That(restored.error, Is.EqualTo("original_recovery_failure"));
+                Assert.That(restored.resetError, Is.EqualTo("original_partial_cleanup_failure"));
+                Assert.That(restored.replacementRestoreBlocked, Is.True);
+                Assert.That(_stopDispatches + _terminations, Is.Zero);
+            }
+            finally
+            {
+                restartField.SetValue(null, previousRestart);
+                maintenanceField.SetValue(null, previousMaintenance);
+            }
+        }
+
+        private UPilotMcpServerManager.ExistingServiceRecoveryRecord CreateDispatchedReceiptRecord(out ServerLaunchState state)
+        {
+            var record = CreateCleanupReceiptRecord(out _);
+            var executable = Path.Combine(record.projectPath, "upilot-test-receipt.exe");
+            var spec = new ServerLaunchSpec { projectPath = record.projectPath, executablePath = executable,
+                expectedEntry = executable, serviceExecutablePaths = new[] { executable },
+                environmentKeys = Array.Empty<string>(), environmentValues = Array.Empty<string>(),
+                httpPort = 18011, wsPort = 18765 };
+            record.status = "replacement_started"; record.replacementStarted = true;
+            record.replacementPid = 42; record.replacementLauncherCreatedAt = 987654321;
+            record.replacementSpec = spec.Snapshot();
+            state = new ServerLaunchState { spec = spec, launcherPid = record.replacementPid,
+                launcherCreatedAt = record.replacementLauncherCreatedAt, deadlineUtcMs = record.deadline };
+            return record;
+        }
+
+        private UPilotMcpServerManager.ExistingServiceRecoveryRecord CreateCleanupReceiptRecord(out ServiceStopObservationRecord stop)
+        {
+            var deadline = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 120000;
+            var id = "restored-recovery-" + Guid.NewGuid().ToString("N");
+            var pid = System.Diagnostics.Process.GetCurrentProcess().Id;
+            stop = new ServiceStopObservationRecord {
+                id = "stop-" + Guid.NewGuid().ToString("N"), requestId = id, shutdownOwnerId = id,
+                project = UPilotProjectConfig.ProjectRoot, lifetime = UPilotServiceLifetime.Id,
+                unityPid = pid, deadline = deadline - 90000, preserveShutdown = true,
+            };
+            return new UPilotMcpServerManager.ExistingServiceRecoveryRecord {
+                id = id, projectPath = UPilotProjectConfig.ProjectRoot, status = "cleaning",
+                spec = new ServerLaunchSpec { httpPort = _manager.HttpPort, wsPort = _manager.WsPort },
+                deadline = deadline, stopObservationId = stop.id,
+                resetPerformed = true, resetLifetime = UPilotServiceLifetime.Id, resetUnityPid = pid,
+                resetError = "original_partial_cleanup_failure",
+            };
         }
 
         private async Task RunRecoveryAsync(bool automatic, bool expired)

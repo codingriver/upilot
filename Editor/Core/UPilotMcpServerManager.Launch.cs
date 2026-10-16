@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+﻿// SPDX-License-Identifier: MIT
 using System;
 using System.Diagnostics;
 using System.IO;
@@ -26,6 +26,7 @@ namespace CodingRiver.UPilot
         private bool _initialServiceRecoveryHadPersistedState;
         private CancellationTokenSource _stoppedIdentityRecoveryCancellation;
         private Task _stoppedIdentityRecoveryTask;
+        private string _restoredRestartResetReceiptId = "";
 
         internal bool InitialServiceRecoveryCompleted => _initialServiceRecoveryCompleted;
         internal Task StoppedIdentityRecovery => _stoppedIdentityRecoveryTask ?? Task.CompletedTask;
@@ -101,13 +102,15 @@ namespace CodingRiver.UPilot
         /// <summary>所有启动描述共用唯一服务启动入口。</summary>
         private void LaunchServer(ServerLaunchSpec spec, long deadline)
         {
+            var shutdownOwner = CaptureServiceShutdown().OwnerId;
             ReleaseRecoveredServiceAttachment(resetPriorRecovery: true);
             spec = spec.Snapshot();
             if (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= deadline)
                 throw new TimeoutException("本次启动期限已到，未启动服务");
             Directory.CreateDirectory(Path.Combine(spec.projectPath, "log"));
             if (_restartMaintenanceDeadlineUtcMs > 0) UPilotServiceMaintenance.RequireContinuation();
-            UnityEngine.Debug.Log($"[UPilotMcpServerManager] 正在启动 MCP Server；入口={spec.expectedEntry}；HTTP={spec.httpPort}；WS={spec.wsPort}。");
+            var launchStarted = Stopwatch.GetTimestamp();
+            Logger.Lifecycle("server_launch_dispatching", $"{CaptureServiceShutdown().Detail} httpPort={spec.httpPort} wsPort={spec.wsPort} remainingMs={Math.Max(0, deadline - StopNow)}");
             var lifecycleId = IsRestartObservationActive() ? _restartOperationId : Guid.NewGuid().ToString("N");
             SetLifecyclePhase(UPilotServerLifecyclePhase.Starting, 0, lifecycleId, deadline);
             var process = Process.Start(spec.StartInfo());
@@ -125,6 +128,7 @@ namespace CodingRiver.UPilot
                 spec = spec, launcherPid = process.Id,
                 launcherCreatedAt = process.StartTime.ToUniversalTime().Ticks, deadlineUtcMs = deadline,
             };
+            AllowServiceReplacement(shutdownOwner);
             RecordExistingServiceReplacement(process.Id);
             _pendingLaunchDeadline = 0;
             _launchNeedsRevalidation = false;
@@ -138,7 +142,7 @@ namespace CodingRiver.UPilot
                 UPilotServerRestartDiagnostics.RecordLaunchSpec(_restartOperationId, spec);
                 UPilotServerRestartDiagnostics.RecordProcessStarted(_restartOperationId, process.Id, _launchState.launcherCreatedAt);
             }
-            UnityEngine.Debug.Log($"[UPilotMcpServerManager] 服务启动 PID={process.Id}；入口={spec.expectedEntry}；HTTP={spec.httpPort}；WS={spec.wsPort}；operationId={lifecycleId}；等待统一身份核验");
+            Logger.Lifecycle("server_launch_dispatched", $"{CaptureServiceShutdown().Detail} operationId={lifecycleId} launcherPid={process.Id} launcherCreatedAtTicks={_launchState.launcherCreatedAt} httpPort={spec.httpPort} wsPort={spec.wsPort} elapsedMs={Logger.LifecycleElapsedMs(launchStarted)} remainingMs={Math.Max(0, deadline - StopNow)} awaitingIdentityVerification=true");
             BeginLaunchObservation();
         }
 
@@ -330,6 +334,7 @@ namespace CodingRiver.UPilot
                 if (state.servicePid > 0 && state.serviceCreatedAt > 0 &&
                     (service.pid != state.servicePid || service.createdAt != state.serviceCreatedAt))
                 { error = "service_identity_changed_or_expired"; return false; }
+                var wasVerified = state.verified;
                 if (!state.TryConfirm(service.pid, service.createdAt, status.Health.server_instance_id,
                     DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), stopping)) { error = "service_identity_changed_or_expired"; return false; }
                 DisposeTrackedProcess();
@@ -338,6 +343,8 @@ namespace CodingRiver.UPilot
                 _trackedProcessCreatedAtTicks = service.createdAt;
                 candidate = null;
                 _launchNeedsRevalidation = false;
+                if (!wasVerified)
+                    Logger.Lifecycle("server_launch_identity_verified", $"{CaptureServiceShutdown().Detail} serverPid={service.pid} serverCreatedAtTicks={service.createdAt} serverInstanceId={state.instanceId} launcherPid={state.launcherPid} startGeneration={_startAttemptGeneration} remainingMs={Math.Max(0, state.deadlineUtcMs - StopNow)}");
                 PersistLaunchState();
                 if (!stopping && IsRestartObservationActive())
                     UPilotServerRestartDiagnostics.RecordServiceIdentity(_restartOperationId, state);
@@ -400,7 +407,70 @@ namespace CodingRiver.UPilot
                  record.launcherProcessId == state.launcherPid && record.launcherProcessCreatedAtTicks == state.launcherCreatedAt &&
                  record.newProcessId == state.servicePid && record.newProcessCreatedAtTicks == state.serviceCreatedAt));
 
-        private void RestoreLaunchObservation() => RestoreLaunchState(observe: true);
+        private void RestoreLaunchObservation()
+        {
+            _restoredRestartResetReceiptId = "";
+            if (UPilotServerRestartDiagnostics.TryGetActive(out var record))
+            {
+                var owner = record.resetReceipt?.ownerId;
+                if (string.IsNullOrEmpty(owner)) owner = record.operationId;
+                var current = CaptureServiceShutdown();
+                // Initial recovery must not displace a different live owner.
+                if ((current.Stopping || current.ReplacementEligible) && current.OwnerId != owner &&
+                    !current.OwnerId.StartsWith("bridge:", StringComparison.Ordinal)) return;
+                _restartShutdownOwnerId = owner;
+                BeginServiceShutdown(owner, "restart_reload_receipt_verifying", UPilotServerRestartDiagnostics.Deadline(record));
+            }
+            RestoreLaunchState(observe: true);
+        }
+
+        // Restores only the original reset receipt after frozen launch handles were recovered.
+        // No queue, stop, start or cleanup is executed here.
+        internal bool RestoreRestartResetReceipt(UPilotServerRestartRecord record,
+            ServiceMaintenanceRecord maintenance, out string reason)
+        {
+            var receipt = record?.resetReceipt;
+            var state = _launchState;
+            using var editor = Process.GetCurrentProcess();
+            var deadline = record == null ? 0 : UPilotServerRestartDiagnostics.Deadline(record);
+            reason = "restart_reset_receipt_context_mismatch";
+            if (record?.status != "running" || string.IsNullOrEmpty(record.operationId) || receipt?.performed != true ||
+                receipt.operationId != record.operationId || receipt.restartGeneration <= 0 ||
+                receipt.restartGeneration != record.restartGeneration || receipt.unityProcessId != editor.Id ||
+                string.IsNullOrEmpty(receipt.serviceLifetime) || receipt.serviceLifetime != UPilotServiceLifetime.Id ||
+                !SameProjectPath(receipt.projectPath, record.projectPath) ||
+                !SameProjectPath(record.projectPath, UPilotProjectConfig.ProjectRoot) ||
+                (receipt.oldBridgeSessionId ?? "") != (record.oldBridgeSessionId ?? "") ||
+                receipt.deadlineUtcMs != deadline || deadline <= StopNow) return false;
+            if (record.maintenanceDeadlineUtcMs > 0)
+            {
+                if (maintenance?.status != "running" || maintenance.maintenanceId != receipt.ownerId ||
+                    maintenance.serverRestartId != record.operationId || maintenance.unityProcessId != editor.Id ||
+                    maintenance.deadlineAtUtcMs != deadline || maintenance.acceptedAtUtcMs != record.requestedAtUtcMs ||
+                    !SameProjectPath(maintenance.projectPath, record.projectPath) ||
+                    (maintenance.oldBridgeSessionId ?? "") != (record.oldBridgeSessionId ?? "")) return false;
+            }
+            else if (receipt.ownerId != record.operationId || maintenance?.Active == true) return false;
+            reason = "restart_reset_receipt_launch_mismatch";
+            if (state?.spec == null || state.terminal || state.spec.Validate().Length != 0 || record.launchSpec == null ||
+                !SameProjectPath(state.spec.projectPath, record.projectPath) ||
+                JsonUtility.ToJson(state.spec) != JsonUtility.ToJson(record.launchSpec) ||
+                state.launcherPid <= 0 || state.launcherCreatedAt <= 0 ||
+                state.launcherPid != record.launcherProcessId || state.launcherCreatedAt != record.launcherProcessCreatedAtTicks ||
+                state.deadlineUtcMs != deadline || _launcherProcess == null || _trackedProcess == null ||
+                (state.verified ? record.newProcessId != state.servicePid || record.newProcessCreatedAtTicks != state.serviceCreatedAt :
+                    record.newProcessId != state.launcherPid || record.newProcessCreatedAtTicks != state.launcherCreatedAt)) return false;
+            var shutdown = CaptureServiceShutdown();
+            if (shutdown.OwnerId != receipt.ownerId ||
+                !RestoreServiceWorkResetReceipt(shutdown, receipt.performed, receipt.error, deadline, out reason)) return false;
+            // Keep persisted verified identity values for the next full OS/health comparison.
+            _launchNeedsRevalidation = true;
+            AllowServiceReplacement(receipt.ownerId);
+            _restartShutdownOwnerId = receipt.ownerId;
+            _restoredRestartResetReceiptId = record.operationId;
+            reason = "restored";
+            return true;
+        }
 
         internal static bool TryCreateStoppedIdentityRecoveryCandidate(UPilotServerRestartRecord record,
             ServiceStopObservationRecord stop, out ServerLaunchState candidate)
@@ -526,6 +596,17 @@ namespace CodingRiver.UPilot
                 if (!observe && !Array.Exists(state.spec.serviceExecutablePaths,
                     path => UPilotDeploymentDiagnostics.SamePath(path, _trackedProcess.MainModule.FileName)))
                     throw new InvalidOperationException("服务进程可执行文件在 Reload 后身份不符");
+                if (observe)
+                {
+                    if (UPilotServerRestartDiagnostics.TryGetActive(out var restart))
+                    {
+                        if (!RestoreRestartResetReceipt(restart, UPilotServiceMaintenance.Current, out var receiptError))
+                            throw new InvalidOperationException("Reload 后原重启 reset receipt 无法核实；未重放清理或停启：" + receiptError);
+                    }
+                    else if (ExistingServiceReplacementNeedsReceiptRestore &&
+                        !RestoreExistingServiceReplacementResetReceipt(out var recoveryReceiptError))
+                        throw new InvalidOperationException("Reload 后原遗留服务恢复 reset receipt 无法核实；未重放清理或停启：" + recoveryReceiptError);
+                }
                 if (observe && !state.terminal)
                     SetLifecyclePhase(state.verified ? UPilotServerLifecyclePhase.Verifying : UPilotServerLifecyclePhase.Starting,
                         state.launcherPid, IsRestartObservationActive() ? _restartOperationId : _launchReloadRevalidation ? state.reloadRevalidation.observationId : Guid.NewGuid().ToString("N"),

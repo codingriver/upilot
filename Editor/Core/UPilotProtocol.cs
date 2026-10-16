@@ -1,4 +1,4 @@
-// -----------------------------------------------------------------------
+﻿// -----------------------------------------------------------------------
 // UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -124,6 +124,8 @@ namespace CodingRiver.UPilot
         /// <summary>MCP Python 进程当前工作目录绝对路径（通常为 Cursor 打开的仓库根目录）。</summary>
         public string mcpWorkingDirectory;
         public string serverLifecycleId;
+        // Existing version_payload field, used to correlate the ACK with verified launch evidence.
+        public string server_instance_id;
     }
 
     [Serializable]
@@ -231,6 +233,8 @@ namespace CodingRiver.UPilot
     {
         public string commandId;
         public string commandName;
+        public string resultTypeName;
+        public string resultMode;
         public long actualBytes;
         public long limitBytes;
         public string outcome;

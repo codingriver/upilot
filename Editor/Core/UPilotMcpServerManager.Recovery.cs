@@ -1,9 +1,10 @@
-// SPDX-License-Identifier: MIT
+﻿// SPDX-License-Identifier: MIT
 using System;
 using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Stopwatch = System.Diagnostics.Stopwatch;
 using UnityEditor;
 using UnityEngine;
 
@@ -24,10 +25,23 @@ namespace CodingRiver.UPilot
             public long deadline, reuseDeadline;
             public bool automatic, replacementStarted, revalidateOnly;
             public int replacementPid;
+            public string validationStage = "", lastBlockReason = "";
+            public string resetError = "", resetLifetime = "";
+            public bool resetPerformed;
+            public int resetUnityPid;
+            public ServerLaunchSpec replacementSpec;
+            public long replacementLauncherCreatedAt;
+            public bool replacementRestoreBlocked;
+            public int validationAttemptCount;
+            public bool discoveryCompleted;
+            public long discoveryWorkMs, discoveryDispatchDelayMs, discoveryResumeDelayMs, healthElapsedMs, readOnlyElapsedMs;
+            [NonSerialized] internal long validationStartedTicks;
+            [NonSerialized] internal string lastLoggedValidationState;
         }
 
         // Isolated acceptance supplies a real process launcher without touching the global Bridge.
         internal Action<ExistingServiceRecoveryRecord> ExistingServiceReplacementStartOverride;
+        internal Action<ExistingServiceRecoveryRecord> ExistingServiceShutdownOverride;
         private ExistingServiceRecoveryRecord _existingServiceRecovery;
         private CancellationTokenSource _existingServiceRecoveryCancellation;
         private ServerStopTarget _recoveredServiceTarget;
@@ -91,6 +105,7 @@ namespace CodingRiver.UPilot
                 else UPilotServerRestartDiagnostics.RecordFailure(restart.operationId, "restart_recovery_required", message);
                 Logger.ReportFailure("SERVER", message, stop.failureException, restart.operationId, terminal: true);
             }
+            FinishServiceShutdown(stop.shutdownOwnerId, "restored_restart_ended");
             NotifyStatusChanged();
             return true;
         }
@@ -102,8 +117,12 @@ namespace CodingRiver.UPilot
         }
 
         internal bool ExistingServiceRecoveryOwnsStartup => _existingServiceRecovery != null;
+        internal bool ExistingServiceReplacementNeedsReceiptRestore =>
+            _existingServiceRecovery?.status == "replacement_started" || _existingServiceRecovery?.replacementRestoreBlocked == true;
         internal string ExistingServiceRecoveryFailure => _existingServiceRecovery?.status == "failed"
             ? _existingServiceRecovery.error : "";
+        internal string ExistingServiceRecoveryFailureId => _existingServiceRecovery?.status == "failed"
+            ? _existingServiceRecovery.id ?? "" : "";
         internal bool HasVerifiedRecoveredAttachment
         {
             get
@@ -181,19 +200,70 @@ namespace CodingRiver.UPilot
             UPilotDeploymentDiagnostics.SamePath(record.projectPath, UPilotProjectConfig.ProjectRoot);
 
         private async Task<ServerStopDiscovery> DiscoverExistingServiceAsync(ServerStopScope scope,
-            long deadline, CancellationToken token)
+            long deadline, CancellationToken token, ExistingServiceRecoveryRecord record)
         {
-            var discovery = Task.Run(() => DiscoverStopTargets(scope, Array.Empty<int>(), deadline));
+            var queuedAt = Stopwatch.GetTimestamp();
+            long startedAt = 0, completedAt = 0;
+            var discovery = Task.Run(() => {
+                Interlocked.Exchange(ref startedAt, Stopwatch.GetTimestamp());
+                try { return DiscoverStopTargets(scope, Array.Empty<int>(), deadline); }
+                finally { Interlocked.Exchange(ref completedAt, Stopwatch.GetTimestamp()); }
+            });
             var remaining = Math.Max(0, deadline - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
             if (await Task.WhenAny(discovery, Task.Delay((int)Math.Min(int.MaxValue, remaining), token)) == discovery)
-                return await discovery;
+            {
+                try { return await discovery; }
+                finally
+                {
+                    var scanStartedAt = Interlocked.Read(ref startedAt);
+                    var scanCompletedAt = Interlocked.Read(ref completedAt);
+                    record.discoveryCompleted = true;
+                    record.discoveryDispatchDelayMs = RecoveryElapsedBetween(queuedAt, scanStartedAt);
+                    record.discoveryWorkMs = RecoveryElapsedBetween(scanStartedAt, scanCompletedAt);
+                    record.discoveryResumeDelayMs = RecoveryElapsedBetween(scanCompletedAt, Stopwatch.GetTimestamp());
+                    Logger.Lifecycle("recovery_discovery_completed", $"recoveryId={record.id} " +
+                        $"dispatchDelayMs={record.discoveryDispatchDelayMs} scanMs={record.discoveryWorkMs} " +
+                        $"resumeDelayMs={record.discoveryResumeDelayMs} deadlineUtcMs={deadline}");
+                }
+            }
             // OS inspection may complete after cancellation. Its handles must never escape.
             _ = discovery.ContinueWith(t => {
                 if (t.Status == TaskStatus.RanToCompletion) t.Result.Dispose();
                 else { var ignored = t.Exception; }
             }, TaskScheduler.Default);
+            var scanStarted = Interlocked.Read(ref startedAt);
+            var scanCompleted = Interlocked.Read(ref completedAt);
+            var resumedAt = Stopwatch.GetTimestamp();
+            record.discoveryCompleted = scanCompleted > 0;
+            record.discoveryDispatchDelayMs = RecoveryElapsedBetween(queuedAt, scanStarted);
+            record.discoveryWorkMs = RecoveryElapsedBetween(scanStarted, scanCompleted > 0 ? scanCompleted : resumedAt);
+            record.discoveryResumeDelayMs = RecoveryElapsedBetween(scanCompleted, resumedAt);
+            Logger.Lifecycle("recovery_discovery_incomplete", $"recoveryId={record.id} " +
+                $"started={scanStarted > 0} workerCompleted={record.discoveryCompleted} " +
+                $"dispatchDelayMs={RecoveryDuration(record.discoveryDispatchDelayMs, scanStarted > 0)} " +
+                $"scanMs={RecoveryDuration(record.discoveryWorkMs, record.discoveryCompleted)} " +
+                $"scanObservedMs={RecoveryDuration(record.discoveryWorkMs, scanStarted > 0)} " +
+                $"resumeDelayMs={RecoveryDuration(record.discoveryResumeDelayMs, record.discoveryCompleted)} deadlineUtcMs={deadline}");
             token.ThrowIfCancellationRequested();
             throw new TimeoutException("遗留服务进程发现超过本次复用验证期限。");
+        }
+
+        private static long RecoveryElapsedBetween(long start, long end) =>
+            start <= 0 || end <= 0 ? 0 : Math.Max(0, (long)((end - start) * 1000d / Stopwatch.Frequency));
+
+        private static string RecoveryDuration(long durationMs, bool observed) =>
+            observed ? durationMs.ToString() : "unknown";
+
+        private static void RecordExistingServiceValidation(ExistingServiceRecoveryRecord record, string stage, string blockReason = "")
+        {
+            record.validationStage = stage;
+            record.lastBlockReason = blockReason;
+            var key = stage + ":" + blockReason;
+            if (record.lastLoggedValidationState == key) return;
+            record.lastLoggedValidationState = key;
+            Logger.Lifecycle("recovery_validation_stage", $"recoveryId={record.id} stage={stage} blockReason={blockReason} " +
+                $"attempt={record.validationAttemptCount} elapsedMs={Logger.LifecycleElapsedMs(record.validationStartedTicks)} " +
+                $"reuseDeadlineUtcMs={record.reuseDeadline}");
         }
 
         internal static bool CanReuseExistingService(McpServerStatus status, string projectPath, int processId,
@@ -202,15 +272,37 @@ namespace CodingRiver.UPilot
             !string.IsNullOrEmpty(status.Health?.server_instance_id) &&
             UPilotDeploymentDiagnostics.SamePath(status.HealthProjectPath, projectPath);
 
+        private static string ExistingServiceOwnershipBlock(McpServerStatus status, string projectPath,
+            ServerStopTarget target, bool ownsHttp, bool ownsWs, bool unmatchedOwners)
+        {
+            if (!status.HealthEndpointResponded) return "health_unavailable";
+            if (!status.HealthIdentifiesUPilot) return "health_identity_missing";
+            if (target == null) return "process_not_discovered";
+            if (target.HasExited) return "process_exited";
+            if (!ownsHttp) return "http_owner_unverified";
+            if (!ownsWs) return "ws_owner_unverified";
+            if (status.HealthServerProcessId != target.ProcessId || target.ProcessId <= 0) return "health_pid_mismatch";
+            if (string.IsNullOrEmpty(status.Health?.server_instance_id)) return "server_instance_missing";
+            if (!UPilotDeploymentDiagnostics.SamePath(status.HealthProjectPath, projectPath)) return "project_mismatch";
+            return unmatchedOwners ? "unmatched_port_owner" : "";
+        }
+
         private async Task RecoverExistingServiceAsync(ExistingServiceRecoveryRecord record, ServerStopScope scope,
             int startGeneration, long restartGeneration, CancellationTokenSource cancellation, bool revalidateOnly = false)
         {
             var token = cancellation.Token;
             var lifecycle = SetLifecyclePhase(UPilotServerLifecyclePhase.Verifying, 0, record.id, record.reuseDeadline);
             Exception validationError = null;
+            record.validationStartedTicks = Stopwatch.GetTimestamp();
+            record.validationAttemptCount = 0;
+            record.healthElapsedMs = record.readOnlyElapsedMs = 0;
+            record.discoveryWorkMs = record.discoveryDispatchDelayMs = record.discoveryResumeDelayMs = 0;
+            record.discoveryCompleted = false;
+            record.lastLoggedValidationState = null;
+            RecordExistingServiceValidation(record, "discovery");
             try
             {
-                using (var discovery = await DiscoverExistingServiceAsync(scope, record.reuseDeadline, token))
+                using (var discovery = await DiscoverExistingServiceAsync(scope, record.reuseDeadline, token, record))
                 using (var client = CreateLoopbackStatusClient())
                 {
                     client.Timeout = Timeout.InfiniteTimeSpan;
@@ -219,26 +311,36 @@ namespace CodingRiver.UPilot
                     {
                         try
                         {
-                            var status = await GetRestartHealthAsync(client, scope.HttpPort, record.reuseDeadline,
-                                token, this, 1000);
+                            record.validationAttemptCount++;
+                            record.validationStage = "health";
+                            var healthStartedAt = Stopwatch.GetTimestamp();
+                            McpServerStatus status;
+                            try { status = await GetRestartHealthAsync(client, scope.HttpPort, record.reuseDeadline, token, this, 1000); }
+                            finally { record.healthElapsedMs += Logger.LifecycleElapsedMs(healthStartedAt); }
                             token.ThrowIfCancellationRequested();
                             var target = discovery.Targets.FirstOrDefault(p => p.ProcessId == status.HealthServerProcessId);
                             var ownsHttp = discovery.ListeningPorts.TryGetValue(status.HealthServerProcessId, out var ports) &&
                                 ports.Contains(scope.HttpPort);
                             var ownsWs = ports != null && ports.Contains(scope.WsPort);
-                            if (target != null && CanReuseExistingService(status, scope.ProjectPath, target.ProcessId,
-                                !target.HasExited, ownsHttp, ownsWs) && discovery.UnmatchedPortOwners.Length == 0)
+                            var ownershipBlock = ExistingServiceOwnershipBlock(status, scope.ProjectPath, target,
+                                ownsHttp, ownsWs, discovery.UnmatchedPortOwners.Length > 0);
+                            if (ownershipBlock.Length == 0)
                             {
                                 status.ProcessId = target.ProcessId;
                                 status.IsRunning = status.HttpPortListening = status.WsPortListening = true;
                                 status.ProcessOwnership = McpProcessOwnership.CurrentUPilot;
                                 status.ProcessOwnershipEvidence = "当前精确入口及双端口参数、活体句柄与 health PID 已核实";
                                 var bridge = UPilotBridge.Instance.GetStatus();
-                                if (bridge.IsWsOpen && bridge.IsAuthenticated && !string.IsNullOrEmpty(bridge.SessionId) &&
-                                    status.Health?.bridge_session_id == bridge.SessionId &&
-                                    UPilotDeploymentDiagnostics.Observe(bridge, status, record.spec).Length == 0)
+                                var bridgeBlock = !bridge.IsWsOpen ? "bridge_closed" : !bridge.IsAuthenticated ? "bridge_not_authenticated" :
+                                    string.IsNullOrEmpty(bridge.SessionId) ? "bridge_session_missing" :
+                                    status.Health?.bridge_session_id != bridge.SessionId ? "bridge_session_mismatch" : "";
+                                var deployment = bridgeBlock.Length == 0 ? UPilotDeploymentDiagnostics.Observe(bridge, status, record.spec) : null;
+                                if (bridgeBlock.Length == 0 && deployment.Length == 0)
                                 {
-                                    await VerifyReadOnlyRoundTripAsync(status, bridge.SessionId, record.reuseDeadline, token);
+                                    record.validationStage = "readonly";
+                                    var readOnlyStartedAt = Stopwatch.GetTimestamp();
+                                    try { await VerifyReadOnlyRoundTripAsync(status, bridge.SessionId, record.reuseDeadline, token); }
+                                    finally { record.readOnlyElapsedMs += Logger.LifecycleElapsedMs(readOnlyStartedAt); }
                                     var after = UPilotBridge.Instance.GetStatus();
                                     if (OwnsExistingServiceRecovery(record, cancellation) && startGeneration == _startAttemptGeneration &&
                                         restartGeneration == _restartGeneration && !target.HasExited &&
@@ -253,6 +355,7 @@ namespace CodingRiver.UPilot
                                             _recoveredServiceInstanceId = status.Health.server_instance_id;
                                         }
                                         record.status = "reused"; record.error = "";
+                                        RecordExistingServiceValidation(record, "verified");
                                         SaveExistingServiceRecovery();
                                         ResetStopObservation("new_service_start_or_restart");
                                         if (EndLifecyclePhase(lifecycle)) CacheVerifiedStartupStatus(status);
@@ -261,19 +364,45 @@ namespace CodingRiver.UPilot
                                         FinishExistingServiceRecoveryWork(record, cancellation);
                                         return;
                                     }
+                                    RecordExistingServiceValidation(record, "readonly", "identity_or_deadline_changed_after_probe");
                                 }
+                                else if (bridgeBlock.Length > 0) RecordExistingServiceValidation(record, "bridge", bridgeBlock);
+                                else RecordExistingServiceValidation(record, "deployment", string.Join(",", deployment.Select(issue => issue.Code)));
                             }
+                            else RecordExistingServiceValidation(record, "ownership", ownershipBlock);
                         }
                         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
-                        catch (Exception ex) { validationError = ex; }
+                        catch (Exception ex)
+                        {
+                            validationError = ex;
+                            RecordExistingServiceValidation(record, record.validationStage, ex.GetType().Name);
+                        }
                         var remaining = record.reuseDeadline - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                         if (remaining > 0) await Task.Delay((int)Math.Min(250, remaining), token);
                     }
                 }
+                if (record.validationAttemptCount == 0)
+                    RecordExistingServiceValidation(record, "discovery", "reuse_deadline_before_health");
                 validationError = new TimeoutException("遗留服务未在最多8秒内通过当前入口、项目、Bridge 握手及实际只读验证。", validationError);
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { }
-            catch (Exception ex) { validationError = ex; }
+            catch (Exception ex)
+            {
+                validationError = ex;
+                RecordExistingServiceValidation(record, record.validationStage, ex.GetType().Name);
+            }
+            finally
+            {
+                Logger.Lifecycle("recovery_validation_completed", $"recoveryId={record.id} status={record.status} " +
+                    $"stage={record.validationStage} lastBlockReason={record.lastBlockReason} attempts={record.validationAttemptCount} " +
+                    $"elapsedMs={RecoveryDuration(Logger.LifecycleElapsedMs(record.validationStartedTicks), record.validationStartedTicks > 0)} " +
+                    $"discoveryCompleted={record.discoveryCompleted} scanMs={RecoveryDuration(record.discoveryWorkMs, record.discoveryCompleted)} " +
+                    $"dispatchDelayMs={RecoveryDuration(record.discoveryDispatchDelayMs, record.discoveryCompleted || record.discoveryWorkMs > 0)} " +
+                    $"resumeDelayMs={RecoveryDuration(record.discoveryResumeDelayMs, record.discoveryCompleted)} " +
+                    $"healthAwaitMs={RecoveryDuration(record.healthElapsedMs, record.validationAttemptCount > 0)} " +
+                    $"readonlyAwaitMs={RecoveryDuration(record.readOnlyElapsedMs, record.readOnlyElapsedMs > 0 || record.validationStage == "readonly" || record.status == "reused")} " +
+                    $"reuseDeadlineUtcMs={record.reuseDeadline} deadlineUtcMs={record.deadline}");
+            }
 
             try
             {
@@ -285,8 +414,22 @@ namespace CodingRiver.UPilot
                     record.id, "existing-service-reuse");
                 record.status = "cleaning";
                 SaveExistingServiceRecovery();
+                BeginServiceShutdown(record.id, "recovery_preparing", record.deadline);
+                if (ExistingServiceShutdownOverride != null) ExistingServiceShutdownOverride(record);
+                else
+                {
+                    var reset = ResetActiveWorkForServiceOwner(record.id, "existing_service_recovery", record.id);
+                    record.resetError = reset.Error ?? "";
+                    record.resetPerformed = reset.Performed;
+                    record.resetLifetime = UPilotServiceLifetime.Id;
+                    record.resetUnityPid = System.Diagnostics.Process.GetCurrentProcess().Id;
+                    SaveExistingServiceRecovery();
+                    if (!string.IsNullOrEmpty(reset.Error))
+                        Logger.Lifecycle("recovery_activity_reset", $"recoveryId={record.id} outcome=partial_reset");
+                    UPilotBridge.Instance.Stop();
+                }
                 var stopTask = StopServerAndObserveExitAsync(UPilotServerStopOrigin.User, record.id,
-                    parentDeadlineUtcMs: record.deadline, scope: scope);
+                    parentDeadlineUtcMs: record.deadline, scope: scope, preserveShutdown: true);
                 record.stopObservationId = _stopObservation?.id ?? "";
                 SaveExistingServiceRecovery();
                 var stopped = await stopTask;
@@ -305,6 +448,10 @@ namespace CodingRiver.UPilot
 
         private void StartExistingServiceReplacement(ExistingServiceRecoveryRecord record, ServerStopResult stopped)
         {
+            Logger.Lifecycle("recovery_replacement_gate", $"recoveryId={record.id} stopId={record.stopObservationId} " +
+                $"stopConfirmed={stopped.StopConfirmed} portsAvailable={stopped.PortsAvailable} " +
+                $"observationSucceeded={stopped.ObservationSucceeded} current={IsStopResultCurrent(stopped)} " +
+                $"replacementStarted={record.replacementStarted} deadlineUtcMs={record.deadline}");
             if (!stopped.StopConfirmed || !stopped.PortsAvailable || !stopped.ObservationSucceeded || !IsStopResultCurrent(stopped))
                 throw new InvalidOperationException("遗留服务清理没有取得进程退出、双端口释放和当前操作身份的完整证据；未启动新服务。");
             if (record.replacementStarted) throw new InvalidOperationException("本次遗留服务恢复已派发一次启动，不重复派发。");
@@ -319,22 +466,23 @@ namespace CodingRiver.UPilot
                 _pendingLaunchSpec = PrepareLaunchSpec(record.deadline);
                 _pendingLaunchDeadline = record.deadline;
                 _startInProgress = false;
-                UPilotBridge.Instance.EnsureStarted();
                 StartNewServer();
+                UPilotBridge.Instance.EnsureStarted();
             }
             if (record.replacementPid <= 0)
                 throw new InvalidOperationException("遗留服务已清理，但本次新服务启动未返回进程；不会循环重启。");
             Logger.CloseDiagnostics(record.id);
         }
 
-        private void FailExistingServiceRecovery(ExistingServiceRecoveryRecord record, Exception exception)
+        private void FailExistingServiceRecovery(ExistingServiceRecoveryRecord record, Exception exception, bool preserveShutdown = false)
         {
             record.status = "failed"; record.error = exception.Message;
             SaveExistingServiceRecovery();
+            if (!preserveShutdown) FinishServiceShutdown(record.id, "recovery_failed");
             if (_lifecycleOperationId == record.id)
                 EndLifecyclePhase(_lifecycleGeneration, exception.Message, exception is TimeoutException,
                     emitDiagnostic: false, failureException: exception);
-            Logger.ReportFailure("SERVER", $"遗留服务恢复结束；recoveryId={record.id}；HTTP={record.spec.httpPort}；WS={record.spec.wsPort}。",
+            Logger.ReportFailure("SERVER", $"遗留服务恢复结束；recoveryId={record.id}；HTTP={record.spec?.httpPort.ToString() ?? "unknown"}；WS={record.spec?.wsPort.ToString() ?? "unknown"}。",
                 exception, record.id, terminal: true);
             UPilotStartupDiagnostics.RecordBlockingReason("existing_service_recovery_failed", exception.Message);
             NotifyStatusChanged();
@@ -353,6 +501,8 @@ namespace CodingRiver.UPilot
                     if (_lifecycleOperationId == record.id) EndLifecyclePhase(_lifecycleGeneration);
                 }
             }
+            if (record.status == "stopped" || record.status == "failed" || record.status == "reused")
+                FinishServiceShutdown(record.id, "recovery_" + record.status);
             cancellation.Dispose();
         }
 
@@ -366,19 +516,107 @@ namespace CodingRiver.UPilot
             try
             {
                 var record = JsonUtility.FromJson<ExistingServiceRecoveryRecord>(json);
-                if (record?.spec == null || !UPilotDeploymentDiagnostics.SamePath(record.projectPath, UPilotProjectConfig.ProjectRoot)) return;
+                if (record == null || !UPilotDeploymentDiagnostics.SamePath(record.projectPath, UPilotProjectConfig.ProjectRoot)) return;
                 _existingServiceRecovery = record;
-                if (record.status == "replacement_starting" || (record.status == "replacement_started" &&
-                    string.IsNullOrEmpty(SessionState.GetString(LaunchSessionKey, ""))))
+                if ((record.status == "replacement_starting" || record.status == "replacement_started" || record.replacementRestoreBlocked) &&
+                    !UPilotServerRestartDiagnostics.TryGetActive(out _) && !UPilotServiceMaintenance.IsActive)
                 {
+                    var current = CaptureServiceShutdown();
+                    if ((current.Stopping || current.ReplacementEligible) &&
+                        current.OwnerId != record.id && !current.OwnerId.StartsWith("bridge:", StringComparison.Ordinal))
+                    { record.replacementRestoreBlocked = true; SaveExistingServiceRecovery(); return; }
+                    BeginServiceShutdown(string.IsNullOrEmpty(record.id) ? "recovery:unknown" : record.id,
+                        "recovery_reload_receipt_verifying", record.deadline);
+                }
+                if (record.status == "replacement_starting" || (record.status == "replacement_started" &&
+                    (record.spec == null || string.IsNullOrEmpty(SessionState.GetString(LaunchSessionKey, "")))))
+                {
+                    record.replacementRestoreBlocked = true;
                     FailExistingServiceRecovery(record, new InvalidOperationException(
-                        "Reload 中断了本次唯一新服务启动，缺少完整启动证据；不重放启动，请检查后手动启动。"));
+                        "Reload 中断了本次唯一新服务启动，缺少完整启动证据；不重放启动，请检查后手动启动。"), preserveShutdown: true);
                     return;
                 }
+                if (record.spec == null) return;
                 if (record.status == "verifying" || record.status == "cleaning" || record.status == "reused")
                     EditorApplication.delayCall += ResumeExistingServiceRecovery;
             }
             catch (Exception ex) { Logger.ReportFailure("SERVER", "恢复遗留服务观察记录失败；没有重放停止或启动。", ex, terminal: true); }
+        }
+
+        internal static bool CanRestoreExistingServiceResetReceipt(ExistingServiceRecoveryRecord record,
+            ServiceStopObservationRecord stop, string project, string lifetime, int unityPid, long now, out string reason)
+        {
+            if (record?.resetPerformed != true) { reason = "reset_receipt_unknown"; return false; }
+            if (record.status != "cleaning" || record.replacementStarted || string.IsNullOrEmpty(record.id) ||
+                !UPilotDeploymentDiagnostics.SamePath(record.projectPath, project) ||
+                string.IsNullOrEmpty(lifetime) || unityPid <= 0 ||
+                record.resetLifetime != lifetime || record.resetUnityPid != unityPid)
+            { reason = "reset_receipt_recovery_identity_mismatch"; return false; }
+            if (stop == null || stop.id != record.stopObservationId || string.IsNullOrEmpty(stop.id) ||
+                stop.requestId != record.id || stop.shutdownOwnerId != record.id || !stop.preserveShutdown ||
+                !stop.MatchesScope(project, lifetime, unityPid))
+            { reason = "reset_receipt_stop_identity_mismatch"; return false; }
+            if (now >= record.deadline || stop.deadline <= 0 || stop.deadline > record.deadline)
+            { reason = "reset_receipt_deadline_mismatch"; return false; }
+            reason = "current";
+            return true;
+        }
+
+        internal static bool CanRestoreExistingServiceReplacementResetReceipt(ExistingServiceRecoveryRecord record,
+            ServerLaunchState state, string project, string lifetime, int unityPid, long now, out string reason)
+        {
+            reason = "reset_receipt_unknown";
+            if (record?.resetPerformed != true) return false;
+            reason = "reset_receipt_recovery_identity_mismatch";
+            if (record.status != "replacement_started" || record.replacementRestoreBlocked || !record.replacementStarted ||
+                string.IsNullOrEmpty(record.id) || !UPilotDeploymentDiagnostics.SamePath(record.projectPath, project) ||
+                string.IsNullOrEmpty(lifetime) || unityPid <= 0 || record.resetLifetime != lifetime || record.resetUnityPid != unityPid)
+                return false;
+            reason = "reset_receipt_deadline_mismatch";
+            if (record.deadline <= now || state == null || state.deadlineUtcMs != record.deadline) return false;
+            reason = "reset_receipt_replacement_launch_mismatch";
+            if (record.replacementSpec == null || state.spec == null || state.terminal ||
+                record.replacementSpec.Validate().Length != 0 || state.spec.Validate().Length != 0 ||
+                !UPilotDeploymentDiagnostics.SamePath(record.replacementSpec.projectPath, project) ||
+                JsonUtility.ToJson(record.replacementSpec) != JsonUtility.ToJson(state.spec) ||
+                record.replacementPid <= 0 || record.replacementLauncherCreatedAt <= 0 ||
+                record.replacementPid != state.launcherPid || record.replacementLauncherCreatedAt != state.launcherCreatedAt)
+                return false;
+            reason = "current";
+            return true;
+        }
+
+        internal bool RestoreExistingServiceReplacementResetReceipt(out string reason)
+        {
+            var record = _existingServiceRecovery;
+            var state = _launchState;
+            bool Reject(string failure)
+            {
+                if (record != null) { record.replacementRestoreBlocked = true; SaveExistingServiceRecovery(); }
+                Logger.Lifecycle("recovery_reset_receipt_restore_rejected", $"recoveryId={record?.id ?? "unknown"} reason={failure} {CaptureServiceShutdown().Detail}");
+                return false;
+            }
+            using var editor = System.Diagnostics.Process.GetCurrentProcess();
+            if (!CanRestoreExistingServiceReplacementResetReceipt(record, state, UPilotProjectConfig.ProjectRoot,
+                UPilotServiceLifetime.Id, editor.Id, StopNow, out reason)) return Reject(reason);
+            reason = "reset_receipt_replacement_handles_unverified";
+            try
+            {
+                if (_launcherProcess == null || _trackedProcess == null || _launcherProcess.HasExited || _trackedProcess.HasExited ||
+                    _launcherProcess.Id != state.launcherPid || _launcherProcess.StartTime.ToUniversalTime().Ticks != state.launcherCreatedAt ||
+                    _trackedProcess.Id != (state.verified ? state.servicePid : state.launcherPid) ||
+                    _trackedProcess.StartTime.ToUniversalTime().Ticks != (state.verified ? state.serviceCreatedAt : state.launcherCreatedAt))
+                    return Reject(reason);
+            }
+            catch (Exception) { return Reject(reason); }
+            var shutdown = CaptureServiceShutdown();
+            if (shutdown.OwnerId != record.id) { reason = "shutdown_owner_or_generation_changed"; return Reject(reason); }
+            if (!RestoreServiceWorkResetReceipt(shutdown, record.resetPerformed, record.resetError, record.deadline, out reason))
+                return Reject(reason);
+            _launchNeedsRevalidation = true;
+            AllowServiceReplacement(record.id);
+            reason = "restored";
+            return true;
         }
 
         private async void ResumeExistingServiceRecovery()
@@ -392,8 +630,16 @@ namespace CodingRiver.UPilot
                 if (record.automatic && !AutoStartEnabled) return;
                 if (record.status == "cleaning")
                 {
-                    if (_stopObservation?.id != record.stopObservationId)
-                        throw new InvalidOperationException("Reload 后原遗留服务清理观察缺失，不重放停止或启动。");
+                    if (!CanRestoreExistingServiceResetReceipt(record, _stopObservation, UPilotProjectConfig.ProjectRoot,
+                        UPilotServiceLifetime.Id, System.Diagnostics.Process.GetCurrentProcess().Id,
+                        DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), out var receiptReason))
+                        throw new InvalidOperationException("Reload 后原清理凭据未知或身份不符；reason=" + receiptReason +
+                            "；不重新清理，不重放停止或启动。");
+                    var shutdown = BeginServiceShutdown(record.id, "recovery_cleaning_restored", record.deadline);
+                    if (!RestoreServiceWorkResetReceipt(shutdown, record.resetPerformed, record.resetError,
+                        record.deadline, out receiptReason))
+                        throw new InvalidOperationException("Reload 后原清理结果无法恢复；reason=" + receiptReason +
+                            "；不重新清理，不重放停止或启动。");
                     ServerStopResult stopped;
                     if (_stopObservation.Active && _stopCompletion != null) stopped = await _stopCompletion.Task;
                     else stopped = new ServerStopResult(_stopObservation.processesExited, _stopObservation.portsAvailable,
@@ -424,6 +670,8 @@ namespace CodingRiver.UPilot
         {
             if (_existingServiceRecovery?.status != "replacement_starting") return;
             _existingServiceRecovery.replacementPid = processId;
+            _existingServiceRecovery.replacementSpec = _launchState?.spec?.Snapshot();
+            _existingServiceRecovery.replacementLauncherCreatedAt = _launchState?.launcherCreatedAt ?? 0;
             _existingServiceRecovery.status = "replacement_started";
             SaveExistingServiceRecovery();
         }
@@ -436,6 +684,7 @@ namespace CodingRiver.UPilot
             else if (_launchState.terminal) { record.status = "failed"; record.error = _launchState.error; }
             else return;
             SaveExistingServiceRecovery();
+            if (!record.replacementRestoreBlocked) FinishServiceShutdown(record.id, "replacement_" + record.status);
         }
 
         private void ReleaseRecoveredServiceAttachment(bool resetPriorRecovery = false)
@@ -465,6 +714,26 @@ namespace CodingRiver.UPilot
                 SaveExistingServiceRecovery();
             }
             ReleaseRecoveredServiceAttachment();
+        }
+
+        // Revoke the waiter before a reset completes its stop Task. That continuation must
+        // observe lost ownership, while a replacement launch keeps its own identity intact.
+        internal void CancelExistingServiceRecoveryForReset(string preservedOwnerId)
+        {
+            var record = _existingServiceRecovery;
+            if (record == null || (!string.IsNullOrEmpty(preservedOwnerId) && record.id == preservedOwnerId) ||
+                (record.status != "verifying" && record.status != "cleaning")) return;
+            EditorApplication.delayCall -= ResumeExistingServiceRecovery;
+            var cancellation = _existingServiceRecoveryCancellation;
+            _existingServiceRecoveryCancellation = null;
+            record.status = "stopped";
+            _startInProgress = false;
+            cancellation?.Cancel();
+            SaveExistingServiceRecovery();
+            if (_lifecycleOperationId == record.id) EndLifecyclePhase(_lifecycleGeneration);
+            ReleaseRecoveredServiceAttachment();
+            Logger.Lifecycle("recovery_superseded", $"recoveryId={record.id} stopId={record.stopObservationId} " +
+                $"reason=service_reset deadlineUtcMs={record.deadline}");
         }
 
         private void BeforeExistingServiceRecoveryReload()

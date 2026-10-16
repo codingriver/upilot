@@ -8,6 +8,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using NUnit.Framework;
+using UnityEditor;
 using UnityEngine;
 using UnityEngine.TestTools;
 
@@ -441,6 +442,203 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(spec.StartInfo().UseShellExecute, Is.False);
             Assert.That(spec.StartInfo().CreateNoWindow, Is.True);
             Assert.That(spec.arguments, Does.Contain("--http-port 18011 --port 18765"));
+        }
+
+        private static UPilotServerRestartRecord PersistedRestartReceipt(bool maintenance, bool verified, string resetError,
+            System.Diagnostics.Process editor, out ServerLaunchState state, out ServiceMaintenanceRecord request)
+        {
+            var spec = Spec("exe");
+            spec.projectPath = UPilotProjectConfig.ProjectRoot;
+            spec.executablePath = spec.expectedEntry = editor.MainModule.FileName;
+            spec.serviceExecutablePaths = new[] { spec.executablePath };
+            spec.arguments = $"--http-port {spec.httpPort} --port {spec.wsPort} --log-file \"{UPilotOutputPaths.Resolve(UPilotOutputPaths.ServerLog, spec.projectPath)}\"";
+            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var createdAt = editor.StartTime.ToUniversalTime().Ticks;
+            var record = new UPilotServerRestartRecord { operationId = "restart-reload-receipt", status = "running",
+                projectPath = spec.projectPath, restartGeneration = 71, oldBridgeSessionId = "original-bridge",
+                requestedAtUtcMs = now, deadlineAtUtcMs = now + 120000,
+                maintenanceDeadlineUtcMs = maintenance ? now + 120000 : 0,
+                launchSpec = spec.Snapshot(), launcherProcessId = editor.Id, launcherProcessCreatedAtTicks = createdAt,
+                newProcessId = editor.Id, newProcessCreatedAtTicks = createdAt, newProcessStartedAtUtcMs = now };
+            var owner = maintenance ? "maintenance-reload-receipt" : record.operationId;
+            record.resetReceipt = UPilotServerRestartDiagnostics.CaptureResetReceipt(record, owner,
+                new UPilotMcpServerManager.ServiceWorkResetReceipt(true, resetError));
+            state = new ServerLaunchState { spec = spec, launcherPid = editor.Id, launcherCreatedAt = createdAt,
+                servicePid = verified ? editor.Id : 0, serviceCreatedAt = verified ? createdAt : 0,
+                instanceId = verified ? "restored-instance" : "", verified = verified, deadlineUtcMs = record.deadlineAtUtcMs };
+            request = maintenance ? new ServiceMaintenanceRecord { maintenanceId = owner, status = "running",
+                serverRestartId = record.operationId, projectPath = record.projectPath, unityProcessId = editor.Id,
+                oldBridgeSessionId = record.oldBridgeSessionId, acceptedAtUtcMs = now,
+                deadlineAtUtcMs = record.deadlineAtUtcMs, queueReset = string.IsNullOrEmpty(resetError), queueResetError = resetError } : null;
+            // Exercise the same nested JsonUtility representation stored across Domain Reload.
+            return JsonUtility.FromJson<UPilotServerRestartRecord>(JsonUtility.ToJson(record));
+        }
+
+        private static UPilotMcpServerManager RestartReceiptManager(ServerLaunchState state, System.Diagnostics.Process editor)
+        {
+            var manager = (UPilotMcpServerManager)FormatterServices.GetUninitializedObject(typeof(UPilotMcpServerManager));
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+            typeof(UPilotMcpServerManager).GetField("_launchState", flags).SetValue(manager, state);
+            typeof(UPilotMcpServerManager).GetField("_launcherProcess", flags).SetValue(manager, editor);
+            typeof(UPilotMcpServerManager).GetField("_trackedProcess", flags).SetValue(manager, editor);
+            return manager;
+        }
+
+        [TestCase(false, false, "")]
+        [TestCase(false, true, "original partial reset error")]
+        [TestCase(true, false, "original partial reset error")]
+        [TestCase(true, true, "")]
+        public void ReloadRestoresOriginalRestartOrMaintenanceReceiptWithoutRepeatingReset(
+            bool maintenance, bool verified, string resetError)
+        {
+            using var editor = System.Diagnostics.Process.GetCurrentProcess();
+            var record = PersistedRestartReceipt(maintenance, verified, resetError, editor, out var state, out var request);
+            var manager = RestartReceiptManager(state, editor);
+            var resets = 0;
+            manager.ServiceWorkResetOverride = _ => { ++resets; return "replayed"; };
+            manager.BeginServiceShutdown(record.resetReceipt.ownerId, "reload_verifying", record.deadlineAtUtcMs);
+            Assert.That(manager.RestoreRestartResetReceipt(record, request, out var reason), Is.True, reason);
+            var shutdown = manager.CaptureServiceShutdown();
+            Assert.That(shutdown.ReplacementEligible, Is.True);
+            Assert.That(shutdown.Stopping, Is.False);
+            Assert.That(shutdown.OwnerId, Is.EqualTo(record.resetReceipt.ownerId));
+            Assert.That(shutdown.DeadlineUtcMs, Is.EqualTo(record.deadlineAtUtcMs));
+            Assert.That(manager.IsOwnedResetVerificationPending(shutdown), Is.True);
+            Assert.That(manager.CanReuseOwnedReset(shutdown, "replacement-lifetime", "restored-instance", out _), Is.False);
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+            Assert.That(typeof(UPilotMcpServerManager).GetField("_shutdownResetError", flags).GetValue(manager), Is.EqualTo(resetError));
+            Assert.That(record.resetReceipt.error, Is.EqualTo(resetError));
+            Assert.That(state.TryConfirm(editor.Id, editor.StartTime.ToUniversalTime().Ticks, "restored-instance",
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()), Is.True);
+            typeof(UPilotMcpServerManager).GetField("_launchNeedsRevalidation", flags).SetValue(manager, false);
+            Assert.That(manager.CanReuseOwnedReset(shutdown, "replacement-lifetime", "restored-instance", out var owner), Is.True);
+            Assert.That(owner, Is.EqualTo(record.resetReceipt.ownerId));
+            Assert.That(resets, Is.Zero);
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void ReloadLaunchEntryRestoresDispatchedRecoveryReceiptBeforeHello(bool verified)
+        {
+            const BindingFlags fields = BindingFlags.Instance | BindingFlags.NonPublic;
+            const string launchKey = "UPilot.ServerLaunchIdentity.v1", recoveryKey = "UPilot.ServerRecovery.Existing.v1";
+            var missing = "missing-" + Guid.NewGuid().ToString("N");
+            var launchJson = SessionState.GetString(launchKey, missing);
+            var recoveryJson = SessionState.GetString(recoveryKey, missing);
+            var restartField = typeof(UPilotServerRestartDiagnostics).GetField("s_record", BindingFlags.Static | BindingFlags.NonPublic);
+            var originalRestart = restartField.GetValue(null);
+            var manager = (UPilotMcpServerManager)FormatterServices.GetUninitializedObject(typeof(UPilotMcpServerManager));
+            typeof(UPilotMcpServerManager).GetField("_statusLock", fields).SetValue(manager, new object());
+            var resets = 0;
+            manager.ServiceWorkResetOverride = _ => { ++resets; return "replayed"; };
+            using var editor = System.Diagnostics.Process.GetCurrentProcess();
+            try
+            {
+                PersistedRestartReceipt(false, verified, "original partial reset error", editor, out var state, out _);
+                var recovery = new UPilotMcpServerManager.ExistingServiceRecoveryRecord {
+                    id = "dispatched-recovery-reload", projectPath = state.spec.projectPath, status = "replacement_started",
+                    spec = state.spec.Snapshot(), deadline = state.deadlineUtcMs, replacementStarted = true,
+                    replacementPid = state.launcherPid, replacementLauncherCreatedAt = state.launcherCreatedAt,
+                    replacementSpec = state.spec.Snapshot(), resetPerformed = true,
+                    resetError = "original partial reset error", resetLifetime = UPilotServiceLifetime.Id, resetUnityPid = editor.Id,
+                };
+                restartField.SetValue(null, new UPilotServerRestartRecord { status = "succeeded" });
+                SessionState.SetString(launchKey, JsonUtility.ToJson(state));
+                SessionState.SetString(recoveryKey, JsonUtility.ToJson(recovery));
+                typeof(UPilotMcpServerManager).GetMethod("RestoreExistingServiceRecovery", fields).Invoke(manager, null);
+                Assert.That(manager.CaptureServiceShutdown().Stopping, Is.True);
+                typeof(UPilotMcpServerManager).GetMethod("RestoreLaunchObservation", fields).Invoke(manager, null);
+                var restored = manager.LaunchIdentity;
+                var shutdown = manager.CaptureServiceShutdown();
+                Assert.That(restored, Is.Not.Null);
+                Assert.That(restored.terminal, Is.False, restored.error);
+                Assert.That(restored.verified, Is.EqualTo(verified));
+                Assert.That(restored.launcherCreatedAt, Is.EqualTo(state.launcherCreatedAt));
+                Assert.That(restored.deadlineUtcMs, Is.EqualTo(recovery.deadline));
+                Assert.That(shutdown.OwnerId, Is.EqualTo(recovery.id));
+                Assert.That(shutdown.DeadlineUtcMs, Is.EqualTo(recovery.deadline));
+                Assert.That(shutdown.ReplacementEligible, Is.True);
+                Assert.That(shutdown.Stopping, Is.False);
+                Assert.That(manager.IsOwnedResetVerificationPending(shutdown), Is.True);
+                Assert.That(manager.CanReuseOwnedReset(shutdown, "replacement-lifetime", "restored-instance", out _), Is.False);
+                Assert.That(typeof(UPilotMcpServerManager).GetField("_shutdownResetError", fields).GetValue(manager),
+                    Is.EqualTo(recovery.resetError));
+                Assert.That(resets, Is.Zero);
+            }
+            finally
+            {
+                typeof(UPilotMcpServerManager).GetMethod("StopLaunchObservation", fields).Invoke(manager, null);
+                foreach (var name in new[] { "_launcherProcess", "_trackedProcess", "_lifecycleQueryCancellation" })
+                    (typeof(UPilotMcpServerManager).GetField(name, fields).GetValue(manager) as IDisposable)?.Dispose();
+                restartField.SetValue(null, originalRestart);
+                if (launchJson == missing) SessionState.EraseString(launchKey);
+                else SessionState.SetString(launchKey, launchJson);
+                if (recoveryJson == missing) SessionState.EraseString(recoveryKey);
+                else SessionState.SetString(recoveryKey, recoveryJson);
+            }
+        }
+
+        [TestCase("missing_receipt")]
+        [TestCase("not_performed")]
+        [TestCase("operation")]
+        [TestCase("owner")]
+        [TestCase("project")]
+        [TestCase("lifetime")]
+        [TestCase("unity_process")]
+        [TestCase("old_bridge")]
+        [TestCase("restart_generation")]
+        [TestCase("deadline")]
+        [TestCase("expired")]
+        [TestCase("launch_pid")]
+        [TestCase("launch_created_at")]
+        [TestCase("launch_spec")]
+        [TestCase("service_created_at")]
+        [TestCase("terminal_launch")]
+        [TestCase("terminal_restart")]
+        [TestCase("maintenance_missing")]
+        [TestCase("maintenance_operation")]
+        [TestCase("maintenance_owner")]
+        [TestCase("maintenance_deadline")]
+        public void ReloadReceiptMissingOrChangedEvidenceKeepsAdmissionClosedWithoutReplayingWork(string changed)
+        {
+            using var editor = System.Diagnostics.Process.GetCurrentProcess();
+            var maintenance = changed.StartsWith("maintenance_", StringComparison.Ordinal);
+            var record = PersistedRestartReceipt(maintenance, true, "original partial error", editor, out var state, out var request);
+            var manager = RestartReceiptManager(state, editor);
+            var originalOwner = record.resetReceipt.ownerId;
+            manager.BeginServiceShutdown(originalOwner, "reload_verifying", record.deadlineAtUtcMs);
+            var resets = 0;
+            manager.ServiceWorkResetOverride = _ => { ++resets; return "replayed"; };
+            switch (changed)
+            {
+                case "missing_receipt": record.resetReceipt = null; break;
+                case "not_performed": record.resetReceipt.performed = false; break;
+                case "operation": record.resetReceipt.operationId = "different-restart"; break;
+                case "owner": record.resetReceipt.ownerId = "different-owner"; break;
+                case "project": record.resetReceipt.projectPath += "-different"; break;
+                case "lifetime": record.resetReceipt.serviceLifetime = "different-lifetime"; break;
+                case "unity_process": record.resetReceipt.unityProcessId++; break;
+                case "old_bridge": record.resetReceipt.oldBridgeSessionId = "different-bridge"; break;
+                case "restart_generation": record.resetReceipt.restartGeneration++; break;
+                case "deadline": record.resetReceipt.deadlineUtcMs++; break;
+                case "expired": record.deadlineAtUtcMs = record.resetReceipt.deadlineUtcMs = state.deadlineUtcMs = 1; break;
+                case "launch_pid": record.launcherProcessId++; break;
+                case "launch_created_at": record.launcherProcessCreatedAtTicks++; break;
+                case "launch_spec": record.launchSpec.httpPort++; break;
+                case "service_created_at": record.newProcessCreatedAtTicks++; break;
+                case "terminal_launch": state.terminal = true; break;
+                case "terminal_restart": record.status = "failed"; break;
+                case "maintenance_missing": request = null; break;
+                case "maintenance_operation": request.serverRestartId = "different-restart"; break;
+                case "maintenance_owner": request.maintenanceId = "different-maintenance"; break;
+                case "maintenance_deadline": request.deadlineAtUtcMs++; break;
+            }
+            Assert.That(manager.RestoreRestartResetReceipt(record, request, out _), Is.False);
+            var shutdown = manager.CaptureServiceShutdown();
+            Assert.That(shutdown.Stopping, Is.True);
+            Assert.That(shutdown.ReplacementEligible, Is.False);
+            Assert.That(shutdown.OwnerId, Is.EqualTo(originalOwner));
+            Assert.That(resets, Is.Zero);
         }
 
         [TestCase(0, 1000, 5000)] [TestCase(7000, 1000, 5000)] [TestCase(1100, 1000, 100)]

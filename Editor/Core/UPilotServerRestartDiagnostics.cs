@@ -30,10 +30,20 @@ namespace CodingRiver.UPilot
     }
 
     [Serializable]
+    internal sealed class UPilotRestartResetReceipt
+    {
+        public string operationId, ownerId, projectPath, serviceLifetime, oldBridgeSessionId, error;
+        public int unityProcessId;
+        public long restartGeneration, deadlineUtcMs;
+        public bool performed;
+    }
+
+    [Serializable]
     internal sealed class UPilotServerRestartRecord
     {
-        public int schemaVersion = 3;
+        public int schemaVersion = 4;
         public long restartGeneration;
+        public UPilotRestartResetReceipt resetReceipt;
         public string stopOrigin;
         public string stopRequestId;
         public long stopRequestedAtUtcMs;
@@ -264,6 +274,24 @@ namespace CodingRiver.UPilot
         internal static void RecordGeneration(string operationId, long generation)
         {
             Update(operationId, record => record.restartGeneration = generation);
+        }
+
+        internal static void RecordResetReceipt(string operationId, string ownerId,
+            UPilotMcpServerManager.ServiceWorkResetReceipt receipt)
+        {
+            Update(operationId, record => record.resetReceipt = CaptureResetReceipt(record, ownerId, receipt));
+        }
+
+        internal static UPilotRestartResetReceipt CaptureResetReceipt(UPilotServerRestartRecord record, string ownerId,
+            UPilotMcpServerManager.ServiceWorkResetReceipt receipt)
+        {
+            using var editor = System.Diagnostics.Process.GetCurrentProcess();
+            return new UPilotRestartResetReceipt {
+                operationId = record.operationId, ownerId = ownerId, projectPath = record.projectPath,
+                serviceLifetime = UPilotServiceLifetime.Id, unityProcessId = editor.Id,
+                oldBridgeSessionId = record.oldBridgeSessionId ?? "", restartGeneration = record.restartGeneration,
+                deadlineUtcMs = Deadline(record), performed = receipt.Performed, error = receipt.Error,
+            };
         }
 
         internal static void MarkGate(string operationId, string key, string state, string evidenceCode = "", string evidence = "")

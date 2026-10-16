@@ -9,7 +9,8 @@ namespace CodingRiver.UPilot.Automation
     public sealed class UPilotStepManagementWindow : EditorWindow
     {
         internal static double RefreshIntervalSeconds => UPilotTimingSettings.StepWindowRefreshMs / 1000d;
-        private const float StartTimeColumnWidth = 110, DurationColumnWidth = 100;
+        private const float IndexColumnWidth = 32, PhaseColumnWidth = 60, StateColumnWidth = 140;
+        private const float StartTimeColumnWidth = 96, DurationColumnWidth = 84;
         internal Func<UPilotAutomationStepService.CurrentSnapshot> ReadCurrent = UPilotAutomationStepService.GetCurrentSnapshot;
         internal UPilotAutomationStepService.CurrentSnapshot Latest { get; private set; }
         internal Vector2 Scroll;
@@ -22,15 +23,17 @@ namespace CodingRiver.UPilot.Automation
         [MenuItem("UPilot/Step管理", false, 401)]
         public static void Open()
         {
+            bool alreadyOpen = HasOpenInstances<UPilotStepManagementWindow>();
             var window = GetWindow<UPilotStepManagementWindow>("Step管理");
-            window.minSize = new Vector2(820, 360);
+            if (!alreadyOpen)
+                window.position = new Rect(window.position.position, new Vector2(680, 440));
             window.Show();
         }
 
         private void OnEnable()
         {
             titleContent = new GUIContent("Step管理");
-            minSize = new Vector2(820, 360);
+            minSize = new Vector2(640, 360);
             EditorApplication.update -= SampleOnUpdate;
             EditorApplication.update += SampleOnUpdate;
             Refresh(EditorApplication.timeSinceStartup);
@@ -204,10 +207,10 @@ namespace CodingRiver.UPilot.Automation
             }
 
             EditorGUILayout.BeginHorizontal(EditorStyles.toolbar);
-            GUILayout.Label("序号", GUILayout.Width(38));
-            GUILayout.Label("Step / Instance", GUILayout.ExpandWidth(true));
-            GUILayout.Label("阶段", GUILayout.Width(70));
-            GUILayout.Label("状态", GUILayout.Width(160));
+            GUILayout.Label("序号", GUILayout.Width(IndexColumnWidth));
+            GUILayout.Label("Step / Instance", GUILayout.MinWidth(0), GUILayout.ExpandWidth(true));
+            GUILayout.Label("阶段", GUILayout.Width(PhaseColumnWidth));
+            GUILayout.Label("状态", GUILayout.Width(StateColumnWidth));
             GUILayout.Label("开始时间", GUILayout.Width(StartTimeColumnWidth));
             GUILayout.Label("耗时", GUILayout.Width(DurationColumnWidth));
             EditorGUILayout.EndHorizontal();
@@ -222,13 +225,14 @@ namespace CodingRiver.UPilot.Automation
                     if (!run.terminal && i == run.cursor) GUI.backgroundColor = new Color(0.45f, 0.75f, 1f);
                     EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
                     GUI.backgroundColor = before;
-                    GUILayout.Label((i + 1).ToString(), GUILayout.Width(38));
-                    EditorGUILayout.BeginVertical(GUILayout.ExpandWidth(true));
-                    GUILayout.Label(item.stepId, EditorStyles.boldLabel);
-                    GUILayout.Label(record.instanceId, EditorStyles.miniLabel);
+                    GUILayout.Label((i + 1).ToString(), GUILayout.Width(IndexColumnWidth));
+                    EditorGUILayout.BeginVertical(GUILayout.MinWidth(0), GUILayout.ExpandWidth(true));
+                    DrawStepIdentity(item.stepId, EditorStyles.boldLabel);
+                    DrawStepIdentity(record.instanceId, EditorStyles.miniLabel);
                     EditorGUILayout.EndVertical();
-                    GUILayout.Label(item.phase, GUILayout.Width(70));
-                    GUILayout.Label(StepState(record), GUILayout.Width(160));
+                    GUILayout.Label(new GUIContent(item.phase, item.phase), GUILayout.Width(PhaseColumnWidth));
+                    string state = StepState(record);
+                    GUILayout.Label(new GUIContent(state, state), GUILayout.Width(StateColumnWidth));
                     GetStepTiming(record, out var start, out var duration, _guiNow);
                     GUILayout.Label(start, GUILayout.Width(StartTimeColumnWidth));
                     GUILayout.Label(duration, GUILayout.Width(DurationColumnWidth));
@@ -237,6 +241,26 @@ namespace CodingRiver.UPilot.Automation
             }
             EditorGUILayout.EndScrollView();
             EditorGUILayout.HelpBox("每 1 秒刷新 · 忙时拒绝新任务、不排队\n立即停止不执行后续业务清理或 Finally，不能回滚副作用或强行中断同步代码。", MessageType.None);
+        }
+        private static void DrawStepIdentity(string value, GUIStyle style)
+        {
+            Rect rect = GUILayoutUtility.GetRect(0, EditorGUIUtility.singleLineHeight, GUILayout.ExpandWidth(true));
+            string full = value ?? "";
+            var content = new GUIContent(full, full);
+            if (style.CalcSize(content).x > rect.width)
+            {
+                int low = 0, high = full.Length;
+                while (low < high)
+                {
+                    int length = (low + high + 1) / 2;
+                    content.text = full.Substring(0, length) + "…";
+                    if (style.CalcSize(content).x <= rect.width) low = length;
+                    else high = length - 1;
+                }
+                if (low > 0 && char.IsHighSurrogate(full[low - 1])) low--;
+                content.text = full.Substring(0, low) + "…";
+            }
+            GUI.Label(rect, content, style);
         }
         private static void DrawIdentity(string label, string value)
         {

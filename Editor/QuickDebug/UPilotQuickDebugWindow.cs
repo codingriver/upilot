@@ -510,7 +510,7 @@ namespace CodingRiver.UPilot
                     _evalBackend = "auto";
                     break;
                 case "foreach-array":
-                    _evalCode = "int[,] matrix = { { 1, 2 }, { 3, 4 } };\nvar sum = 0;\nforeach (var val in new int[] { 1, 2, 3 }) sum += val;\nreturn new object[] { sum, matrix };";
+                    _evalCode = "int[,] matrix = { { 1, 2 }, { 3, 4 } };\nvar sum = 0;\nforeach (var val in new int[] { 1, 2, 3 }) sum += val;\nreturn new int[] { sum, matrix[0, 0], matrix[0, 1], matrix[1, 0], matrix[1, 1] };";
                     _evalMode = "auto";
                     _evalSessionId = "";
                     _evalResultMode = "inline";

@@ -219,6 +219,49 @@ namespace CodingRiver.UPilot.Tests
                 service.EncodeResult(new string('x', 2048), "", "inline", 1024));
             Assert.That(error.Code, Is.EqualTo("RESULT_TOO_LARGE"));
             Assert.That(error.Detail["actualBytes"], Is.GreaterThan(1024));
+
+            var detail = JsonUtility.FromJson<ErrorDetailPayload>(JsonUtility.ToJson(
+                UPilotExecutionService.ToErrorDetail(error, "overflow-result", "csharp.eval")));
+            Assert.That(detail.actualBytes, Is.EqualTo(error.Detail["actualBytes"]));
+            Assert.That(detail.limitBytes, Is.EqualTo(1024));
+            Assert.That(detail.resultTypeName, Is.EqualTo("System.String"));
+            Assert.That(detail.resultMode, Is.EqualTo("inline"));
+            Assert.That(detail.nextAction, Does.Contain("maxResultBytes"));
+        }
+
+        [Test]
+        public void UnsupportedObjectArrayReportsActionableInlineFailure()
+        {
+            var evaluation = CSharpSubsetEngine.Evaluate(
+                "return new object[] { \"mask\", \"0\", false };", "statements", new CSharpEvaluationContext());
+            var service = new UPilotExecutionService(null);
+            var error = Assert.Throws<ExecutionContractException>(() =>
+                service.EncodeResult(evaluation.Value, "", "inline", 1024));
+
+            Assert.That(error.Code, Is.EqualTo("RESULT_NOT_INLINEABLE"));
+            Assert.That(error.Message, Does.Contain("System.Object[]").And.Contain("resultMode=inline")
+                .And.Contain("elementType=System.Object").And.Contain("string[]").And.Contain("do not retry automatically"));
+            var detail = JsonUtility.FromJson<ErrorDetailPayload>(JsonUtility.ToJson(
+                UPilotExecutionService.ToErrorDetail(error, "object-array-result", "csharp.eval")));
+            Assert.That(detail.resultTypeName, Is.EqualTo("System.Object[]"));
+            Assert.That(detail.resultMode, Is.EqualTo("inline"));
+            Assert.That(detail.limitBytes, Is.EqualTo(1024));
+            Assert.That(detail.stage, Is.EqualTo("runtime"));
+            Assert.That(detail.sideEffectsMayHaveOccurred, Is.True);
+            Assert.That(detail.nextAction, Does.Contain("string[]").And.Contain("session").And.Contain("resultMode=handle"));
+            Assert.That(detail.exceptionMessage, Is.EqualTo(error.Message));
+        }
+
+        [Test]
+        public void StringArrayProjectionReturnsAllInlineValues()
+        {
+            var evaluation = CSharpSubsetEngine.Evaluate(
+                "return new string[] { \"mask\", \"0\", false.ToString() };", "statements", new CSharpEvaluationContext());
+            var result = new UPilotExecutionService(null).EncodeResult(evaluation.Value, "", "inline", 1024);
+
+            Assert.That(result.typeName, Is.EqualTo("System.String[]"));
+            Assert.That(result.valueJson, Is.EqualTo("[\"mask\",\"0\",\"False\"]"));
+            Assert.That(result.serializationStatus, Is.EqualTo("inline"));
         }
 
         [Test]
@@ -240,6 +283,9 @@ namespace CodingRiver.UPilot.Tests
             var error = Assert.Throws<ExecutionContractException>(() =>
                 service.EncodeResult(double.PositiveInfinity, "", "inline"));
             Assert.That(error.Code, Is.EqualTo("RESULT_NOT_INLINEABLE"));
+            Assert.That(error.Message, Does.Contain("System.Double").And.Contain("finite"));
+            Assert.That(UPilotExecutionService.ToErrorDetail(error, "non-finite-result", "csharp.eval").resultTypeName,
+                Is.EqualTo("System.Double"));
         }
     }
 

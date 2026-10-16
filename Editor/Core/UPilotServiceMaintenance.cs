@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+﻿// SPDX-License-Identifier: MIT
 using System;
 using System.IO;
 using System.Linq;
@@ -516,7 +516,9 @@ namespace CodingRiver.UPilot
             try
             {
                 RequireContinuation();
-                var resetError = UPilotBridge.Instance.ResetActiveWork();
+                var manager = UPilotMcpServerManager.Instance;
+                manager.BeginServiceShutdown(r.maintenanceId, "maintenance_preparing", r.deadlineAtUtcMs);
+                var resetError = manager.ResetActiveWorkForServiceOwner(r.maintenanceId, "service_maintenance").Error;
                 r.queueReset = string.IsNullOrEmpty(resetError);
                 if (!string.IsNullOrEmpty(resetError)) r.queueResetError += resetError;
                 try { Journal.Save(); }
@@ -527,8 +529,9 @@ namespace CodingRiver.UPilot
                         ServiceMaintenanceJournal.MaintenanceScope(r));
                 }
                 {
-                    UPilotMcpServerManager.Instance.RestartPreparedServer(
-                        maintenanceDeadlineUtcMs: r.deadlineAtUtcMs, expectedProcessId: r.oldServerProcessId, acceptedAtUtcMs: r.acceptedAtUtcMs);
+                    manager.RestartPreparedServer(
+                        maintenanceDeadlineUtcMs: r.deadlineAtUtcMs, expectedProcessId: r.oldServerProcessId, acceptedAtUtcMs: r.acceptedAtUtcMs,
+                        resetOwnerId: r.maintenanceId);
                     var restart = UPilotServerRestartDiagnostics.Current;
                     if (restart == null || restart.maintenanceDeadlineUtcMs != r.deadlineAtUtcMs ||
                         restart.requestedAtUtcMs < r.acceptedAtUtcMs)
@@ -735,6 +738,7 @@ namespace CodingRiver.UPilot
                 restart?.operationId == record.serverRestartId && restart.status != "succeeded" &&
                 (restart.status != "running" || UPilotMcpServerManager.Instance.IsServiceTransitionActive);
             if (!Journal.Expire(reportFailure: !managerOwnsDiagnostic)) return false;
+            UPilotMcpServerManager.Instance.FinishServiceShutdown(record.maintenanceId, "maintenance_timed_out");
             Logger.CloseDiagnostics(ServiceMaintenanceJournal.MaintenanceScope(record));
             return true;
         }
@@ -754,7 +758,11 @@ namespace CodingRiver.UPilot
                 Logger.ReportFailure("SERVICE", $"维护终态记录保存失败 maintenanceId={r.maintenanceId}", ex,
                     ServiceMaintenanceJournal.MaintenanceScope(r));
             }
-            try { UPilotMcpServerManager.Instance.EndMaintenanceObservation(r.serverRestartId); }
+            try
+            {
+                UPilotMcpServerManager.Instance.EndMaintenanceObservation(r.serverRestartId);
+                UPilotMcpServerManager.Instance.FinishServiceShutdown(r.maintenanceId, "maintenance_" + r.status);
+            }
             finally { RefreshUpdateSubscription(); }
         }
     }

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+﻿// SPDX-License-Identifier: MIT
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -96,6 +96,7 @@ namespace CodingRiver.UPilot.Tests
             Set("_startAttemptGeneration", 13);
             Set("_restartGeneration", 17L);
             _manager.EndpointOverride = _scope;
+            _manager.ExistingServiceShutdownOverride = _ => { };
             _replacementCalls = 0; _replacementError = null;
             _recoveryWork = _probeWork = null;
             _probeCancellation = new CancellationTokenSource();

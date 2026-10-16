@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+﻿// SPDX-License-Identifier: MIT
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -64,9 +64,13 @@ namespace CodingRiver.UPilot.Tests
         }
         [Test] public void ReloadRestoresOriginalIdFrozenParametersAndDeadline()
         {
+            Assert.That(_record.MonotonicElapsedMs, Is.EqualTo("unknown"), "Legacy records have no original monotonic baseline.");
+            _record.monotonicStartedAt = System.Diagnostics.Stopwatch.GetTimestamp();
             _record.dispatched = true; _record.Checked(1000);
             var restored = UnityEngine.JsonUtility.FromJson<ServiceStopObservationRecord>(UnityEngine.JsonUtility.ToJson(_record));
             Assert.That(restored.id, Is.EqualTo(_record.id)); Assert.That(restored.deadline, Is.EqualTo(31000));
+            Assert.That(restored.monotonicStartedAt, Is.EqualTo(_record.monotonicStartedAt));
+            Assert.That(restored.MonotonicElapsedMs, Is.Not.EqualTo("unknown"));
             Assert.That(restored.startedAt, Is.EqualTo(1000)); Assert.That(restored.intervalMs, Is.EqualTo(100));
             _record = restored; _now = 30000; Start(); _now = 31000; _observer.Tick();
             Assert.That(_record.status, Is.EqualTo("timed_out")); Assert.That(_observer.Subscribed, Is.False);
@@ -175,8 +179,13 @@ namespace CodingRiver.UPilot.Tests
             Set(manager, "_statusLock", new object()); Set(manager, "_stoppingProcesses", new List<System.Diagnostics.Process>());
             try
             {
-                LogAssert.Expect(UnityEngine.LogType.Log, new System.Text.RegularExpressions.Regex("开始停止 MCP 服务.*默认最多等待30秒"));
+                ExpectLifecycle("shutdown_protection_started",
+                    @"shutdownGeneration=\d+ ownerId=expired-parent phase=stop_preparing stopping=True replacementEligible=False .*");
+                ExpectLifecycle("server_stop_started", @".*开始停止 MCP 服务.*默认最多等待30秒.*requestId=expired-parent .*");
+                ExpectLifecycle("server_stop_finished", @".*MCP 服务停止观察结束.*总耗时.*状态=timed_out.*requestId=expired-parent .*");
                 LogAssert.Expect(UnityEngine.LogType.Error, new System.Text.RegularExpressions.Regex("MCP 服务停止观察结束.*总耗时.*状态=timed_out"));
+                ExpectLifecycle("shutdown_protection_finished",
+                    @"shutdownGeneration=\d+ ownerId=expired-parent phase=stop_preparing stopping=True replacementEligible=False .* reason=stop_timed_out");
                 var work = manager.StopServerAndObserveExitAsync(UPilotServerStopOrigin.User,
                     "expired-parent", parentDeadlineUtcMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 1);
                 Assert.That(work.IsCompleted, Is.True); Assert.That(work.Result.StopConfirmed, Is.False);
@@ -269,12 +278,16 @@ namespace CodingRiver.UPilot.Tests
             Set(manager, "_stopPreparation", fromException.MakeGenericMethod(preparedType).Invoke(null, new object[] { failure }));
             try
             {
-                LogAssert.Expect(UnityEngine.LogType.Log,
-                    $"[UPilotMcpServerManager] 生命周期：正在关闭服务器；PID=42；operationId={_record.id}。");
+                ExpectLifecycle("server_lifecycle_phase", @"phase=Stopping .* serverPid=42 operationId=" +
+                    System.Text.RegularExpressions.Regex.Escape(_record.id) + @" .*");
                 var generation = manager.SetLifecyclePhase(UPilotServerLifecyclePhase.Stopping, 42, _record.id, _record.deadline);
                 Set(manager, "_stopLifecycleGeneration", generation);
-                LogAssert.Expect(UnityEngine.LogType.Log,
-                    $"[UPilotMcpServerManager] 生命周期：生命周期操作结束；PID=42；operationId={_record.id}。");
+                ExpectLifecycle("server_lifecycle_phase", @"phase=None .* serverPid=42 operationId=" +
+                    System.Text.RegularExpressions.Regex.Escape(_record.id) + @" .*");
+                ExpectLifecycle("server_stop_finished",
+                    System.Text.RegularExpressions.Regex.Escape("[UPilot] MCP 服务停止观察结束；stopId=" + _record.id + "；总耗时") +
+                    @"\d+(?:[.,]\d+)?秒；状态=failed；进程退出=False；端口释放=False；原因=" +
+                    System.Text.RegularExpressions.Regex.Escape(failure.Message) + @"。.*");
                 LogAssert.Expect(UnityEngine.LogType.Error,
                     new System.Text.RegularExpressions.Regex("MCP 服务停止观察结束.*状态=failed.*原因=" + failure.Message));
                 typeof(UPilotMcpServerManager).GetMethod("PollStopObservation", BindingFlags.Instance | BindingFlags.NonPublic)
@@ -316,15 +329,15 @@ namespace CodingRiver.UPilot.Tests
             Set(manager, "_stopObservation", _record);
             try
             {
-                LogAssert.Expect(UnityEngine.LogType.Log,
-                    $"[UPilotMcpServerManager] 生命周期：正在关闭服务器；PID=42；operationId={_record.id}。");
+                ExpectLifecycle("server_lifecycle_phase", @"phase=Stopping .* serverPid=42 operationId=" +
+                    System.Text.RegularExpressions.Regex.Escape(_record.id) + @" .*");
                 var generation = manager.SetLifecyclePhase(UPilotServerLifecyclePhase.Stopping, 42, _record.id, _record.deadline);
                 Set(manager, "_stopLifecycleGeneration", generation);
-                LogAssert.Expect(UnityEngine.LogType.Log,
-                    $"[UPilotMcpServerManager] 生命周期：生命周期操作结束；PID=42；operationId={_record.id}。");
-                LogAssert.Expect(UnityEngine.LogType.Log, new System.Text.RegularExpressions.Regex(
+                ExpectLifecycle("server_lifecycle_phase", @"phase=None .* serverPid=42 operationId=" +
+                    System.Text.RegularExpressions.Regex.Escape(_record.id) + @" .*");
+                ExpectLifecycle("server_stop_finished",
                     System.Text.RegularExpressions.Regex.Escape("[UPilot] MCP 服务停止观察结束；stopId=" + _record.id + "；总耗时") +
-                    @"\d+(?:[.,]\d+)?秒；状态=stopped；进程退出=False；端口释放=False；原因=new_service_start_or_restart。"));
+                    @"\d+(?:[.,]\d+)?秒；状态=stopped；进程退出=False；端口释放=False；原因=new_service_start_or_restart。.*");
                 typeof(UPilotMcpServerManager).GetMethod("FinishStopObservation", BindingFlags.Instance | BindingFlags.NonPublic)
                     .Invoke(manager, new object[] { "stopped", "new_service_start_or_restart" });
                 Assert.That(_record.status, Is.EqualTo("stopped"));
@@ -364,6 +377,13 @@ namespace CodingRiver.UPilot.Tests
             _record.lifetime = UPilotServiceLifetime.Id;
             ++_record.unityPid;
             Assert.That(UPilotQuickStart.EvaluateStopFailure(_record, false, false), Is.Null);
+        }
+        private static void ExpectLifecycle(string eventName, string detailPattern)
+        {
+            LogAssert.Expect(UnityEngine.LogType.Log, new System.Text.RegularExpressions.Regex(
+                @"^\[UPilot\]\[Lifecycle\] utc=\S+ pid=\d+ thread=\d+ eventId=[0-9a-f]{32} event=" +
+                System.Text.RegularExpressions.Regex.Escape(eventName) + @"\r?\n" + detailPattern + "$",
+                System.Text.RegularExpressions.RegexOptions.Singleline));
         }
         private static object Get(UPilotMcpServerManager manager, string field) => typeof(UPilotMcpServerManager).GetField(field, BindingFlags.Instance | BindingFlags.NonPublic).GetValue(manager);
         private static void Set(UPilotMcpServerManager manager, string field, object value) => typeof(UPilotMcpServerManager).GetField(field, BindingFlags.Instance | BindingFlags.NonPublic).SetValue(manager, value);

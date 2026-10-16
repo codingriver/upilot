@@ -51,7 +51,7 @@ namespace CodingRiver.UPilot
                     IsRunning = phase != UPilotServerLifecyclePhase.None && processId > 0,
                     DiagnosisPending = phase != UPilotServerLifecyclePhase.None,
                 };
-                UnityEngine.Debug.Log($"[UPilotMcpServerManager] 生命周期：{LifecycleTitle(phase)}；PID={processId}；operationId={operationId}。");
+                Logger.Lifecycle("server_lifecycle_phase", $"phase={phase} lifecycleGeneration={_lifecycleGeneration} serverPid={(processId > 0 ? processId.ToString() : "unknown")} operationId={operationId} startedAtUtcMs={_lifecycleStartedAtUtcMs} deadlineUtcMs={(deadlineUtcMs > 0 ? deadlineUtcMs.ToString() : "unknown")} {CaptureServiceShutdown().Detail}");
                 if (phase != UPilotServerLifecyclePhase.None && UPilotServerRestartDiagnostics.IsActive(operationId))
                     UPilotServerRestartDiagnostics.RecordPhase(operationId, phase.ToString().ToLowerInvariant());
                 NotifyStatusChanged();

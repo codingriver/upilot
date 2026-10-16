@@ -1,4 +1,4 @@
-// -----------------------------------------------------------------------
+﻿// -----------------------------------------------------------------------
 // upilot Editor — MCP Server Process Manager
 // Manages the external UPilot MCP server process independently of Unity.
 // SPDX-License-Identifier: MIT
@@ -2050,7 +2050,7 @@ namespace CodingRiver.UPilot
         private void StopPreparedProcesses(PreparedProcessStop prepared, int expectedProcessId, Action onStopAttempt = null, Dictionary<int, List<int>> verifiedPorts = null, string stopObservationId = "", long stopDeadline = 0, bool initialDispatch = true, string maintenanceId = "")
         {
             if (initialDispatch || prepared.Processes.Any(x => !StoppingTargets.Any(t => t.ProcessId == x.ProcessId && !t.HasExited)))
-                Debug.Log($"[UPilotMcpServerManager] 正在关闭 MCP Server；目标 PID=[{string.Join(", ", prepared.Processes.Select(entry => entry.ProcessId))}]；目标进程数={prepared.Processes.Count}；HTTP={prepared.HttpPort}；WS={prepared.WsPort}。");
+                Logger.Lifecycle("server_termination_targets_verified", $"stopId={stopObservationId} maintenanceId={maintenanceId} {CaptureServiceShutdown().Detail} targetPids=[{string.Join(",", prepared.Processes.Select(entry => entry.ProcessId))}] targetCount={prepared.Processes.Count} httpPort={prepared.HttpPort} wsPort={prepared.WsPort}");
             if (initialDispatch) { Interlocked.Increment(ref _startAttemptGeneration); _startInProgress = false; }
             _stoppingHttpPort = prepared.HttpPort;
             _stoppingWsPort = prepared.WsPort;
@@ -2072,11 +2072,13 @@ namespace CodingRiver.UPilot
                         UPilotServerRestartDiagnostics.RecordStopProgress(_restartOperationId, serverAttempted: true);
                     try
                     {
+                        var dispatchStarted = Stopwatch.GetTimestamp();
+                        Logger.Lifecycle("server_termination_dispatching", $"stopId={stopObservationId} maintenanceId={maintenanceId} {CaptureServiceShutdown().Detail} targetPid={entry.ProcessId} method=TerminateProcess remainingMs={(stopDeadline > 0 ? Math.Max(0, stopDeadline - StopNow).ToString() : "unknown")}");
                         if (StopTerminationOverride != null) StopTerminationOverride(entry);
                         else entry.Terminate();
                         StoppingTargets.Add(entry);
                         prepared.Transferred.Add(entry.ProcessId);
-                        UnityEngine.Debug.Log($"[UPilotMcpServerManager] 已请求关闭 MCP Server 进程 PID={entry.ProcessId}；入口={entry.EntryPath}。");
+                        Logger.Lifecycle("server_termination_dispatched", $"stopId={stopObservationId} {CaptureServiceShutdown().Detail} targetPid={entry.ProcessId} dispatchReturned=true processExited={entry.HasExited} elapsedMs={Logger.LifecycleElapsedMs(dispatchStarted)}");
                     }
                     catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 5 &&
                         _stopObservation?.Active == true && _stopObservation.id == stopObservationId)
@@ -2195,7 +2197,7 @@ namespace CodingRiver.UPilot
             _ = UPilotQuickStart.AutoRepairAsync(null, afterStart);
         }
 
-        internal void RestartPreparedServer(Action afterStart = null, long maintenanceDeadlineUtcMs = 0, int expectedProcessId = 0, long acceptedAtUtcMs = 0)
+        internal void RestartPreparedServer(Action afterStart = null, long maintenanceDeadlineUtcMs = 0, int expectedProcessId = 0, long acceptedAtUtcMs = 0, string resetOwnerId = "")
         {
             if (UPilotServiceMaintenance.IsActive && !UPilotServiceMaintenance.IsExecuting) return;
             if (maintenanceDeadlineUtcMs > 0 && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= maintenanceDeadlineUtcMs)
@@ -2257,6 +2259,8 @@ namespace CodingRiver.UPilot
             _restartMaintenanceDeadlineUtcMs = maintenanceDeadlineUtcMs;
             _restartNextProbeAtUtcMs = 0;
             _restartHealthProbeRunning = false;
+            _restartShutdownOwnerId = string.IsNullOrEmpty(resetOwnerId) ? _restartOperationId : resetOwnerId;
+            BeginServiceShutdown(_restartShutdownOwnerId, "restart_preparing", _restartVerificationDeadlineUtcMs);
 
             PreparedProcessStop prepared = null;
             Task<ServerStopResult> stopping = null;
@@ -2272,7 +2276,8 @@ namespace CodingRiver.UPilot
                     UPilotServerRestartDiagnostics.RecordLaunchSpec(_restartOperationId, _pendingLaunchSpec);
                     RequireRestartBudget();
                     prepared = PrepareCurrentProjectStop(expectedProcessId, stopDeadline);
-                    bridge.ResetActiveWork();
+                    var receipt = ResetActiveWorkForServiceOwner(_restartShutdownOwnerId, "server_restart");
+                    UPilotServerRestartDiagnostics.RecordResetReceipt(_restartOperationId, _restartShutdownOwnerId, receipt);
                     UPilotServerRestartDiagnostics.MarkGate(_restartOperationId, "old_identity", "passed",
                         prepared.Processes.Count == 0 ? "no_old_process" : "identity_verified",
                         prepared.Processes.Count == 0 ? "未发现旧进程，无需停止" : "已核实进程归属");
@@ -2291,7 +2296,9 @@ namespace CodingRiver.UPilot
                 {
                     UPilotServerRestartDiagnostics.RecordStopProgress(_restartOperationId, bridgeAttempted: true);
                     RequireRestartBudget();
+                    Logger.Lifecycle("bridge_stop_started", $"restartId={_restartOperationId} {CaptureServiceShutdown().Detail} oldSessionId={oldBridgeSessionId}");
                     bridge.Stop();
+                    Logger.Lifecycle("bridge_stop_finished", $"restartId={_restartOperationId} {CaptureServiceShutdown().Detail} bridgeStarted={bridge.GetStatus().IsStarted}");
                     UPilotServerRestartDiagnostics.RecordStopProgress(_restartOperationId,
                         bridgeConfirmed: !bridge.GetStatus().IsStarted);
                 }, onAttempt =>
@@ -2383,6 +2390,7 @@ namespace CodingRiver.UPilot
                         return;
                     }
                     EndLifecyclePhase(_lifecycleGeneration);
+                    Logger.Lifecycle("replacement_start_requested", $"restartId={waitingOperationId} restartGeneration={waitingGeneration} {CaptureServiceShutdown().Detail} processExited={stopped.StopConfirmed} portsReleased={stopped.PortsAvailable} observationSucceeded={stopped.ObservationSucceeded} remainingMs={Math.Max(0, _restartVerificationDeadlineUtcMs - StopNow)}");
                     StartServer();
                     if (IsRestartObservationActive())
                         InvokeAfterRestartStarted();
@@ -2469,6 +2477,8 @@ namespace CodingRiver.UPilot
             var operationId = _restartOperationId;
             if (expectedOperationId != null &&
                 (operationId != expectedOperationId || _restartGeneration != expectedGeneration)) return;
+            FinishServiceShutdown(_restartShutdownOwnerId, "restart_canceled");
+            _restartShutdownOwnerId = "";
             _restartPending = false;
             _afterRestartStarted = null;
             if (_restartWaitCallback != null)
@@ -2593,7 +2603,8 @@ namespace CodingRiver.UPilot
                 _launchState.terminal || record.launchSpec == null ||
                 _launchState.launcherPid != record.launcherProcessId ||
                 _launchState.launcherCreatedAt != record.launcherProcessCreatedAtTicks ||
-                _launchState.deadlineUtcMs != UPilotServerRestartDiagnostics.Deadline(record))
+                _launchState.deadlineUtcMs != UPilotServerRestartDiagnostics.Deadline(record) ||
+                _restoredRestartResetReceiptId != record.operationId)
             {
                 RecordRestartStartFailure("restart_recovery_required",
                     "Reload 后冻结启动身份缺失或无法核实；仅观察历史记录，不重放启动。");
@@ -3026,6 +3037,8 @@ namespace CodingRiver.UPilot
         private void FinishRestartObservation()
         {
             var terminal = UPilotServerRestartDiagnostics.Current;
+            FinishServiceShutdown(_restartShutdownOwnerId, "restart_" + (terminal?.status ?? "unknown"));
+            _restartShutdownOwnerId = "";
             if (_lifecycleOperationId == _restartOperationId)
                 EndLifecyclePhase(_lifecycleGeneration, terminal?.status == "succeeded" ? "" : terminal?.errorCode ?? "restart_ended",
                     terminal?.errorCode == "SERVICE_RESTART_TIMEOUT" || terminal?.errorCode == "restart_verification_timeout" || terminal?.errorCode == "port_release_timeout");
@@ -3073,6 +3086,7 @@ namespace CodingRiver.UPilot
             _restartOperationId = "";
             _restartOldBridgeSessionId = "";
             _restartExpectedProjectPath = "";
+            _restoredRestartResetReceiptId = "";
             _restartVerificationDeadlineUtcMs = 0;
             _restartMaintenanceDeadlineUtcMs = 0;
             _restartNextProbeAtUtcMs = 0;
@@ -3209,9 +3223,11 @@ namespace CodingRiver.UPilot
             int? firstPid = null;
             string firstCommandLine = null;
             var allCommandLinesReadable = true;
+            ProcessCommandLineReadResult unreadableCommandLine = null;
             foreach (var pid in candidatePids)
             {
-                var commandLine = GetProcessCommandLineForDiagnostics(pid, deadlineUtcMs);
+                var commandLineRead = ProbeProcessCommandLine(pid, deadlineUtcMs);
+                var commandLine = commandLineRead.LegacyValue;
                 if (!firstPid.HasValue)
                 {
                     firstPid = pid;
@@ -3221,6 +3237,7 @@ namespace CodingRiver.UPilot
                 if (!IsUsableCommandLine(commandLine))
                 {
                     allCommandLinesReadable = false;
+                    unreadableCommandLine = commandLineRead;
                     continue;
                 }
 
@@ -3236,9 +3253,12 @@ namespace CodingRiver.UPilot
                                 return new McpProcessProbe(McpProcessOwnership.Foreign, pid, commandLine,
                                     "监听进程与已核实的冻结服务身份不符");
                         }
-                        catch (Exception)
+                        catch (Exception ex)
                         {
                             allCommandLinesReadable = false;
+                            Logger.LifecycleFailure("process_identity_recheck_failed",
+                                $"targetPid={pid} expectedPid={expectedPid} expectedCreatedAtTicks={expectedCreatedAt} httpPort={httpPort} wsPort={wsPort}",
+                                ex, scope: "process-identity|" + pid);
                             continue;
                         }
                     }
@@ -3264,7 +3284,8 @@ namespace CodingRiver.UPilot
                 McpProcessOwnership.Unknown,
                 firstPid,
                 firstCommandLine,
-                allCommandLinesReadable ? "端口进程证据尚不完整" : "进程命令行暂不可读");
+                allCommandLinesReadable ? "端口进程证据尚不完整" : "进程命令行暂不可读" +
+                    (unreadableCommandLine != null ? "；" + unreadableCommandLine.SafeDetail : "；已核实进程的活体身份复查失败"));
         }
 
         private (int? pid, string cmdLine) FindMcpProcessByPorts()
@@ -3666,48 +3687,6 @@ namespace CodingRiver.UPilot
         }
 
         internal static string GetProcessCommandLineForDiagnostics(int pid, long deadlineUtcMs = 0)
-        {
-            if (deadlineUtcMs > 0 && ProcessProbeWaitMs(deadlineUtcMs, 0) == 0) return "(读取命令行失败)";
-#if UNITY_EDITOR_WIN
-            try
-            {
-                var psi = new ProcessStartInfo
-                {
-                    FileName = "wmic",
-                    Arguments = $"process where ProcessId={pid} get CommandLine /value",
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                };
-
-                using var proc = Process.Start(psi);
-                if (proc == null) return "(读取命令行失败)";
-                var stdout = proc.StandardOutput.ReadToEndAsync();
-                var stderr = proc.StandardError.ReadToEndAsync();
-                if (!proc.WaitForExit(ProcessProbeWaitMs(deadlineUtcMs, 1000)) ||
-                    !stdout.Wait(ProcessProbeWaitMs(deadlineUtcMs, 100)))
-                {
-                    try { proc.Kill(); } catch { }
-                    return "(读取命令行失败)";
-                }
-                string output = stdout.Result;
-
-                if (string.IsNullOrWhiteSpace(output)) return "(空)";
-                var marker = "CommandLine=";
-                var idx = output.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
-                if (idx < 0) return output.Trim();
-
-                var cmd = output.Substring(idx + marker.Length).Trim();
-                return string.IsNullOrWhiteSpace(cmd) ? "(空)" : cmd;
-            }
-            catch
-            {
-                return "(读取命令行失败)";
-            }
-#else
-            return "(当前平台未实现命令行读取)";
-#endif
-        }
+            => ProbeProcessCommandLine(pid, deadlineUtcMs).LegacyValue;
     }
 }

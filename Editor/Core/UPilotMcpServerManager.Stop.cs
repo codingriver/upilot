@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+﻿// SPDX-License-Identifier: MIT
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -28,6 +28,13 @@ namespace CodingRiver.UPilot
         public int[] heldProcessIds = Array.Empty<int>();
         public long[] processHandles = Array.Empty<long>();
         public bool handlesTransferred;
+        public string shutdownOwnerId = "";
+        public bool preserveShutdown;
+        // SessionState is scoped to this Unity process; Stopwatch ticks survive Domain Reload.
+        public long monotonicStartedAt;
+        internal string MonotonicElapsedMs => monotonicStartedAt > 0
+            ? Logger.LifecycleElapsedMs(monotonicStartedAt).ToString() : "unknown";
+        [NonSerialized] internal string lastEvidence = "";
         [NonSerialized] internal Exception failureException;
         internal bool Active => status == "observing";
         internal static ServiceStopObservationRecord Start(long now, int seconds, int interval, long parentDeadline = 0) => new ServiceStopObservationRecord {
@@ -108,7 +115,7 @@ namespace CodingRiver.UPilot
 
         internal Task<ServerStopResult> StopServerAndObserveExitAsync(UPilotServerStopOrigin origin,
             string requestId = "", int timeoutMs = 0, long parentDeadlineUtcMs = 0, ServerStopScope scope = null,
-            PreparedProcessStop prepared = null, bool preserveRestart = false, string maintenanceId = "")
+            PreparedProcessStop prepared = null, bool preserveRestart = false, string maintenanceId = "", bool preserveShutdown = false)
         {
             try { EnsureInitialServiceRecovery(); }
             catch { prepared?.Dispose(); throw; }
@@ -124,13 +131,19 @@ namespace CodingRiver.UPilot
             record.originalStartGeneration = _startAttemptGeneration;
             record.originalRestartGeneration = _restartGeneration;
             record.httpPort = scope?.HttpPort ?? HttpPort; record.wsPort = scope?.WsPort ?? WsPort;
+            var shutdown = CaptureServiceShutdown();
+            record.shutdownOwnerId = shutdown.Stopping ? shutdown.OwnerId :
+                !string.IsNullOrEmpty(requestId) ? requestId : record.id;
+            record.preserveShutdown = preserveRestart || preserveShutdown;
+            record.monotonicStartedAt = Stopwatch.GetTimestamp();
+            BeginServiceShutdown(record.shutdownOwnerId, "stop_preparing", record.deadline);
             _stopObservation = record;
             _stopCompletion = new TaskCompletionSource<ServerStopResult>(TaskCreationOptions.RunContinuationsAsynchronously);
             _stopStartGeneration = _startAttemptGeneration; _stopRestartGeneration = _restartGeneration;
             _stopLifecycleGeneration = 0;
             var completion = _stopCompletion.Task;
             var preparationTransferred = false;
-            Debug.Log(record.StartMessage);
+            Logger.Lifecycle("server_stop_started", record.StartMessage + $" requestId={record.requestId} maintenanceId={record.maintenanceId} shutdownOwnerId={record.shutdownOwnerId} lifetime={record.lifetime} unityPid={record.unityPid} deadlineUtcMs={record.deadline} remainingMs={Math.Max(0, record.deadline - StopNow)}");
             try
             {
                 if (UPilotServiceMaintenance.IsActive && !UPilotServiceMaintenance.IsExecuting)
@@ -165,8 +178,11 @@ namespace CodingRiver.UPilot
             return completion;
         }
 
-        private PreparedProcessStop PrepareStopScope(ServerStopScope scope, IEnumerable<int> knownPids, long deadline)
+        private PreparedProcessStop PrepareStopScope(ServerStopScope scope, IEnumerable<int> knownPids, long deadline, bool logLifecycle = true)
         {
+            var started = Stopwatch.GetTimestamp();
+            if (logLifecycle)
+                Logger.Lifecycle("server_stop_discovery_started", $"{CaptureServiceShutdown().Detail} httpPort={scope.HttpPort} wsPort={scope.WsPort} remainingMs={Math.Max(0, deadline - StopNow)}");
             var prepared = new PreparedProcessStop { Scope = scope, HttpPort = scope.HttpPort, WsPort = scope.WsPort };
             try
             {
@@ -177,6 +193,8 @@ namespace CodingRiver.UPilot
                 discovery.Targets.Clear();
                 prepared.VerifiedPorts = discovery.ListeningPorts;
                 prepared.UnmatchedPortOwners = discovery.UnmatchedPortOwners;
+                if (logLifecycle)
+                    Logger.Lifecycle("server_stop_discovery_finished", $"{CaptureServiceShutdown().Detail} elapsedMs={Logger.LifecycleElapsedMs(started)} targetPids=[{string.Join(",", prepared.Processes.Select(x => x.ProcessId))}] unmatchedPortOwners=[{string.Join(",", prepared.UnmatchedPortOwners)}] remainingMs={Math.Max(0, deadline - StopNow)}");
                 return prepared;
             }
             catch { prepared.Dispose(); throw; }
@@ -227,7 +245,7 @@ namespace CodingRiver.UPilot
                 {
                     var scope = _stopScope;
                     var known = StoppingTargets.Select(x => x.ProcessId).ToArray();
-                    _stopPreparation = Task.Run(() => PrepareStopScope(scope, known, r.deadline));
+                    _stopPreparation = Task.Run(() => PrepareStopScope(scope, known, r.deadline, logLifecycle: false));
                     return;
                 }
                 if (!_stopPreparation.IsCompleted) return;
@@ -245,7 +263,15 @@ namespace CodingRiver.UPilot
                 SaveStopObservation();
                 r.processesExited = StoppedProcessesExited();
                 // Always inspect both ports, including while a launcher is still alive.
-                r.portsAvailable = UPilotPortAllocator.IsPortAvailable(r.httpPort) && UPilotPortAllocator.IsPortAvailable(r.wsPort);
+                var httpReleased = UPilotPortAllocator.IsPortAvailable(r.httpPort);
+                var wsReleased = UPilotPortAllocator.IsPortAvailable(r.wsPort);
+                r.portsAvailable = httpReleased && wsReleased;
+                var evidence = $"processExited={r.processesExited} httpReleased={httpReleased} wsReleased={wsReleased} targetPids=[{string.Join(",", r.processIds)}] unmatchedPortOwners=[{string.Join(",", prepared.UnmatchedPortOwners)}]";
+                if (evidence != r.lastEvidence)
+                {
+                    r.lastEvidence = evidence;
+                    Logger.Lifecycle("server_stop_evidence_changed", $"stopId={r.id} requestId={r.requestId} {CaptureServiceShutdown().Detail} {evidence} elapsedMs={r.MonotonicElapsedMs} remainingMs={Math.Max(0, r.deadline - StopNow)}");
+                }
                 if (prepared.UnmatchedPortOwners.Length > 0)
                     throw new InvalidOperationException("停止后端口由其他程序或无法核实入口的进程占用；PID=[" + string.Join(",", prepared.UnmatchedPortOwners) + "]。");
                 if (r.processesExited && !r.portsAvailable && prepared.Processes.Count == 0)
@@ -292,11 +318,13 @@ namespace CodingRiver.UPilot
             if (_stopLifecycleGeneration > 0) EndLifecyclePhase(_stopLifecycleGeneration, failed ? reason : "",
                 terminal == "timed_out", emitDiagnostic: false, failureException: failed ? r.failureException : null);
             var message = r.TerminalMessage;
+            Logger.Lifecycle("server_stop_finished", $"{message} requestId={r.requestId} maintenanceId={r.maintenanceId} shutdownOwnerId={r.shutdownOwnerId} deadlineUtcMs={r.deadline} elapsedMs={r.MonotonicElapsedMs} remainingMs={Math.Max(0, r.deadline - StopNow)}");
             if (failed)
                 Logger.ReportFailure("SERVER", message, r.failureException, r.id, terminal: true);
-            else { Logger.CloseDiagnostics(r.id); Debug.Log(message); }
+            else Logger.CloseDiagnostics(r.id);
             var result = new ServerStopResult(r.processesExited && (terminal == "succeeded" || terminal == "timed_out"), r.portsAvailable,
                 _statusGeneration, _stopStartGeneration, _stopRestartGeneration, terminal == "succeeded");
+            if (!r.preserveShutdown || terminal != "succeeded") FinishServiceShutdown(r.shutdownOwnerId, "stop_" + terminal);
             _stopCompletion?.TrySetResult(result);
             InvalidateStatusCache();
         }
@@ -333,6 +361,8 @@ namespace CodingRiver.UPilot
             if (r == null || !r.MatchesScope(UPilotProjectConfig.ProjectRoot, UPilotServiceLifetime.Id, Process.GetCurrentProcess().Id)) return false;
             _stopObservation = r;
             if (!r.Active) return true; // Retain the stop outcome; only an explicit new start clears the intent.
+            if (string.IsNullOrEmpty(r.shutdownOwnerId)) r.shutdownOwnerId = !string.IsNullOrEmpty(r.requestId) ? r.requestId : r.id;
+            BeginServiceShutdown(r.shutdownOwnerId, "stop_restored", r.deadline);
             _stopCompletion = new TaskCompletionSource<ServerStopResult>(TaskCreationOptions.RunContinuationsAsynchronously);
             // Domain-local counters restart after Reload. Original counters remain in the record;
             // the restored observer fences new actions against this domain's runtime baseline.

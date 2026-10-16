@@ -1359,6 +1359,30 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
+        public void QuickDebugForeachArrayExampleReturnsInlineResult()
+        {
+            var window = ScriptableObject.CreateInstance<UPilotQuickDebugWindow>();
+            try
+            {
+                typeof(UPilotQuickDebugWindow).GetMethod("FillEvalExample", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .Invoke(window, new object[] { "foreach-array" });
+                var payload = (CSharpEvalPayload)typeof(UPilotQuickDebugWindow)
+                    .GetMethod("CreateEvalPayload", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(window, null);
+                var evaluation = CSharpSubsetEngine.Evaluate(payload.code, payload.mode, new CSharpEvaluationContext());
+                var result = new UPilotExecutionService(null).EncodeResult(
+                    evaluation.Value, payload.sessionId, payload.resultMode);
+
+                Assert.That(result.typeName, Is.EqualTo("System.Int32[]"));
+                Assert.That(result.valueJson, Is.EqualTo("[6,1,2,3,4]"));
+                Assert.That(result.serializationStatus, Is.EqualTo("inline"));
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(window);
+            }
+        }
+
+        [Test]
         public void QuickDebugTabsUseTaskOrientedTitlesAndExplainUsageAndFeatures()
         {
             var method = typeof(UPilotQuickDebugWindow).GetMethod(

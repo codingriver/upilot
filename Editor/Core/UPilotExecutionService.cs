@@ -1120,10 +1120,20 @@ namespace CodingRiver.UPilot
             if (mode == "inline")
             {
                 string code = unsupported ? "RESULT_NOT_INLINEABLE" : "RESULT_TOO_LARGE";
-                throw new ExecutionContractException(code, unsupported
+                string reason = unsupported
                     ? "The result cannot be represented as a supported inline typed value."
-                    : "The complete result exceeds maxResultBytes.", new Dictionary<string, object>
+                    : "The complete result exceeds maxResultBytes.";
+                string typeContext = " resultTypeName=" + type.FullName + ", resultMode=" + mode;
+                if (unsupported && type.IsArray)
+                    typeContext += ", arrayRank=" + type.GetArrayRank() + ", elementType=" + type.GetElementType().FullName;
+                string nextAction = (unsupported
+                    ? "Return a supported scalar or a one-dimensional primitive/string array (for example string[]); floating-point values must be finite. "
+                    : "Reduce the returned data or increase maxResultBytes within its supported limit. ")
+                    + "To retain a complex or oversized result, use a persistent execution session and resultMode=handle. "
+                    + "The target may already have executed; inspect its state and do not retry automatically.";
+                throw new ExecutionContractException(code, reason + typeContext + ". " + nextAction, new Dictionary<string, object>
                     {
+                        { "resultTypeName", type.FullName }, { "resultMode", mode }, { "nextAction", nextAction },
                         { "actualBytes", actualBytes }, { "limitBytes", maxBytes }, { "sideEffectsMayHaveOccurred", true },
                     });
             }
@@ -1784,6 +1794,10 @@ namespace CodingRiver.UPilot
             {
                 commandId = id,
                 commandName = command,
+                actualBytes = DetailLong(detail, "actualBytes"),
+                limitBytes = DetailLong(detail, "limitBytes"),
+                resultTypeName = DetailString(detail, "resultTypeName", ""),
+                resultMode = DetailString(detail, "resultMode", ""),
                 stage = stage,
                 nextAction = DetailString(detail, "nextAction", nextAction),
                 sideEffectsMayHaveOccurred = sideEffects,
@@ -1843,6 +1857,12 @@ namespace CodingRiver.UPilot
             if (!string.Equals(originalType, wrapperType, StringComparison.Ordinal)
                 && !detail.ContainsKey("wrapperExceptionType"))
                 detail["wrapperExceptionType"] = wrapperType;
+        }
+
+        private static long DetailLong(IDictionary<string, object> detail, string key)
+        {
+            if (detail == null || !detail.TryGetValue(key, out var value)) return 0;
+            return value is long longValue ? longValue : value is int intValue ? intValue : 0;
         }
 
         private static string DetailString(IDictionary<string, object> detail, string key, string fallback)

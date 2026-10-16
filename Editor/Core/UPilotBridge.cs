@@ -1,4 +1,4 @@
-// -----------------------------------------------------------------------
+﻿// -----------------------------------------------------------------------
 // UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -143,7 +143,7 @@ namespace CodingRiver.UPilot
         }
     }
 
-    public sealed class UPilotBridge
+    public sealed partial class UPilotBridge
     {
         public const string DefaultWsHost   = "127.0.0.1";
         public const int    DefaultWsPort   = 8765;
@@ -245,6 +245,7 @@ namespace CodingRiver.UPilot
 
         private readonly ConcurrentQueue<Action> _controlQueue = new ConcurrentQueue<Action>();
         private volatile bool _resettingWork;
+        private bool _resetExecuting;
         private volatile bool _admissionClosed;
         private string _resetErrors = "";
         internal void EnqueueControl(Action action) => _controlQueue.Enqueue(action);
@@ -253,49 +254,56 @@ namespace CodingRiver.UPilot
         {
             if (commandName == "service.restart" || commandName == "queue.snapshot" || commandName == "editor.state")
                 return null;
-            if (_resettingWork) return "UPILOT_RESET_IN_PROGRESS";
+            if (_resetExecuting || _resettingWork) return "UPILOT_RESET_IN_PROGRESS";
             // Authentication closes admission until the main-thread handshake is applied.
             // Normal Domain Reload/reconnect is waiting, not a hard stop.
             return _admissionClosed ? "UPILOT_RECONNECT_PENDING" : null;
         }
 
-        internal string ResetActiveWork()
+        internal string ResetActiveWork(string preservedRecoveryOwnerId = "")
         {
-            if (_resettingWork) return _resetErrors;
+            if (ActiveWorkResetOverride != null) return ActiveWorkResetOverride(preservedRecoveryOwnerId);
+            if (_resetExecuting) return _resetErrors;
+            _resetExecuting = true;
             _resettingWork = true;
-            UPilotServiceLifetime.Advance(); // Fence callbacks before touching any owned resource.
-            var errors = new System.Collections.Generic.List<string>();
-            void Reset(Action action)
+            try
             {
-                try { action(); }
-                catch (Exception ex)
+                LifecycleManager.CancelExistingServiceRecoveryForReset(preservedRecoveryOwnerId);
+                UPilotServiceLifetime.Advance(); // Fence callbacks before touching any owned resource.
+                var errors = new System.Collections.Generic.List<string>();
+                void Reset(Action action)
                 {
-                    errors.Add(ex.Message);
-                    Logger.ReportFailure("SYSTEM", "UPilot activity reset failed", ex,
-                        scope: "bridge-reset", fingerprint: action.Method.Name);
+                    try { action(); }
+                    catch (Exception ex)
+                    {
+                        errors.Add(ex.Message);
+                        Logger.ReportFailure("SYSTEM", "UPilot activity reset failed", ex,
+                            scope: "bridge-reset", fingerprint: action.Method.Name);
+                    }
                 }
+                lock (_queueObservationLock)
+                {
+                    while (_mainThreadQueue.TryDequeue(out _)) { }
+                    _trackedQueueActions.Clear();
+                }
+                Reset(() => UPilotUpmRequestObservation.ResetAll("service_reset"));
+                Reset(() => LifecycleManager.ResetStopObservation("service_reset"));
+                Reset(() => UPilotOperationTracker.Instance.AbortActive());
+                Reset(() => Automation.UPilotAutomationStepService.ResetActive());
+                Reset(() => _testService?.ResetActive());
+                Reset(() => _snapshotService?.ResetActive());
+                Reset(() => _batchService?.ResetActive());
+                Reset(() => _buildService?.ResetActive());
+                Reset(() => _editorDelayService?.ResetActive());
+                Reset(() => _flowService?.GetType().GetMethod("ResetActive")?.Invoke(_flowService, null));
+                Reset(UPilotRuntimeDiagnosticsService.ResetActive);
+                Reset(() => _executionService?.HardCloseModules());
+                Reset(() => _executionService?.Sessions.CloseAll());
+                Reset(UPilotConsoleCaptureService.ResetActive);
+                _resetErrors = string.Join("; ", errors);
+                return _resetErrors;
             }
-            lock (_queueObservationLock)
-            {
-                while (_mainThreadQueue.TryDequeue(out _)) { }
-                _trackedQueueActions.Clear();
-            }
-            Reset(() => UPilotUpmRequestObservation.ResetAll("service_reset"));
-            Reset(() => UPilotMcpServerManager.Instance.ResetStopObservation("service_reset"));
-            Reset(() => UPilotOperationTracker.Instance.AbortActive());
-            Reset(() => Automation.UPilotAutomationStepService.ResetActive());
-            Reset(() => _testService?.ResetActive());
-            Reset(() => _snapshotService?.ResetActive());
-            Reset(() => _batchService?.ResetActive());
-            Reset(() => _buildService?.ResetActive());
-            Reset(() => _editorDelayService?.ResetActive());
-            Reset(() => _flowService?.GetType().GetMethod("ResetActive")?.Invoke(_flowService, null));
-            Reset(UPilotRuntimeDiagnosticsService.ResetActive);
-            Reset(() => _executionService?.HardCloseModules());
-            Reset(() => _executionService?.Sessions.CloseAll());
-            Reset(UPilotConsoleCaptureService.ResetActive);
-            _resetErrors = string.Join("; ", errors);
-            return _resetErrors;
+            finally { _resetExecuting = false; }
         }
 
         private ClientWebSocket      _ws;
@@ -620,10 +628,15 @@ namespace CodingRiver.UPilot
                 return;
             }
             _connectFailureStreak = 0;
-            _started = true;
-            _lastHeartbeatSentAt = 0;
-            _sessionId = Guid.NewGuid().ToString("N");
-            _cts = new CancellationTokenSource();
+            LifecycleManager.ReleaseBridgeOnlyShutdown();
+            _boundServerLifetime = SessionState.GetString(ServerLifetimeSessionKey, "");
+            lock (ConnectionStateLock)
+            {
+                _started = true;
+                _lastHeartbeatSentAt = 0;
+                _sessionId = Guid.NewGuid().ToString("N");
+                _cts = new CancellationTokenSource();
+            }
             EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
             EditorApplication.pauseStateChanged += OnPauseStateChanged;
             EditorApplication.update += ProcessMainThreadQueue;
@@ -639,17 +652,39 @@ namespace CodingRiver.UPilot
 
         public void Stop()
         {
+            LifecycleManager.MarkBridgeClosing();
+            bool wasAuthenticated, wasWsOpen;
+            string stoppedSessionId;
+            long stoppedEpoch;
+            ClientWebSocket wsToClose;
+            CancellationTokenSource cancellation;
+            lock (ConnectionStateLock)
+            {
+                wasAuthenticated = _isAuthenticated;
+                wasWsOpen = _ws?.State == WebSocketState.Open;
+                stoppedEpoch = ++_helloConnectionEpoch;
+                stoppedSessionId = _sessionId;
+                _started = false;
+                _isAuthenticated = false;
+                _admissionClosed = true;
+                _pendingAuthenticationHello = null;
+                wsToClose = _ws;
+                _ws = null;
+                cancellation = _cts;
+                _cts = null;
+                _lastHeartbeatSentAt = 0;
+                _connectFailureStreak = 0;
+                _connectLoopTask = null;
+                ClearMcpServerDisplayState();
+            }
+            DiscardPendingHello("bridge_closing");
             UPilotUnityConfiguration.ResetStartupDelay();
             var unityPid = Process.GetCurrentProcess().Id;
-            Debug.Log($"[UPilotBridge] 请求关闭 Bridge；宿主 Unity PID={unityPid}；已启动={_started}；连接状态={_ws?.State}。");
-            var wasAuthenticated = _isAuthenticated;
-            var wasWsOpen = _ws?.State == WebSocketState.Open;
-            var wsToClose = _ws;
-            _ws = null;
+            Logger.Lifecycle("bridge_stop_started", $"unityPid={unityPid} sessionId={stoppedSessionId} connectionEpoch={stoppedEpoch} {LifecycleManager.CaptureServiceShutdown().Detail}");
             try
             {
                 AbortAndDisposeWebSocket(wsToClose);
-                _cts?.Cancel();
+                cancellation?.Cancel();
             }
             finally
             {
@@ -661,13 +696,7 @@ namespace CodingRiver.UPilot
                 CompilationPipeline.compilationFinished -= OnCompilationFinished;
                 AssemblyReloadEvents.beforeAssemblyReload -= OnBeforeAssemblyReload;
                 AssemblyReloadEvents.afterAssemblyReload -= OnAfterAssemblyReload;
-                _started = false;
-                _isAuthenticated = false;
-                _lastHeartbeatSentAt = 0;
-                _connectFailureStreak = 0;
-                _connectLoopTask = null;
-                ClearMcpServerDisplayState();
-                Debug.Log($"[UPilotBridge] Bridge 已停止；宿主 Unity PID={unityPid}；连接已请求中止。");
+                Logger.Lifecycle("bridge_stop_finished", $"unityPid={unityPid} sessionId={stoppedSessionId} socketAbortRequested=true started={_started}");
                 UPilotOperationTracker.Instance.RecordSystemEvent(
                     "sys.bridge.stop", "Bridge停止",
                     $"原因=手动停止 连接状态={(wasWsOpen ? "已连接" : "未连接")} 认证状态={(wasAuthenticated ? "已认证" : "未认证")} socket=abort",
@@ -697,12 +726,20 @@ namespace CodingRiver.UPilot
 
         private void StartConnectLoop()
         {
+            CancellationToken token;
+            lock (ConnectionStateLock)
+            {
+                if (!_started) return;
+                if (_cts == null || _cts.IsCancellationRequested) _cts = new CancellationTokenSource();
+                token = _cts.Token;
+            }
             Debug.Log($"[UPilotBridge] 启动 Bridge 连接循环；端点={GetServerUrl()}。");
-            if (_cts == null || _cts.IsCancellationRequested)
-                _cts = new CancellationTokenSource();
-
-            _connectLoopTask = ConnectLoopAsync(_cts.Token);
-            _ = WatchConnectLoopAsync(_connectLoopTask);
+            var task = ConnectLoopAsync(token);
+            lock (ConnectionStateLock)
+            {
+                if (_started && _cts != null && _cts.Token == token) _connectLoopTask = task;
+            }
+            _ = WatchConnectLoopAsync(task);
         }
 
         private async Task WatchConnectLoopAsync(Task loopTask)
@@ -745,6 +782,7 @@ namespace CodingRiver.UPilot
             {
                 try { control(); } catch (Exception ex) { Logger.ReportFailure("SYSTEM", "Control failed", ex, fingerprint: "control"); }
             }
+            ApplyPendingOwnedHello();
             _lastMainThreadPumpAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             _activeSceneName = SceneManager.GetActiveScene().name;
             _cachedIsCompiling = CurrentIsCompiling();
@@ -912,17 +950,19 @@ namespace CodingRiver.UPilot
             var tracker = UPilotOperationTracker.Instance;
             while (!token.IsCancellationRequested)
             {
-                var wasAuthenticated = _isAuthenticated;
-                _isAuthenticated = false;
-                ClearMcpServerDisplayState();
-
+                var cycleSocket = new ClientWebSocket();
+                long cycleEpoch = 0;
+                string cycleSessionId = null;
+                bool wasAuthenticated = false, published = false;
                 Task recvTask = Task.CompletedTask;
                 Task hbTask   = Task.CompletedTask;
                 using var cycleCts = CancellationTokenSource.CreateLinkedTokenSource(token);
 
                 try
                 {
-                    _ws = new ClientWebSocket();
+                    var cycleShutdown = LifecycleManager.CaptureServiceShutdown();
+                    published = TryPublishConnectionCycle(cycleSocket, token, out cycleEpoch, out cycleSessionId, out wasAuthenticated);
+                    if (!published) break;
                     var serverUrl = GetServerUrl();
                     if (_verboseLogsEnabled)
                         Logger.Log("NETWORK", $"WS connecting to {serverUrl} (attempt={_connectFailureStreak + 1})");
@@ -931,19 +971,24 @@ namespace CodingRiver.UPilot
                     connectCts.CancelAfter(ConnectTimeoutMs);
                     try
                     {
-                        await _ws.ConnectAsync(new Uri(serverUrl), connectCts.Token).ConfigureAwait(false);
+                        await cycleSocket.ConnectAsync(new Uri(serverUrl), connectCts.Token).ConfigureAwait(false);
                     }
                     catch (OperationCanceledException) when (!token.IsCancellationRequested)
                     {
                         throw new Exception($"连接超时 ({ConnectTimeoutMs / 1000}s)");
                     }
 
-                    _lastConnectedAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                    Logger.CloseDiagnostics("bridge-connection");
-                    if (_connectFailureStreak > 0)
+                    uint previousFailures = 0;
+                    if (!TryUpdateConnectionCycle(cycleSocket, cycleEpoch, token, () =>
                     {
-                        Logger.Log("NETWORK", $"WS 重连成功（曾失败 {_connectFailureStreak} 次）");
+                        _lastConnectedAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                        previousFailures = _connectFailureStreak;
                         _connectFailureStreak = 0;
+                    })) break;
+                    Logger.CloseDiagnostics("bridge-connection");
+                    if (previousFailures > 0)
+                    {
+                        Logger.Log("NETWORK", $"WS 重连成功（曾失败 {previousFailures} 次）");
                     }
                     else if (_verboseLogsEnabled)
                     {
@@ -951,28 +996,33 @@ namespace CodingRiver.UPilot
                     }
 
                     tracker.RecordSystemEvent("sys.ws.connected", "WS连接成功",
-                        $"endpoint={serverUrl} sessionId={_sessionId}");
+                        $"endpoint={serverUrl} sessionId={cycleSessionId}");
 
-                    await SendHelloAsync(cycleCts.Token);
+                    await SendHelloAsync(cycleCts.Token, cycleSocket, cycleEpoch, cycleSessionId);
+                    if (!IsConnectionCycleCurrent(cycleSocket, cycleEpoch, token)) break;
 
-                    recvTask = ReceiveLoopAsync(cycleCts.Token);
-                    hbTask   = HeartbeatLoopAsync(cycleCts.Token);
+                    recvTask = ReceiveConnectionLoopAsync(cycleCts.Token, cycleSocket, cycleEpoch, cycleShutdown);
+                    hbTask   = HeartbeatLoopAsync(cycleCts.Token, cycleSocket, cycleEpoch, cycleSessionId);
 
                     var completedTask = await Task.WhenAny(recvTask, hbTask);
                     var disconnectReason = AnalyzeDisconnectReason(recvTask, hbTask, completedTask, cycleCts.Token);
+                    bool lostAuthentication = false;
+                    if (!TryUpdateConnectionCycle(cycleSocket, cycleEpoch, token, () =>
+                    {
+                        lostAuthentication = wasAuthenticated || _isAuthenticated;
+                        _lastDisconnectedAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                        _isAuthenticated = false;
+                    })) break;
                     if (!token.IsCancellationRequested)
                         Logger.ReportWarning("NETWORK", $"连接断开 endpoint={serverUrl} reason={disconnectReason}\n{completedTask.Exception}",
                             scope: "bridge-connection", fingerprint: "disconnect|" + disconnectReason);
 
-                    if (wasAuthenticated || _isAuthenticated)
+                    if (lostAuthentication)
                         tracker.RecordSystemEvent("sys.auth.lost", "认证丢失",
                             $"原因=连接断开 详情={disconnectReason}", "disconnected");
 
                     tracker.RecordSystemEvent("sys.ws.disconnected", "WS连接断开",
-                        $"原因={disconnectReason} endpoint={serverUrl} wsState={_ws?.State}", "disconnected");
-
-                    _lastDisconnectedAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                    _isAuthenticated = false;
+                        $"原因={disconnectReason} endpoint={serverUrl} wsState={cycleSocket.State}", "disconnected");
                 }
                 catch (OperationCanceledException) when (token.IsCancellationRequested)
                 {
@@ -980,7 +1030,7 @@ namespace CodingRiver.UPilot
                 }
                 catch (Exception ex)
                 {
-                    _connectFailureStreak++;
+                    if (!TryUpdateConnectionCycle(cycleSocket, cycleEpoch, token, () => _connectFailureStreak++)) break;
                     Logger.ReportWarning("NETWORK", $"WS 连接失败: {ex}",
                         scope: "bridge-connection", fingerprint: ex.GetType().FullName + "|" + ex.Message);
 
@@ -990,11 +1040,10 @@ namespace CodingRiver.UPilot
                 }
                 finally
                 {
-                    var wsToClose = _ws;
-                    _ws = null;
-                    AbortAndDisposeWebSocket(wsToClose);
+                    var retiredCurrent = published && RetireConnectionCycle(cycleSocket, cycleEpoch);
+                    if (!published) AbortAndDisposeWebSocket(cycleSocket);
                     cycleCts.Cancel();
-                    UPilotQuickStart.NotifyDeploymentChanged();
+                    if (retiredCurrent) UPilotQuickStart.NotifyDeploymentChanged();
 
                     var drainTask = Task.WhenAll(recvTask, hbTask);
                     if (await Task.WhenAny(drainTask, Task.Delay(SocketTaskDrainTimeoutMs)).ConfigureAwait(false) == drainTask)
@@ -1060,7 +1109,7 @@ namespace CodingRiver.UPilot
             return "未知断开原因";
         }
 
-        private async Task SendHelloAsync(CancellationToken token)
+        private async Task SendHelloAsync(CancellationToken token, ClientWebSocket socket, long epoch, string sessionId)
         {
             // Use project root (parent of Assets folder) as projectPath
             var projectRoot = Path.GetDirectoryName(Application.dataPath) ?? Application.dataPath;
@@ -1082,9 +1131,9 @@ namespace CodingRiver.UPilot
                     processRole = _processRole,
                 },
                 timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                sessionId = _sessionId,
+                sessionId = sessionId,
             };
-            await SendJsonAsync(JsonUtility.ToJson(msg), token);
+            await SendConnectionJsonAsync(JsonUtility.ToJson(msg), token, socket, epoch);
         }
 
         internal static string DetermineProcessRole()
@@ -1172,11 +1221,12 @@ namespace CodingRiver.UPilot
             }
         }
 
-        private async Task HeartbeatLoopAsync(CancellationToken token)
+        private async Task HeartbeatLoopAsync(CancellationToken token, ClientWebSocket socket, long epoch, string sessionId)
         {
             int consecutiveFailures = 0;
-            while (!token.IsCancellationRequested && _ws?.State == WebSocketState.Open)
+            while (!token.IsCancellationRequested && socket.State == WebSocketState.Open)
             {
+                if (!IsConnectionCycleCurrent(socket, epoch, token)) return;
                 try
                 {
                     if (!TryBuildAndPersistExecutionState("heartbeat", out var heartbeatPayload))
@@ -1192,10 +1242,11 @@ namespace CodingRiver.UPilot
                         name = "session.heartbeat",
                         payload = heartbeatPayload,
                         timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                        sessionId = _sessionId,
+                        sessionId = sessionId,
                     };
-                    await SendJsonAsync(JsonUtility.ToJson(hb), token);
-                    _lastHeartbeatSentAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    await SendConnectionJsonAsync(JsonUtility.ToJson(hb), token, socket, epoch);
+                    if (!TryUpdateConnectionCycle(socket, epoch, token,
+                        () => _lastHeartbeatSentAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())) return;
                     consecutiveFailures = 0;
                 }
                 catch (OperationCanceledException)
@@ -1235,12 +1286,16 @@ namespace CodingRiver.UPilot
             return head;
         }
 
-        private async Task ReceiveLoopAsync(CancellationToken token)
+        private Task ReceiveLoopAsync(CancellationToken token) =>
+            ReceiveConnectionLoopAsync(token, _ws, Interlocked.Read(ref _helloConnectionEpoch), LifecycleManager.CaptureServiceShutdown());
+
+        private async Task ReceiveConnectionLoopAsync(CancellationToken token, ClientWebSocket receivingSocket,
+            long receivingEpoch, UPilotMcpServerManager.ServiceShutdownSnapshot receivingShutdown)
         {
             var buffer = new byte[65536];
             var sb = new StringBuilder();
 
-            while (!token.IsCancellationRequested && _ws?.State == WebSocketState.Open)
+            while (!token.IsCancellationRequested && receivingSocket?.State == WebSocketState.Open)
             {
                 sb.Clear();
                 WebSocketReceiveResult result;
@@ -1248,14 +1303,17 @@ namespace CodingRiver.UPilot
                 {
                     // ConfigureAwait(false)：确保 ReceiveAsync 回调在线程池上立即执行，
                     // 不等 Unity 主线程 SynchronizationContext 的下一个 frame
-                    result = await _ws.ReceiveAsync(new ArraySegment<byte>(buffer), token).ConfigureAwait(false);
+                    result = await receivingSocket.ReceiveAsync(new ArraySegment<byte>(buffer), token).ConfigureAwait(false);
                     if (result.MessageType == WebSocketMessageType.Close)
                     {
                         var closeStatus = result.CloseStatus?.ToString() ?? "Unknown";
                         var closeDesc = result.CloseStatusDescription ?? "";
-                        _lastCloseCode = result.CloseStatus.HasValue ? ((int)result.CloseStatus.Value).ToString() : "unknown";
-                        _lastCloseReason = closeDesc.Length > 256 ? closeDesc.Substring(0, 256) : closeDesc;
-                        _lastDisconnectedAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                        if (!TryUpdateConnectionCycle(receivingSocket, receivingEpoch, token, () =>
+                        {
+                            _lastCloseCode = result.CloseStatus.HasValue ? ((int)result.CloseStatus.Value).ToString() : "unknown";
+                            _lastCloseReason = closeDesc.Length > 256 ? closeDesc.Substring(0, 256) : closeDesc;
+                            _lastDisconnectedAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                        })) return;
                         UPilotOperationTracker.Instance.RecordSystemEvent(
                             "sys.ws.close.received", "收到服务端关闭帧",
                             $"CloseStatus={closeStatus} Description={closeDesc}",
@@ -1274,7 +1332,7 @@ namespace CodingRiver.UPilot
                 // Keep receiving while a command waits on Unity's main thread or
                 // performs a long background operation. Blocking this loop also
                 // blocks ClientWebSocket from answering server ping frames.
-                var commandTask = HandleMessageJsonAsync(json, envelope, token);
+                var commandTask = HandleReceivedMessageAsync(json, envelope, token, receivingSocket, receivingEpoch, receivingShutdown);
                 _ = commandTask.ContinueWith(
                     completed => { var ignored = completed.Exception; },
                     CancellationToken.None,
@@ -1283,7 +1341,11 @@ namespace CodingRiver.UPilot
             }
         }
 
-        private async Task HandleMessageJsonAsync(string json, BridgeEnvelope envelope, CancellationToken token)
+        private Task HandleMessageJsonAsync(string json, BridgeEnvelope envelope, CancellationToken token) =>
+            HandleReceivedMessageAsync(json, envelope, token, _ws, Interlocked.Read(ref _helloConnectionEpoch), LifecycleManager.CaptureServiceShutdown());
+
+        private async Task HandleReceivedMessageAsync(string json, BridgeEnvelope envelope, CancellationToken token,
+            ClientWebSocket receivingSocket, long receivingEpoch, UPilotMcpServerManager.ServiceShutdownSnapshot receivingShutdown)
         {
             // envelope 已在 ReceiveLoopAsync 中解析并写日志，此处直接使用
             if (envelope == null) return;
@@ -1291,77 +1353,13 @@ namespace CodingRiver.UPilot
             // Handle hello result → authenticate
             if (envelope.type == "result" && envelope.name == "session.hello")
             {
-                if (token.IsCancellationRequested || envelope.sessionId != _sessionId) return;
-                var ack = JsonUtility.FromJson<HelloAckMessage>(json);
-                if (ack?.payload != null)
+                try { ReceiveHelloResult(json, envelope, token, receivingSocket, receivingEpoch, receivingShutdown); }
+                catch (Exception ex)
                 {
-                    _serverIdentityContractVersion = ack.payload.identityContractVersion;
-                    if (!ack.payload.accepted)
-                    {
-                        _authenticationFailureAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                        _authenticationErrorCode = ack.payload.rejectionCode ?? "authentication_rejected";
-                        _authenticationError = "Bridge 认证被拒绝：" + (ack.payload.rejectionReason ?? "Server 未返回原因");
-                        UPilotOperationTracker.Instance.RecordSystemEvent(
-                            "sys.auth.rejected", "认证被拒绝",
-                            $"sessionId={_sessionId}", "error");
-                        UPilotQuickStart.NotifyDeploymentChanged();
-                        try { _ws?.Abort(); } catch { /* ignored */ }
-                        return;
-                    }
-                    if (ack.payload.identityContractVersion != IdentityContractVersion ||
-                        string.IsNullOrEmpty(ack.payload.verificationLevel))
-                    {
-                        _authenticationFailureAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                        _authenticationErrorCode = "identity_contract_mismatch";
-                        _authenticationError = $"协议不兼容：Bridge 身份契约={IdentityContractVersion}；" +
-                            $"Server 身份契约={(ack.payload.identityContractVersion == 0 ? "未知/未返回" : ack.payload.identityContractVersion.ToString())}；" +
-                            $"verificationLevel={(string.IsNullOrEmpty(ack.payload.verificationLevel) ? "未知/未返回" : ack.payload.verificationLevel)}";
-                        UPilotOperationTracker.Instance.RecordSystemEvent(
-                            "sys.auth.contract_mismatch", "身份契约不匹配",
-                            $"server={ack.payload.identityContractVersion} bridge={IdentityContractVersion}", "error");
-                        UPilotQuickStart.NotifyDeploymentChanged();
-                        try { _ws?.Abort(); } catch { /* ignored */ }
-                        return;
-                    }
-                    _admissionClosed = true; // Do not dispatch new-generation work before the main-thread reset.
-                    var serverLifetime = ack.payload.serverLifecycleId;
-                    if (!string.IsNullOrEmpty(serverLifetime))
-                        EnqueueControl(() =>
-                        {
-                            const string key = "UPilot.ServerLifetime";
-                            var previous = SessionState.GetString(key, "");
-                            if (previous != serverLifetime) ResetActiveWork();
-                            SessionState.SetString(key, serverLifetime);
-                            _resettingWork = false;
-                            _admissionClosed = false;
-                        });
-                    else EnqueueControl(() => { _resettingWork = false; _admissionClosed = false; }); // Older servers do not publish a generation.
-                    _mcpLabelFromServer = ack.payload.mcpLabel ?? "";
-                    _mcpHostFromServer = ack.payload.mcpHost ?? "";
-                    _mcpPortFromServer = ack.payload.mcpPort;
-                    _mcpWorkspacePathFromServer = ack.payload.mcpWorkingDirectory ?? "";
+                    Logger.ReportFailure("BRIDGE", $"hello_receive_failed sessionId={envelope.sessionId} connectionEpoch={receivingEpoch}", ex,
+                        scope: "hello|" + envelope.sessionId);
+                    try { receivingSocket?.Abort(); } catch { }
                 }
-                else
-                {
-                    _authenticationFailureAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                    _authenticationErrorCode = "hello_payload_missing";
-                    _authenticationError = "协议不兼容：Server 未返回 session.hello payload。";
-                    UPilotQuickStart.NotifyDeploymentChanged();
-                    try { _ws?.Abort(); } catch { }
-                    return;
-                }
-
-                _authenticationErrorCode = "";
-                _authenticationError = "";
-                _authenticationFailureAtUtcMs = 0;
-                _isAuthenticated = true;
-                _lastAuthenticatedAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                UPilotStartupDiagnostics.ObserveBridgeAuthenticated(_sessionId);
-                UPilotQuickStart.NotifyDeploymentChanged();
-                UPilotOperationTracker.Instance.RecordSystemEvent(
-                    "sys.auth.success", "认证成功",
-                    $"sessionId={_sessionId} {FormatMcpServerHintForLog()}");
-                _ = SendEditorStateEventAsync(token);
                 return;
             }
 
@@ -1375,8 +1373,29 @@ namespace CodingRiver.UPilot
             // Guard: require authentication
             if (!_isAuthenticated)
             {
-                await SendErrorAsync(envelope.id, "INTERNAL_ERROR", "会话未认证", token, envelope.name);
-                return;
+                var resetting = _resetExecuting || _resettingWork;
+                var waitingForHello = !resetting && IsInfrastructureReadWaitingForHello(
+                    json, envelope, token, receivingSocket, receivingEpoch);
+                resetting = _resetExecuting || _resettingWork;
+                // Hello can finish on the main thread while the read is classified.
+                if (!_isAuthenticated || resetting)
+                {
+                    waitingForHello &= !resetting;
+                    var code = resetting ? "UPILOT_RESET_IN_PROGRESS" :
+                        waitingForHello ? "UPILOT_RECONNECT_PENDING" : "INTERNAL_ERROR";
+                    var message = resetting ? "UPilot hard stop is in progress." :
+                        waitingForHello ? "UPilot 等待当前连接的 hello 在主线程完成应用。" : "会话未认证";
+                    await SendErrorAsync(envelope.id, code, message, token, envelope.name,
+                        waitingForHello || resetting ? new ErrorDetailPayload
+                        {
+                            stage = resetting ? "service_reset" : "hello_apply",
+                            outcome = "not_executed", commandSubmitted = false, sideEffectsMayHaveOccurred = false,
+                            nextAction = waitingForHello
+                                ? "Observe the original operation identity; only this read-only query may retry within its original deadline."
+                                : "Observe the original service maintenance identity; do not replay the command.",
+                        } : null);
+                    return;
+                }
             }
 
             var id = envelope.id;
@@ -2965,9 +2984,25 @@ namespace CodingRiver.UPilot
         }
 
         /// <summary>Thread-safe WS send guarded by semaphore.</summary>
-        private async Task SendJsonAsync(string json, CancellationToken token)
+        private Task SendJsonAsync(string json, CancellationToken token)
         {
-            if (_ws == null || _ws.State != WebSocketState.Open) return;
+            ClientWebSocket socket;
+            long epoch;
+            lock (ConnectionStateLock)
+            {
+                socket = _ws;
+                epoch = _helloConnectionEpoch;
+            }
+            return SendConnectionJsonAsync(json, token, socket, epoch);
+        }
+
+        private async Task SendConnectionJsonAsync(string json, CancellationToken token, ClientWebSocket socket, long epoch)
+        {
+            lock (ConnectionStateLock)
+            {
+                if (token.IsCancellationRequested || epoch != _helloConnectionEpoch || !ReferenceEquals(socket, _ws)) return;
+            }
+            if (socket == null || socket.State != WebSocketState.Open) return;
             var bytes = Encoding.UTF8.GetBytes(json);
             if (bytes.Length > MaxBridgeResponseBytes)
                 throw new InvalidDataException("Bridge message exceeds the 4 MiB send limit.");
@@ -2975,8 +3010,12 @@ namespace CodingRiver.UPilot
             await _sendLock.WaitAsync(token).ConfigureAwait(false);
             try
             {
-                if (_ws.State == WebSocketState.Open)
-                    await _ws.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, token).ConfigureAwait(false);
+                lock (ConnectionStateLock)
+                {
+                    if (token.IsCancellationRequested || epoch != _helloConnectionEpoch || !ReferenceEquals(socket, _ws)) return;
+                }
+                if (socket.State == WebSocketState.Open)
+                    await socket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, token).ConfigureAwait(false);
             }
             finally
             {
