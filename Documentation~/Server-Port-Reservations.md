@@ -4,73 +4,92 @@
 
 The actual project configuration remains `<project>/.upilot/config.json`.
 Configuration validation, atomic writes, bind probes and observed service listeners
-remain authoritative. Reference registration never reserves a socket, proves
-ownership, rejects a port pair or excludes a recommendation.
+remain authoritative. Reference registration does not reserve a socket or prove
+ownership. Recommendations avoid every registered port, including stale entries
+and cross-protocol uses, and still check actual bind availability. Manually chosen
+ports remain governed by actual project configuration and bind probes.
 
-Saving unrelated settings preserves the current on-disk port pair. Explicit
+Saving unrelated project settings preserves the current on-disk port pair. Explicit
 endpoint changes validate both ports; invalid ports, actual unavailability and
 configuration-write failures retain their existing error behavior. Atomic config
 replacement never deletes the destination first; failed candidate files remain
 at the `.tmp-*` paths reported in the error log.
 
-## EditorPrefs reference list
+## User settings reference list
 
-The global current-user EditorPrefs key is `upilot_allocate_ports`. Its string
-value contains one record per line, separated by `\n`:
+The only persistent registration copy is `projectPorts` in the current operating
+system user's `~/.upilot/settings.json`, shared by all Unity projects:
 
-```text
-projectPathHash:wsPort:httpPort
+```json
+{
+  "maxSegmentSizeBytes": 524288,
+  "maxConcurrentSegmentRequests": 8,
+  "projectPorts": {
+    "D:/upilot/Tests~/UPilotTest": [8765, 8011],
+    "D:/OtherProject": [8766, 8012]
+  }
+}
 ```
 
-The project identity reuses the existing project-preference suffix algorithm:
-normalize path separators to `/`, remove trailing separators, lowercase the path,
-and encode the first eight bytes of SHA256 as sixteen lowercase hexadecimal
-characters. Lowercasing is for hashing only, not filesystem access.
+Each key is a normalized absolute project path with `/` separators and no trailing
+separator (filesystem roots retain their root separator). Windows path matching is
+case-insensitive, while the stored path spelling remains readable. Each value is
+exactly `[WebSocket port, HTTP port]`, with distinct integer ports from 1 to 65535.
+A missing `projectPorts` field means an empty reference list.
 
 Successful configuration saving and existing startup checks register the current
-project. Each update reads EditorPrefs again, replaces that project's record,
-removes its duplicate records and preserves other records. An unchanged value is
-not written again. UI redraws, port checks, health queries and heartbeats do not
-register projects.
+project. Each update acquires the settings-file-specific cross-process mutex with
+a maximum five-second wait, rereads the latest JSON, updates only that project's
+entry and atomically replaces the file. Other projects, download preferences and
+unknown fields are preserved. An unchanged entry does not rewrite the file.
+Download preference saves and restore-default actions likewise preserve the
+registration section. UI redraws, port checks, health queries and heartbeats do
+not register projects. Entries do not expire; unavailable or unmounted project
+folders are not automatically removed.
 
-There are no file locks, background maintenance, automatic retries or expiry.
-Concurrent Unity processes can overwrite each other's read-modify-write updates;
-missing, stale or lost records are accepted because this list is reference data
-only. Read/write/delete exceptions produce warnings, never modal dialogs or
-startup/configuration-save failure. Consecutive identical registration warnings
-are suppressed and kept separate from real configuration errors.
+Download and registration fields are validated independently when read. Invalid
+registration data does not invalidate otherwise valid download preferences, but
+recommendations fail visibly when the registration section cannot be trusted.
+Malformed JSON, read failures, lock timeouts and write failures retain the original
+file; default values from a failed read must not be written over it. Caught
+registration failures emit red Unity Console errors with the operation, settings
+path and original exception stack, independently of file/verbose logging options.
+Repeated identical infrastructure failures use the existing bounded ten-second
+aggregation policy, with pending counts flushed on recovery. Registration sync
+failure does not undo a successful actual-project configuration save or override
+its separate validation result. It does not open a modal dialog.
 
-## Print and clear
+## Print, clear and legacy data
 
-Advanced Settings and the setup wizard provide two buttons:
+Advanced Settings and the setup wizard retain the existing two buttons:
 
-- **打印端口登记**: prints the key and its value as one multiline Console message,
-  one record per line; a missing or empty key prints `暂无端口登记`.
-- **清除端口登记**: calls `EditorPrefs.DeleteKey("upilot_allocate_ports")` without
-  a confirmation dialog. It does not change project configuration, configured
-  ports or running services. A later normal save/startup can register again.
+- **打印端口登记** prints the settings path and one readable project record per
+  line, labelled `WS` and `HTTP`; an empty section prints `暂无端口登记`.
+- **清除端口登记** atomically replaces only `projectPorts` with an empty object.
+  It preserves download preferences, unknown fields, project configuration and
+  running services. A later normal save/startup can register the project again.
 
-The global key is not part of resetting the current project's preferences.
-The former management window, import, per-project release, lock waiting,
-pending-state, timestamp and configuration-hash registry features are removed.
-
-## No migration or compatibility
-
-The implementation neither reads nor writes the old registration files or old
-key. It has no migration, fallback, dual-write or old-format parsing. Old data is
-not automatically deleted and no longer participates in runtime behavior.
-Shared Server installation/cache locks are unrelated and remain unchanged.
+The shared user settings file is outside current-project preference reset.
+There is no additional registration file or continuing EditorPrefs copy. The old
+`upilot_allocate_ports` EditorPrefs value is never read or written. Its hashed
+project identities cannot reconstruct project paths, so there is no hash migration,
+fallback or dual write. After the first successful new registration save, the old
+EditorPrefs key is deleted idempotently. Shared Server installation/cache locks
+remain unrelated and unchanged.
 
 ## Targeted validation
 
-`UPilotPortRegistryTests` covers isolated EditorPrefs keys, registration updates,
-reference-only failures, print/clear behavior, config authority, real config
-write failures and port allocator regressions. `UPilotSetupRecoveryTests` covers
-actual port availability and setup recovery without reference-data UI side
-effects. Temporary test keys are deleted in teardown; tests do not clear the
-real global registration key. No migration or old-format cases are added.
+`UPilotUserSettingsTests` and `UPilotPortRegistryTests` use temporary settings files;
+only legacy-key deletion tests use isolated random EditorPrefs keys. Coverage
+includes path/port validation, multiple projects, field preservation, interleaved
+independent updates, mutex contention and storage failures, legacy-data exclusion,
+print/clear behavior, actual-config authority and recommendation exclusions.
+`UPilotSetupRecoveryTests` uses temporary registration JSON for recommendation
+failures and recovery while preserving actual project configuration and endpoints.
+The current implementation requires its own correlated Unity compilation and
+targeted test evidence; historical results below do not validate it.
 
-### EditorPrefs acceptance (2026-10-10)
+## Historical EditorPrefs acceptance (2026-10-10)
 
 The canonical `Tests~/UPilotTest` project (Unity `6000.6.0a2`) passed a correlated
 MCP compilation for WriteBatch `wb-90d4f3ad-e274-482a-9a9d-806b77ce17fa`:

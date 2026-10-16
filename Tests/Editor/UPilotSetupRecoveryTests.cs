@@ -240,8 +240,9 @@ namespace CodingRiver.UPilot.Tests
         [TestCase(true)]
         public void PortChecksOnlyObserveActualAvailabilityAndDoNotChangeReference(bool occupied)
         {
-            var key = "upilot.setup-port-tests." + Guid.NewGuid().ToString("N");
-            EditorPrefs.SetString(key, "0123456789abcdef:18001:19001");
+            var settingsPath = Path.Combine(Path.GetTempPath(), "UPilot-setup-port-tests-" + Guid.NewGuid().ToString("N"), "settings.json");
+            UPilotUserSettings.SetProjectPorts(settingsPath, Path.GetDirectoryName(settingsPath), 18001, 19001);
+            var registration = File.ReadAllBytes(settingsPath);
             var window = ScriptableObject.CreateInstance<UPilotMainWindow>();
             var originalError = UPilotPortRegistration.LastError;
             var originalWarning = UPilotPortRegistration.LastWarning;
@@ -282,7 +283,7 @@ namespace CodingRiver.UPilot.Tests
                 Assert.That(GetField(window, "_nextSetupPortCheckAt"), Is.EqualTo(next));
                 window.EvaluateSetupPorts();
                 Assert.That(GetField(window, "_setupPortsReady"), Is.EqualTo(!occupied));
-                Assert.That(EditorPrefs.GetString(key), Is.EqualTo("0123456789abcdef:18001:19001"));
+                Assert.That(File.ReadAllBytes(settingsPath), Is.EqualTo(registration));
                 Assert.That(UPilotPortRegistration.LastError, Is.Empty);
                 Assert.That(UPilotPortRegistration.LastWarning, Is.EqualTo("unchanged reference diagnostic"));
                 Assert.That(File.ReadAllBytes(UPilotProjectConfig.ConfigPath), Is.EqualTo(config));
@@ -293,7 +294,7 @@ namespace CodingRiver.UPilot.Tests
             {
                 wsListener.Stop();
                 httpListener.Stop();
-                EditorPrefs.DeleteKey(key);
+                Directory.Delete(Path.GetDirectoryName(settingsPath), true);
                 UPilotPortRegistration.LastError = originalError;
                 UPilotPortRegistration.LastWarning = originalWarning;
                 UnityEngine.Object.DestroyImmediate(window);
@@ -680,7 +681,7 @@ namespace CodingRiver.UPilot.Tests
         [Test]
         public void SetupRecommendationChangesBothPortsWithoutReusingHistoryOrSaving()
         {
-            WithSetupPortRecommendation((window, registry, key) =>
+            WithSetupPortRecommendation((window, registry, settingsPath) =>
             {
                 var used = new HashSet<int> { 18000, 19000 };
                 for (var i = 0; i < 20; i++)
@@ -702,11 +703,11 @@ namespace CodingRiver.UPilot.Tests
                     SetField(window, "_setupStep", 0);
                     if (i == 10)
                     {
-                        EditorPrefs.SetString(key, "other:" + ws + ":" + http);
-                        LogAssert.Expect(LogType.Log, "[UPilotPorts] 已清除参考端口登记：" + key + "；工程配置和运行中的服务不变。");
+                        UPilotUserSettings.SetProjectPorts(settingsPath, Path.Combine(Path.GetDirectoryName(settingsPath), "other"), ws, http);
+                        LogAssert.Expect(LogType.Log, "[UPilotPorts] 已清除参考端口登记：" + settingsPath + "；工程配置和运行中的服务不变。");
                         registry.Clear();
                     }
-                    Assert.That(EditorPrefs.HasKey(key), Is.False, "Recommendation must not register draft ports.");
+                    Assert.That(UPilotUserSettings.ReadProjectPorts(settingsPath), Is.Empty, "Recommendation must not register draft ports.");
                 }
             });
         }
@@ -717,7 +718,7 @@ namespace CodingRiver.UPilot.Tests
         [TestCase(18000, 18001)]
         public void SetupRecommendationHandlesBoundaryInvalidAndOverlappingInputs(int initialWs, int initialHttp)
         {
-            WithSetupPortRecommendation((window, registry, key) =>
+            WithSetupPortRecommendation((window, registry, settingsPath) =>
             {
                 SetField(window, "_setupWsPort", initialWs);
                 SetField(window, "_setupHttpPort", initialHttp);
@@ -732,10 +733,10 @@ namespace CodingRiver.UPilot.Tests
         [Test]
         public void SetupRecommendationFailureRetainsInputsAndCanRetry()
         {
-            WithSetupPortRecommendation((window, registry, key) =>
+            WithSetupPortRecommendation((window, registry, settingsPath) =>
             {
                 var reject = true;
-                var unavailable = new UPilotPortRegistry(key, port => !reject && UPilotPortAllocator.IsPortAvailable(port));
+                var unavailable = new UPilotPortRegistry(settingsPath, port => !reject && UPilotPortAllocator.IsPortAvailable(port));
                 SetField(window, "_setupPortsReady", true);
                 LogAssert.Expect(LogType.Error, new Regex(@"\[UPilotPorts\] 推荐可绑定端口失败：[\s\S]*本次搜索范围未找到可用端口"));
                 Assert.That(window.ApplyRecommendedSetupPorts(unavailable), Is.False);
@@ -753,20 +754,20 @@ namespace CodingRiver.UPilot.Tests
         [TestCase(true)]
         public void SetupRecommendationRegistrationFailureIsVisibleAndRetryable(bool corrupt)
         {
-            WithSetupPortRecommendation((window, registry, key) =>
+            WithSetupPortRecommendation((window, registry, settingsPath) =>
             {
                 var failRead = !corrupt;
-                var observed = new UPilotPortRegistry(key, readRegistration: pref => failRead
-                    ? throw new IOException("injected registration read failure") : EditorPrefs.GetString(pref, ""));
-                if (corrupt) EditorPrefs.SetString(key, "broken");
+                var observed = new UPilotPortRegistry(settingsPath, readRegistration: path => failRead
+                    ? throw new IOException("injected registration read failure") : UPilotUserSettings.ReadProjectPorts(path));
+                if (corrupt) File.WriteAllText(settingsPath, "{\"projectPorts\":[]}");
                 LogAssert.Expect(LogType.Error, new Regex(@"\[UPilotPorts\] 推荐可绑定端口失败：[\s\S]*" +
-                    (corrupt ? "端口登记格式损坏" : "injected registration read failure")));
+                    (corrupt ? "projectPorts" : "injected registration read failure")));
                 Assert.That(window.ApplyRecommendedSetupPorts(observed), Is.False);
                 Assert.That(GetField(window, "_setupWsPort"), Is.EqualTo(18000));
                 Assert.That(GetField(window, "_setupHttpPort"), Is.EqualTo(19000));
                 Assert.That(GetField(window, "_setupPortMessageType"), Is.EqualTo(MessageType.Error));
                 failRead = false;
-                EditorPrefs.DeleteKey(key);
+                File.Delete(settingsPath);
                 Assert.That(window.ApplyRecommendedSetupPorts(observed), Is.True);
             });
         }
@@ -775,7 +776,7 @@ namespace CodingRiver.UPilot.Tests
         [TestCase(true)]
         public void SetupRecommendationRechecksRegistrationAndActualBindingBeforeSaving(bool registered)
         {
-            WithSetupPortRecommendation((window, registry, key) =>
+            WithSetupPortRecommendation((window, registry, settingsPath) =>
             {
                 Assert.That(window.ApplyRecommendedSetupPorts(registry), Is.True);
                 var ws = (int)GetField(window, "_setupWsPort");
@@ -783,7 +784,7 @@ namespace CodingRiver.UPilot.Tests
                 var listener = new TcpListener(IPAddress.Loopback, ws);
                 try
                 {
-                    if (registered) EditorPrefs.SetString(key, "other:" + http + ":" + ws);
+                    if (registered) UPilotUserSettings.SetProjectPorts(settingsPath, Path.Combine(Path.GetDirectoryName(settingsPath), "other"), http, ws);
                     else listener.Start();
                     var saves = 0;
                     Action<string, int, int> save = (host, savedWs, savedHttp) =>
@@ -799,7 +800,7 @@ namespace CodingRiver.UPilot.Tests
                     Assert.That(GetField(window, "_setupHttpPort"), Is.EqualTo(http));
                     Assert.That(GetField(window, "_setupStep"), Is.Zero);
                     listener.Stop();
-                    EditorPrefs.DeleteKey(key);
+                    File.Delete(settingsPath);
                     Assert.That(window.TrySaveSetupPorts(registry, save), Is.True);
                     Assert.That(saves, Is.EqualTo(1));
                 }
@@ -810,14 +811,14 @@ namespace CodingRiver.UPilot.Tests
         [Test]
         public void SetupManualPortEditPreservesExistingSavePolicyWithBrokenRegistration()
         {
-            WithSetupPortRecommendation((window, registry, key) =>
+            WithSetupPortRecommendation((window, registry, settingsPath) =>
             {
                 Assert.That(window.ApplyRecommendedSetupPorts(registry), Is.True);
                 var ws = (int)GetField(window, "_setupWsPort");
                 var http = (int)GetField(window, "_setupHttpPort");
                 SetField(window, "_setupWsPort", http);
                 SetField(window, "_setupHttpPort", ws);
-                EditorPrefs.SetString(key, "broken");
+                File.WriteAllText(settingsPath, "{\"projectPorts\":[]}");
                 var saves = 0;
                 Assert.That(window.TrySaveSetupPorts(registry, (host, savedWs, savedHttp) =>
                 {
@@ -825,14 +826,14 @@ namespace CodingRiver.UPilot.Tests
                     Assert.That((savedWs, savedHttp), Is.EqualTo((http, ws)));
                 }), Is.True);
                 Assert.That(saves, Is.EqualTo(1));
-                Assert.That(EditorPrefs.GetString(key), Is.EqualTo("broken"));
+                Assert.That(File.ReadAllText(settingsPath), Is.EqualTo("{\"projectPorts\":[]}"));
             });
         }
 
         [Test]
         public void SetupRecommendationHistoryResetsOnlyWhenSetupIsReinitialized()
         {
-            WithSetupPortRecommendation((window, registry, key) =>
+            WithSetupPortRecommendation((window, registry, settingsPath) =>
             {
                 Assert.That(window.ApplyRecommendedSetupPorts(registry), Is.True);
                 var first = ((int)GetField(window, "_setupWsPort"), (int)GetField(window, "_setupHttpPort"));
@@ -846,7 +847,9 @@ namespace CodingRiver.UPilot.Tests
 
         private static void WithSetupPortRecommendation(Action<UPilotMainWindow, UPilotPortRegistry, string> test)
         {
-            var key = "upilot.setup-recommendation-tests." + Guid.NewGuid().ToString("N");
+            var directory = Path.Combine(Path.GetTempPath(), "UPilot-setup-recommendation-tests-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
+            var settingsPath = Path.Combine(directory, "settings.json");
             var config = File.ReadAllBytes(UPilotProjectConfig.ConfigPath);
             var manager = UPilotMcpServerManager.Instance;
             var endpoints = (manager.WsPort, manager.HttpPort);
@@ -857,14 +860,14 @@ namespace CodingRiver.UPilot.Tests
             {
                 SetField(window, "_setupWsPort", 18000);
                 SetField(window, "_setupHttpPort", 19000);
-                test(window, new UPilotPortRegistry(key), key);
+                test(window, new UPilotPortRegistry(settingsPath), settingsPath);
                 Assert.That(File.ReadAllBytes(UPilotProjectConfig.ConfigPath), Is.EqualTo(config));
                 Assert.That((manager.WsPort, manager.HttpPort), Is.EqualTo(endpoints));
             }
             finally
             {
                 UnityEngine.Object.DestroyImmediate(window);
-                EditorPrefs.DeleteKey(key);
+                Directory.Delete(directory, true);
                 UPilotPortRegistration.LastError = originalError;
                 UPilotPortRegistration.LastWarning = originalWarning;
             }

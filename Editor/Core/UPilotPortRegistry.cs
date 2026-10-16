@@ -11,34 +11,31 @@ namespace CodingRiver.UPilot
     internal sealed class UPilotPortRegistry
     {
         internal const string PrefsKey = "upilot_allocate_ports";
-        private readonly string _prefsKey;
+        private readonly string _settingsPath;
+        private readonly string _legacyPrefsKey;
         private readonly Func<int, bool> _available;
         private readonly Action<string, string> _write;
-        private readonly Func<string, string> _readRegistration;
-        private readonly Action<string, string> _writeRegistration;
+        private readonly Func<string, Dictionary<string, int[]>> _readRegistration;
+        private readonly Action<string, string, int, int> _writeRegistration;
 
-        // Alternate key and delegates are small test seams; production always uses PrefsKey.
-        internal UPilotPortRegistry(string prefsKey = PrefsKey, Func<int, bool> available = null,
-            Action<string, string> write = null, Func<string, string> readRegistration = null,
-            Action<string, string> writeRegistration = null)
+        // Explicit settings paths isolate callers/tests from the real user settings and legacy key.
+        internal UPilotPortRegistry(string settingsPath = null, Func<int, bool> available = null,
+            Action<string, string> write = null, Func<string, Dictionary<string, int[]>> readRegistration = null,
+            Action<string, string, int, int> writeRegistration = null, string legacyPrefsKey = null)
         {
-            if (string.IsNullOrWhiteSpace(prefsKey)) throw new ArgumentException("登记 key 不能为空。", nameof(prefsKey));
-            _prefsKey = prefsKey;
+            if (settingsPath != null && (string.IsNullOrWhiteSpace(settingsPath) || !Path.IsPathRooted(settingsPath)))
+                throw new ArgumentException("用户配置文件必须使用绝对路径。", nameof(settingsPath));
+            _settingsPath = Path.GetFullPath(settingsPath ?? UPilotUserSettings.ConfigPath);
+            _legacyPrefsKey = legacyPrefsKey ?? (settingsPath == null ? PrefsKey : null);
             _available = available ?? UPilotPortAllocator.IsPortAvailable;
             _write = write ?? AtomicWrite;
-            _readRegistration = readRegistration ?? (key => EditorPrefs.GetString(key, ""));
-            _writeRegistration = writeRegistration ?? EditorPrefs.SetString;
+            _readRegistration = readRegistration ?? UPilotUserSettings.ReadProjectPorts;
+            _writeRegistration = writeRegistration ?? UPilotUserSettings.SetProjectPorts;
         }
 
         internal static UPilotPortRegistry ForUser() => new UPilotPortRegistry();
 
-        internal static string NormalizeProject(string path)
-        {
-            if (string.IsNullOrWhiteSpace(path) || !Path.IsPathRooted(path))
-                throw new IOException("工程路径必须是绝对路径。");
-            var full = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            return Path.DirectorySeparatorChar == '\\' ? full.ToUpperInvariant() : full;
-        }
+        internal static string NormalizeProject(string path) => UPilotUserSettings.NormalizeProjectPath(path);
 
         internal static string ConfigPath(string project) => Path.Combine(project, ".upilot", "config.json");
 
@@ -93,19 +90,13 @@ namespace CodingRiver.UPilot
         // Registration remains advisory for manual configuration, but recommendations must avoid it.
         private HashSet<int> ReadRegisteredPorts()
         {
-            var value = _readRegistration(_prefsKey) ?? throw new InvalidDataException("端口登记读取结果为空。");
+            var projects = _readRegistration(_settingsPath) ?? throw new InvalidDataException($"端口登记读取结果为空：{_settingsPath}");
             var ports = new HashSet<int>();
-            foreach (var line in value.Split('\n'))
+            foreach (var pair in projects.Values)
             {
-                var entry = line.Trim();
-                if (entry.Length == 0) continue;
-                var fields = entry.Split(':');
-                if (fields.Length != 3 || string.IsNullOrWhiteSpace(fields[0]) ||
-                    !int.TryParse(fields[1], out var ws) || !int.TryParse(fields[2], out var http))
-                    throw new InvalidDataException($"端口登记格式损坏：registry={_prefsKey}；请检查或清除端口登记。");
-                ValidatePorts(ws, http);
-                ports.Add(ws);
-                ports.Add(http);
+                ValidatePorts(pair[0], pair[1]);
+                ports.Add(pair[0]);
+                ports.Add(pair[1]);
             }
             return ports;
         }
@@ -162,53 +153,43 @@ namespace CodingRiver.UPilot
                 throw new IOException($"工程端口在保存期间发生变化：{configPath}");
             try
             {
-                var before = _readRegistration(_prefsKey);
-                var after = UpdateEntries(before, UPilotBridge.ComputeProjectPathHash(project), ports.wsPort, ports.httpPort);
-                if (before != after) _writeRegistration(_prefsKey, after);
-                UPilotPortRegistration.LastWarning = "";
+                _writeRegistration(_settingsPath, project, ports.wsPort, ports.httpPort);
+                if (_legacyPrefsKey != null) EditorPrefs.DeleteKey(_legacyPrefsKey);
+                UPilotPortRegistration.Recovered("同步参考端口登记", _settingsPath);
             }
-            catch (Exception ex) { UPilotPortRegistration.Report("同步参考端口登记", ex); }
-        }
-
-        internal static string UpdateEntries(string value, string projectHash, int ws, int http)
-        {
-            ValidatePorts(ws, http);
-            var prefix = projectHash + ":";
-            var replacement = prefix + ws + ":" + http;
-            var entries = new List<string>();
-            var replaced = false;
-            foreach (var entry in value.Split('\n'))
-            {
-                if (entry.Length == 0) continue;
-                if (entry.StartsWith(prefix, StringComparison.Ordinal))
-                {
-                    if (!replaced) entries.Add(replacement);
-                    replaced = true;
-                }
-                else entries.Add(entry);
-            }
-            if (!replaced) entries.Add(replacement);
-            return string.Join("\n", entries);
+            catch (Exception ex) { UPilotPortRegistration.Report("同步参考端口登记", ex, _settingsPath); }
         }
 
         internal void Print()
         {
             try
             {
-                var value = _readRegistration(_prefsKey);
-                Debug.Log($"[UPilotPorts] {_prefsKey}\n" + (value.Length == 0 ? "暂无端口登记" : value));
+                var projects = _readRegistration(_settingsPath);
+                var names = new List<string>(projects.Keys);
+                names.Sort(StringComparer.Ordinal);
+                var value = new StringBuilder();
+                foreach (var project in names)
+                {
+                    var ports = projects[project];
+                    if (value.Length != 0) value.Append('\n');
+                    value.Append(project).Append(": WS=").Append(ports[0]).Append(", HTTP=").Append(ports[1]);
+                }
+                Debug.Log($"[UPilotPorts] {_settingsPath}\n" + (value.Length == 0 ? "暂无端口登记" : value.ToString()));
+                UPilotPortRegistration.Recovered("打印参考端口登记", _settingsPath);
             }
-            catch (Exception ex) { UPilotPortRegistration.Report("打印参考端口登记", ex); }
+            catch (Exception ex) { UPilotPortRegistration.Report("打印参考端口登记", ex, _settingsPath); }
         }
 
         internal void Clear()
         {
             try
             {
-                EditorPrefs.DeleteKey(_prefsKey);
-                Debug.Log($"[UPilotPorts] 已清除参考端口登记：{_prefsKey}；工程配置和运行中的服务不变。");
+                UPilotUserSettings.ClearProjectPorts(_settingsPath);
+                if (_legacyPrefsKey != null) EditorPrefs.DeleteKey(_legacyPrefsKey);
+                Debug.Log($"[UPilotPorts] 已清除参考端口登记：{_settingsPath}；工程配置和运行中的服务不变。");
+                UPilotPortRegistration.Recovered("清除参考端口登记", _settingsPath);
             }
-            catch (Exception ex) { UPilotPortRegistration.Report("清除参考端口登记", ex); }
+            catch (Exception ex) { UPilotPortRegistration.Report("清除参考端口登记", ex, _settingsPath); }
         }
     }
 
@@ -239,13 +220,22 @@ namespace CodingRiver.UPilot
             return true;
         }
 
-        internal static void Report(string operation, Exception ex)
+        internal static void Report(string operation, Exception ex, string settingsPath = null)
         {
-            if (LastWarning == ex.Message) return;
+            settingsPath ??= UPilotUserSettings.ConfigPath;
             LastWarning = ex.Message;
-            Debug.LogWarning($"[UPilotPorts] operation={operation}; project={UPilotProjectConfig.ProjectRoot}; " +
-                             $"registry={UPilotPortRegistry.PrefsKey}; error={ex}\n" +
-                             "端口登记数据仅供参考；登记读写失败不影响工程配置保存或实际端口校验。");
+            Logger.ReportFailure("Ports", $"[UPilotPorts] operation={operation}; project={UPilotProjectConfig.ProjectRoot}; " +
+                $"registry={settingsPath}; 端口登记读写失败；工程配置保存与实际端口校验结果独立。", ex,
+                scope: DiagnosticScope(operation, settingsPath));
         }
+
+        internal static void Recovered(string operation, string settingsPath)
+        {
+            Logger.CloseDiagnostics(DiagnosticScope(operation, settingsPath));
+            LastWarning = "";
+        }
+
+        private static string DiagnosticScope(string operation, string settingsPath) =>
+            "ports|" + operation + "|" + settingsPath;
     }
 }
