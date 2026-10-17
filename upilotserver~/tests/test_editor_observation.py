@@ -8,6 +8,8 @@ from upilot_mcp.server import WsOrchestratorServer
 
 def _server_with_snapshot(*, now: int, pump_at: int, heartbeat_at: int | None = None) -> WsOrchestratorServer:
     server = WsOrchestratorServer()
+    # This fixture isolates observation classification from connection admission.
+    server.state.live_update_allowed = None
     project_path = f"D:/project-{now}-{uuid.uuid4().hex}"
     session = server.session_manager.on_hello(
         "session-a",

@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT
 using System;
 using System.IO;
 using System.Linq;
@@ -564,8 +564,9 @@ namespace CodingRiver.UPilot
                 var observedRestart = UPilotServerRestartDiagnostics.Current;
                 if ((r.target == "server" || r.target == "bridge") && observedRestart?.operationId == r.serverRestartId)
                 {
-                    r.healthVerified = UPilotServerRestartDiagnostics.HasPassedHealthGate(observedRestart);
-                    r.phase = r.healthVerified ? UPilotServerRestartDiagnostics.FirstUnpassedGate(observedRestart) : "health_query";
+                    r.healthVerified = observedRestart.schemaVersion < 5 &&
+                        UPilotServerRestartDiagnostics.HasPassedHealthGate(observedRestart);
+                    r.phase = UPilotServerRestartDiagnostics.FirstUnpassedGate(observedRestart);
                     r.healthProbeStartedAtUtcMs = observedRestart.statusProbeStartedAtUtcMs;
                     r.healthProbeElapsedMs = Math.Max(0, observedRestart.statusProbeEndedAtUtcMs - observedRestart.statusProbeStartedAtUtcMs);
                     r.healthProbeCount = observedRestart.statusProbeCount;
@@ -575,7 +576,7 @@ namespace CodingRiver.UPilot
                         Fail(observedRestart.errorCode, observedRestart.error, reportedByRestart: true);
                         return;
                     }
-                    if (observedRestart.newProcessId > 0 && !r.healthVerified) r.phase = "health_query";
+                    if (observedRestart.schemaVersion < 5 && observedRestart.newProcessId > 0 && !r.healthVerified) r.phase = "health_query";
                 }
                 if (ExpireMaintenance(r))
                 {
@@ -640,8 +641,8 @@ namespace CodingRiver.UPilot
 
         // Missing identity is retryable; only positive, conflicting evidence is a mismatch.
         internal static bool BridgeIdentityChanged(McpServerStatus status, int expectedPid, string project) =>
-            (status.HealthEndpointResponded && ((status.HealthServerProcessId > 0 && status.HealthServerProcessId != expectedPid) ||
-                (!string.IsNullOrWhiteSpace(status.HealthProjectPath) && !ServiceMaintenanceJournal.SamePath(status.HealthProjectPath, project)))) ||
+            (status.IdentityAvailable && ((status.IdentityServerProcessId > 0 && status.IdentityServerProcessId != expectedPid) ||
+                (!string.IsNullOrWhiteSpace(status.IdentityProjectPath) && !ServiceMaintenanceJournal.SamePath(status.IdentityProjectPath, project)))) ||
             (status.ProcessOwnership == McpProcessOwnership.Foreign) ||
             (status.ProcessId > 0 && status.ProcessId != expectedPid);
 
@@ -662,7 +663,7 @@ namespace CodingRiver.UPilot
                 if (!ReferenceEquals(Current, r) || !r.Active || ExpireMaintenance(r) || cancellation.IsCancellationRequested) return;
                 r.healthProbeError = status.ErrorMessage ?? "";
                 if (string.IsNullOrEmpty(r.healthProbeError)) Logger.CloseDiagnostics(ServiceMaintenanceJournal.MaintenanceScope(r));
-                if (status.HealthEndpointResponded && !r.healthVerified) { r.healthVerified = true; r.phase = "identity"; }
+                if (status.IdentityAvailable && !r.healthVerified) { r.healthVerified = true; r.phase = "identity"; }
                 r.healthProbeElapsedMs = Math.Max(0, Now - r.healthProbeStartedAtUtcMs);
                 Journal.Save();
                 if (BridgeIdentityChanged(status, r.oldServerProcessId, r.projectPath))
@@ -674,11 +675,11 @@ namespace CodingRiver.UPilot
                 r.healthVerified = true;
                 if (r.phase == "identity" || r.phase == "health_query" || r.phase == "verifying") r.phase = "bridge_session";
                 var issues = UPilotDeploymentDiagnostics.Observe(bridge, status);
-                if (issues.Any(issue => issue.Confirmed && issue.Code != "timeout" && issue.Code != "authentication"))
+                if (issues.Any(issue => issue.Blocking && issue.Confirmed && issue.Code != "timeout" && issue.Code != "authentication"))
                     throw new ServiceMaintenanceException("SERVICE_RESTART_VALIDATION_FAILED", string.Join("\n", issues.Select(issue => issue.Message)));
                 if (!bridge.IsAuthenticated || !bridge.IsWsOpen || bridge.SessionId == r.oldBridgeSessionId) return;
                 if (r.phase == "bridge_session") r.phase = "deployment";
-                if (issues.Length > 0) return;
+                if (issues.Any(issue => issue.Blocking)) return;
                 r.phase = "readonly";
                 await manager.VerifyReadOnlyRoundTripAsync(status, bridge.SessionId, r.deadlineAtUtcMs, cancellation.Token);
                 if (!ReferenceEquals(Current, r) || !r.Active || ExpireMaintenance(r) || cancellation.IsCancellationRequested) return;

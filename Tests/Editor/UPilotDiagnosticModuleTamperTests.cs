@@ -85,8 +85,11 @@ namespace CodingRiver.UPilot.Tests
                     Check(before.compilationStatus == "compiling" && before.compilerStillRunning, "No live owned compile; do not replay.");
                     var modules = (IDictionary)typeof(UPilotDiagnosticModuleService).GetField("_modules", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(service);
                     object module = modules[payload.moduleId];
+                    // Keep this compatibility probe on Unity's own assembly compilation pipeline.
+#pragma warning disable 0618
                     var builder = (AssemblyBuilder)module.GetType().GetField("Builder").GetValue(module);
                     string candidateSource = Path.ChangeExtension(builder.assemblyPath, ".cs");
+#pragma warning restore 0618
                     string ownedRoot = Path.Combine(Project, ".upilot", "diagnostic-modules") + Path.DirectorySeparatorChar;
                     Check(Path.GetFullPath(candidateSource).StartsWith(ownedRoot, StringComparison.OrdinalIgnoreCase), "Candidate source escaped its owned module directory.");
                     byte[] initialSource = File.ReadAllBytes(candidateSource);

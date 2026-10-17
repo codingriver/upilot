@@ -25,6 +25,30 @@ namespace CodingRiver.UPilot.Tests.Automation
         }
 
         [Test]
+        public void BlockingGroupsUseCompleteKeysAndRetainAllRawEvidence()
+        {
+            var writer = Create("grouped", 100);
+            var policy = new AutomationLogPolicyResult { policyValid = true, evidenceComplete = true };
+            for (int i = 0; i < 24; i++)
+                policy.classifications.Add(new AutomationLogClassification {
+                    disposition = "blocked", fingerprint = new string('x', 300) + (i / 2),
+                    ruleId = "rule", context = new AutomationLogContext { caseId = "case", phaseId = "phase" },
+                    record = new ConsoleCaptureRecord { sequence = i, logType = "Error", message = "sample " + i }
+                });
+            policy.blockedCount = policy.totalCount = 24;
+            var log = writer.WriteConsolePolicy("capture", 0, 24, policy, 0);
+            Assert.That(log.blockingSamples.Length, Is.EqualTo(10));
+            Assert.That(log.omittedBlockingCount, Is.EqualTo(14));
+            Assert.That(log.blockingGroups.Length, Is.EqualTo(10));
+            Assert.That(log.omittedBlockingGroupCount, Is.EqualTo(2));
+            Assert.That(log.blockingGroups.All(g => g.count == 2), Is.True);
+            Assert.That(log.blockingGroups[9].firstSequence, Is.EqualTo(18));
+            Assert.That(log.blockingGroups[9].lastSequence, Is.EqualTo(19));
+            Assert.That(File.ReadAllText(Path.Combine(writer.DirectoryPath, "console-policy.json")),
+                Does.Contain("sample 23").And.Contain(new string('x', 300) + "11"));
+        }
+
+        [Test]
         public void CreateAppendCompleteAndArtifactsAreStable()
         {
             AutomationReportWriter writer = Create("run-a", 100);

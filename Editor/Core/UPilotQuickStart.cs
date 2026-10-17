@@ -188,14 +188,13 @@ namespace CodingRiver.UPilot
                 var bridge = UPilotBridge.Instance.GetStatus();
                 if (server.LifecyclePhase != UPilotServerLifecyclePhase.None) return;
                 var issues = UPilotDeploymentDiagnostics.Observe(bridge, server);
-                TrackLifecycleRecovery(server);
                 var disposition = UPilotHealthAssessment.Classify(bridge, server);
                 var record = UPilotServerRestartDiagnostics.Current;
-                if (disposition == UPilotHealthDisposition.WaitingLifecycle && !issues.Any(issue => issue.Confirmed)) return;
+                if (disposition == UPilotHealthDisposition.WaitingLifecycle && !issues.Any(issue => issue.Blocking && issue.Confirmed)) return;
                 if (record?.status == "failed" && SessionState.GetString(VerifiedRestartHistoryKey, "") != record.operationId)
                     ShowRepairFailureOnce(record.operationId, record.failurePhase + "\n" + record.error);
                 if (IsRepairing || record?.status == "running") return;
-                if (!issues.Any(issue => issue.Confirmed) && UPilotHealthAssessment.CanVerifyRecovery(bridge, server))
+                if (!issues.Any(issue => issue.Blocking && issue.Confirmed) && UPilotHealthAssessment.CanVerifyRecovery(bridge, server))
                 {
                     if (!_recoveryProbeRunning && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _lastRecoveryProbeAtUtcMs >= 10000 &&
                         (IsHealthRecoveryPending || (canObserveFailedRecovery
@@ -205,35 +204,17 @@ namespace CodingRiver.UPilot
                         _ = ConfirmObservedRecoveryAsync(server, bridge.SessionId, _repairGeneration);
                     return;
                 }
-                if (!canRepair) return;
-                if (!bridge.IsStarted || !server.StatusQueryCompleted || issues.Length == 0 ||
-                    EditorPrefs.GetBool(AutoAttemptKey, false)) return;
-                // Only an explicit confirmed mismatch can start repair, never an observation timeout.
-                if (disposition == UPilotHealthDisposition.Unconfirmed) return;
-                if (!issues.Any(issue => issue.Confirmed && (issue.Code == "authentication" ||
-                    issue.Code == "version" || issue.Code == "channel" || issue.Code == "protocol" ||
-                    issue.Code == "entry" || issue.Code == "configured_entry" || issue.Code == "module" || issue.Code == "project" ||
-                    issue.Code == "instance"))) return;
-                _ = AutoRepairAsync(null);
+                // A diagnosis never authorizes another stop/start or install. Explicit repair keeps its own executor.
+
             }
             catch (Exception ex)
             {
-                EditorPrefs.SetString(FailureKey, "状态诊断失败：" + ex.Message);
+                Logger.ReportFailure("SERVER", "辅助状态诊断失败；不改变服务结果或自动修复状态。", ex, scope: "service-observation-ui");
             }
         }
 
-        internal static string LifecycleRecoveryToken(McpServerStatus server) =>
-            string.IsNullOrEmpty(server.EditorObservationLifecycleId) ? "" :
-                server.Health?.server_instance_id + ":" + server.EditorObservationLifecycleId;
-
+        // Retained only to clear older UI history using an existing current receipt.
         private static bool IsHealthRecoveryPending => !string.IsNullOrEmpty(SessionState.GetString(HealthRecoveryKey, ""));
-        internal static void TrackLifecycleRecovery(McpServerStatus server)
-        {
-            if (!UPilotHealthAssessment.HasServiceIdentity(server)) return;
-            var token = LifecycleRecoveryToken(server);
-            if (!string.IsNullOrEmpty(token) && token != SessionState.GetString(VerifiedHealthKey, ""))
-                SessionState.SetString(HealthRecoveryKey, token);
-        }
 
         private static async Task ConfirmObservedRecoveryAsync(McpServerStatus server, string sessionId, int generation)
         {
@@ -248,7 +229,7 @@ namespace CodingRiver.UPilot
                 $"bridgeSessionId={sessionId} repairGeneration={generation}");
             try
             {
-                await manager.VerifyReadOnlyRoundTripAsync(server, sessionId);
+                if (!UPilotBridge.Instance.TryGetBootstrapReceipt(sessionId, server.Identity?.server_instance_id, out _)) return;
                 var verified = CompleteObservedRecovery(server, sessionId, generation, pending,
                     UPilotBridge.Instance.GetStatus(), manager.GetStatus(), manager, recoveryId);
                 Logger.CloseDiagnostics(diagnosticScope);
@@ -280,9 +261,9 @@ namespace CodingRiver.UPilot
                 manager.HasActiveStopObservation || manager.ExistingServiceRecoveryFailureId != existingRecoveryId ||
                 latest.LifecyclePhase != UPilotServerLifecyclePhase.None || bridge.SessionId != sessionId ||
                 pending != SessionState.GetString(HealthRecoveryKey, "") || latest.ProcessId != expected.ProcessId ||
-                latest.Health?.server_instance_id != expected.Health?.server_instance_id ||
+                latest.Identity?.server_instance_id != expected.Identity?.server_instance_id ||
                 !UPilotHealthAssessment.CanVerifyRecovery(bridge, latest) ||
-                UPilotDeploymentDiagnostics.Observe(bridge, latest).Any(issue => issue.Confirmed)) return false;
+                UPilotDeploymentDiagnostics.Observe(bridge, latest).Any(issue => issue.Blocking && issue.Confirmed)) return false;
             if (!string.IsNullOrEmpty(existingRecoveryId))
             {
                 var verified = ExistingServiceRecoveryToken(existingRecoveryId, bridge, latest);
@@ -291,7 +272,7 @@ namespace CodingRiver.UPilot
                 {
                     SessionState.SetString(VerifiedExistingRecoveryKey, verified);
                     Logger.Lifecycle("recovery_ui_verified", $"recoveryId={existingRecoveryId} pid={latest.ProcessId} " +
-                        $"serverInstanceId={latest.Health.server_instance_id} bridgeSessionId={sessionId}");
+                        $"serverInstanceId={latest.Identity.server_instance_id} bridgeSessionId={sessionId}");
                 }
             }
             if (!string.IsNullOrEmpty(pending)) SessionState.SetString(VerifiedHealthKey, pending);
@@ -301,7 +282,7 @@ namespace CodingRiver.UPilot
             if (history?.status == "failed") SessionState.SetString(VerifiedRestartHistoryKey, history.operationId);
             EditorPrefs.DeleteKey(FailureKey);
             // A verified observation changes the UI, not the failed recovery's replay policy.
-            if (string.IsNullOrEmpty(existingRecoveryId)) EditorPrefs.DeleteKey(AutoAttemptKey);
+            // Observations never rearm automatic repair by changing AutoAttemptKey.
             return true;
         }
 
@@ -312,10 +293,10 @@ namespace CodingRiver.UPilot
         private static string ExistingServiceRecoveryToken(string recoveryId, BridgeStatus bridge, McpServerStatus server)
         {
             if (string.IsNullOrEmpty(recoveryId) || !UPilotHealthAssessment.HasServiceIdentity(server) ||
-                string.IsNullOrEmpty(bridge.SessionId) || bridge.SessionId != server.Health.bridge_session_id) return "";
+                string.IsNullOrEmpty(bridge.SessionId) || bridge.SessionId != server.Identity.bridge_session_id) return "";
             return UnityEngine.JsonUtility.ToJson(new ExistingRecoveryVerification {
                 recoveryId = recoveryId, processId = server.ProcessId.GetValueOrDefault(),
-                serverInstanceId = server.Health.server_instance_id, bridgeSessionId = bridge.SessionId,
+                serverInstanceId = server.Identity.server_instance_id, bridgeSessionId = bridge.SessionId,
             });
         }
 
@@ -331,7 +312,7 @@ namespace CodingRiver.UPilot
         {
             var failure = manager.ExistingServiceRecoveryFailure;
             if (string.IsNullOrEmpty(failure) || IsExistingServiceRecoveryVerified(manager, bridge, server)) return null;
-            return new UPilotMainSnapshot(UPilotMainState.NeedsRepair, "遗留服务恢复失败",
+            return new UPilotMainSnapshot(UPilotMainState.NeedsRepair, "服务恢复未完成",
                 failure + "\n本次恢复已结束，可检查原因后手动启动或重新启动。", bridge.IsStarted, server.IsRunning);
         }
 
@@ -362,7 +343,6 @@ namespace CodingRiver.UPilot
             var stopFailure = EvaluateStopFailure(UPilotMcpServerManager.Instance.StopObservation,
                 bridgeStatus.IsStarted, mcpStatus.IsRunning);
             if (stopFailure.HasValue) return stopFailure.Value;
-            TrackLifecycleRecovery(mcpStatus);
             var disposition = UPilotHealthAssessment.Classify(bridgeStatus, mcpStatus);
             var attachmentFailure = EvaluateAttachmentFailure(UPilotMcpServerManager.Instance.AttachmentFailure,
                 mcpStatus, bridgeStatus.IsStarted);
@@ -370,18 +350,18 @@ namespace CodingRiver.UPilot
             var recoveryFailure = EvaluateExistingServiceRecoveryFailure(UPilotMcpServerManager.Instance, bridgeStatus, mcpStatus);
             if (recoveryFailure.HasValue) return recoveryFailure.Value;
             var failure = EditorPrefs.GetString(FailureKey, "");
-            if (issues.Any(issue => issue.Confirmed) || disposition == UPilotHealthDisposition.ConfirmedFailure ||
-                (!string.IsNullOrEmpty(failure) && disposition == UPilotHealthDisposition.Normal && !IsHealthRecoveryPending))
+            if (issues.Any(issue => issue.Blocking && issue.Confirmed) || disposition == UPilotHealthDisposition.ConfirmedFailure ||
+                (!string.IsNullOrEmpty(failure) && disposition == UPilotHealthDisposition.Normal))
                 return new UPilotMainSnapshot(UPilotMainState.NeedsRepair, "UPilot 需要修复",
                     BuildRepairMessage(bridgeStatus, mcpStatus,
-                        issues.FirstOrDefault(issue => issue.Confirmed)?.Message ?? (mcpStatus.ErrorMessage ?? failure)),
+                        issues.FirstOrDefault(issue => issue.Blocking && issue.Confirmed)?.Message ?? (mcpStatus.ErrorMessage ?? failure)),
                     bridgeStatus.IsStarted, mcpStatus.IsRunning);
 
             if (disposition == UPilotHealthDisposition.WaitingLifecycle || disposition == UPilotHealthDisposition.Unconfirmed)
                 return EvaluateServiceState(bridgeStatus, mcpStatus);
-            if (IsHealthRecoveryPending || issues.Length > 0)
+            if (issues.Any(issue => issue.Blocking))
                 return new UPilotMainSnapshot(UPilotMainState.CheckingStatus, "正在验证恢复",
-                    "正在确认当前身份、Bridge 握手、新鲜终态快照和实际只读往返；尚未恢复可用。", bridgeStatus.IsStarted, mcpStatus.IsRunning);
+                    "正在确认当前身份、Bridge 握手及当前 bootstrap 回执；尚未恢复可用。", bridgeStatus.IsStarted, mcpStatus.IsRunning);
 
             var mcpHealthy = mcpStatus.IsRunning &&
                              mcpStatus.HttpPortListening &&
@@ -451,8 +431,8 @@ namespace CodingRiver.UPilot
             var healthFresh = server.LastSuccessfulStatusAtUtcMs > 0 &&
                               Math.Max(0, now - server.LastSuccessfulStatusAtUtcMs) <= cacheAllowanceMs + 6000;
             var serverHealthy = server.IsRunning && server.HttpPortListening && server.WsPortListening &&
-                                server.StatusQueryCompleted && server.HealthEndpointResponded &&
-                                !server.DiagnosisPending && identityMatches && healthFresh &&
+                                server.StatusQueryCompleted && server.IdentityAvailable &&
+                                !server.DiagnosisPending && identityMatches &&
                                 server.FailureKind == McpStatusFailureKind.None && string.IsNullOrEmpty(server.ErrorMessage);
             var serverText = "待确认";
             if (server.ProcessOwnership == McpProcessOwnership.Foreign)
@@ -472,7 +452,7 @@ namespace CodingRiver.UPilot
             var bridgeConnected = bridge.IsStarted && bridge.IsWsOpen && bridge.IsAuthenticated &&
                                   string.IsNullOrEmpty(bridge.AuthenticationError) &&
                                   string.IsNullOrEmpty(bridge.AuthenticationErrorCode);
-            var sameSession = !string.IsNullOrEmpty(bridge.SessionId) && bridge.SessionId == server.Health?.bridge_session_id;
+            var sameSession = !string.IsNullOrEmpty(bridge.SessionId) && bridge.SessionId == server.Identity?.bridge_session_id;
             var observationMatches = server.EditorObservationAvailable && server.EditorObservationObservedAtUtcMs > 0 &&
                                      sameSession && server.EditorObservationSessionId == bridge.SessionId;
             var observationAge = Math.Max(0, now - server.EditorObservationObservedAtUtcMs);
@@ -558,29 +538,6 @@ namespace CodingRiver.UPilot
                     "端口正在监听，但暂时无法确认所属进程。UPilot 不会自动切换端口。",
                     bridgeStatus.IsStarted,
                     true);
-            }
-
-            if (ready && mcpStatus.EditorObservationAvailable)
-            {
-                if (mcpStatus.EditorObservationStatus == "waiting_editor")
-                {
-                    return new UPilotMainSnapshot(
-                        UPilotMainState.CheckingStatus,
-                        "UPilot 主线程观测待更新",
-                        "正在每秒检查；观测过期不能据此认定 Unity 或游戏卡死，未执行自动重启。",
-                        bridgeStatus.IsStarted,
-                        mcpStatus.IsRunning);
-                }
-
-                if (mcpStatus.EditorObservationStatus == "unknown")
-                {
-                    return new UPilotMainSnapshot(
-                        UPilotMainState.CheckingStatus,
-                        "Unity 响应状态暂无法确认",
-                        "正在等待新的主线程与网络证据；未执行自动重启。",
-                        bridgeStatus.IsStarted,
-                        mcpStatus.IsRunning);
-                }
             }
 
             if (ready)
@@ -798,7 +755,7 @@ namespace CodingRiver.UPilot
                 var manager = UPilotMcpServerManager.Instance;
                 manager.EnsureInitialServiceRecovery();
                 _repairPhase = "确认项目、进程与真实来源";
-                var status = await manager.GetFreshStatusAsync();
+                var status = await manager.GetRepairPreflightStatusAsync();
                 preflightStatus = status;
                 if (_explicitlyStopped) return "已按请求停止 UPilot 服务。";
                 var issues = UPilotDeploymentDiagnostics.Observe(UPilotBridge.Instance.GetStatus(), status);
@@ -810,17 +767,16 @@ namespace CodingRiver.UPilot
                 if (status.IsRunning && status.ProcessOwnership != McpProcessOwnership.CurrentUPilot)
                     throw new InvalidOperationException("无法安全确定当前项目 Server，未停止任何进程。\n" + status.ProcessOwnershipEvidence);
                 preflightGate = "Server 返回项目身份核验";
-                if (!string.IsNullOrWhiteSpace(status.Health?.configured_project_path) &&
-                    !UPilotDeploymentDiagnostics.SamePath(status.Health.configured_project_path, UPilotProjectConfig.ProjectRoot))
+                if (!string.IsNullOrWhiteSpace(status.Identity?.configured_project_path) &&
+                    !UPilotDeploymentDiagnostics.SamePath(status.Identity.configured_project_path, UPilotProjectConfig.ProjectRoot))
                     throw new InvalidOperationException("Server 返回其他项目身份，拒绝停止该进程。");
                 preflightGate = "服务更新状态核验";
                 if (UPilotUpdateService.Instance.IsServiceStartBlocked)
                     throw new InvalidOperationException(UPilotUpdateService.ServiceStartBlockedMessage);
-                _repairPhase = prepareRuntime == null ? "准备当前包的配套 Server" : "验证并保存所选运行方式";
+                _repairPhase = prepareRuntime == null ? "使用当前授权的 Server 启动配置" : "验证并保存所选运行方式";
                 preflightGate = _repairPhase;
                 UPilotServerRuntimeService.RepairOwnsFailureDialog = true;
-                await PrepareRepairRuntimeAsync(prepareRuntime,
-                    () => UPilotServerRuntimeService.Instance.PrepareMatchingServerForRepairAsync());
+                if (prepareRuntime != null) await prepareRuntime();
                 runtimeSaved = prepareRuntime != null;
                 if (_explicitlyStopped) return "已按请求停止 UPilot 服务。";
                 _repairPhase = "停止旧 Bridge / Server，确认进程退出及端口释放";
@@ -895,7 +851,7 @@ namespace CodingRiver.UPilot
                 "；进程归属：" + status.ProcessOwnership +
                 "\nHTTP 监听：" + (status.StatusQueryCompleted ? status.HttpPortListening.ToString() : "未知") +
                 "；WS 监听：" + (status.StatusQueryCompleted ? status.WsPortListening.ToString() : "未知") +
-                "；Health 响应：" + (status.HealthEndpointResponded ? "已收到" : "未证实") +
+                "；Health 响应：" + (status.IdentityAvailable ? "已收到" : "未证实") +
                 "\n最后完成的观测：本地状态返回；其他安全验证门的通过状态不作推断。";
         }
 

@@ -459,7 +459,7 @@ namespace CodingRiver.UPilot
                 EditorGUILayout.LabelField("周期与超时", EditorStyles.boldLabel);
                 EditorGUILayout.LabelField("本机当前项目保存；有限任务在开始时固定参数，修改只影响下一次任务。", EditorStyles.wordWrappedMiniLabel);
                 DrawTimingValue("Bridge 心跳间隔（秒）", UPilotBridge.Instance.HeartbeatIntervalSeconds, 1, 600, value => UPilotBridge.Instance.HeartbeatIntervalSeconds = value);
-                DrawTimingValue("HTTP Health 间隔（秒）", UPilotMcpServerManager.Instance.HealthCheckIntervalSeconds, 1, 600, value => UPilotMcpServerManager.Instance.HealthCheckIntervalSeconds = value);
+                DrawTimingValue("HTTP Health 诊断间隔（秒，默认 20）", UPilotMcpServerManager.Instance.HealthCheckIntervalSeconds, 1, 600, value => UPilotMcpServerManager.Instance.HealthCheckIntervalSeconds = value);
                 DrawTimingValue("命令 Watchdog 检查间隔（秒）", UPilotTimingSettings.WatchdogIntervalSeconds, 1, 60, value => UPilotTimingSettings.WatchdogIntervalSeconds = value);
                 EditorGUILayout.LabelField("仅有活动命令时检查；此间隔不是命令超时。警告可能延后一个检查间隔，并受主线程调度延迟影响。", EditorStyles.wordWrappedMiniLabel);
                 EditorGUILayout.LabelField("服务重启总期限沿用上方 AI 服务维护设置。", EditorStyles.miniLabel);
@@ -600,9 +600,9 @@ namespace CodingRiver.UPilot
                 {
                     var actual = server.StatusQueryCompleted && !server.DiagnosisPending &&
                         server.FailureKind == McpStatusFailureKind.None && string.IsNullOrEmpty(server.ErrorMessage) &&
-                        server.HealthEndpointResponded && UPilotHealthAssessment.HasServiceIdentity(server) &&
+                        server.IdentityAvailable && UPilotHealthAssessment.HasServiceIdentity(server) &&
                         server.LastSuccessfulStatusAtUtcMs > 0 && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - server.LastSuccessfulStatusAtUtcMs <= 6000
-                        ? server.Health.server_entry_path : "待确认";
+                        ? server.Identity.server_entry_path : "待确认";
                     EditorGUILayout.LabelField("实际入口：" + actual, EditorStyles.wordWrappedMiniLabel);
                     if (UPilotServerRuntimeService.IsSourceUpdateChannel())
                         EditorGUILayout.LabelField("main/source 推荐 Python；本地 EXE 使用所选文件。", EditorStyles.wordWrappedMiniLabel);
@@ -1652,8 +1652,7 @@ namespace CodingRiver.UPilot
                         if (record.Active)
                         {
                             var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                            EditorGUILayout.HelpBox((record.healthVerified ? "正在验证：" + record.phase :
-                                "正在验证服务健康状态，失败后将继续重试") +
+                            EditorGUILayout.HelpBox("正在验证：" + record.phase +
                                 $"；已耗时 {Math.Max(0, now - record.acceptedAtUtcMs) / 1000} 秒 / 剩余 {Math.Max(0, record.deadlineAtUtcMs - now) / 1000} 秒；" +
                                 $"探测 {record.healthProbeCount} 次；最近错误：{record.healthProbeError}", MessageType.Info);
                         }

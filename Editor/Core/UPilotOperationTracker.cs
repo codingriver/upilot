@@ -37,6 +37,7 @@ namespace CodingRiver.UPilot
         public string   ErrorMessage;
         public bool     ResultReported;
         public bool     IsStuck;
+        internal long? WaitingDeadlineTick;
         // Per retained invocation in the current domain. -1 is unobserved, not zero.
         // Handler entry is not a business-effect count; one handler can queue several actions.
         public int      DispatchCount = -1;
@@ -74,6 +75,34 @@ namespace CodingRiver.UPilot
             {
                 if (_entry.CompletedAt.HasValue) return;
                 _entry.Phase = phase;
+            }
+        }
+
+        // The handler captures this once at the same boundary as its existing timeout.
+        // Polling and repeated phase writes cannot grant a fresh waiting budget.
+        internal static long CreateWaitDeadline(int timeoutMs)
+        {
+            if (timeoutMs < 1 || timeoutMs > 600000)
+                throw new ArgumentOutOfRangeException(nameof(timeoutMs));
+            return System.Diagnostics.Stopwatch.GetTimestamp() +
+                (long)(timeoutMs * (double)System.Diagnostics.Stopwatch.Frequency / 1000d);
+        }
+
+        internal static int RemainingWaitMilliseconds(long deadlineTick)
+        {
+            var remaining = (double)deadlineTick - System.Diagnostics.Stopwatch.GetTimestamp();
+            if (remaining <= 0) return 0;
+            return (int)Math.Min(int.MaxValue, Math.Ceiling(remaining * 1000d / System.Diagnostics.Stopwatch.Frequency));
+        }
+
+        internal void SetWaitingUntil(long deadlineTick)
+        {
+            lock (_entry)
+            {
+                if (_entry.CompletedAt.HasValue) return;
+                if (!_entry.WaitingDeadlineTick.HasValue || deadlineTick < _entry.WaitingDeadlineTick.Value)
+                    _entry.WaitingDeadlineTick = deadlineTick;
+                _entry.Phase = "waiting";
             }
         }
 
@@ -437,7 +466,9 @@ namespace CodingRiver.UPilot
         // ── Watchdog ─────────────────────────────────────────────────────────
 
         /// <summary>由 EditorApplication.update 定期调用。返回命令名列表（如果有超时临界的操作）。</summary>
-        public List<string> RunWatchdog()
+        public List<string> RunWatchdog() => RunWatchdog(System.Diagnostics.Stopwatch.GetTimestamp());
+
+        internal List<string> RunWatchdog(long nowTick)
         {
             var stuckCommands = new List<string>();
             var now = DateTime.Now;
@@ -452,10 +483,10 @@ namespace CodingRiver.UPilot
                 lock (entry)
                 {
                     if (entry.CompletedAt.HasValue) continue;
-    
+
                     var elapsed = (long)(now - entry.ReceivedAt).TotalMilliseconds;
                     bool shouldWarn = false;
-    
+
                     switch (entry.Phase)
                     {
                         case "queued":
@@ -465,13 +496,15 @@ namespace CodingRiver.UPilot
                             shouldWarn = elapsed > WatchdogExecThresholdMs;
                             break;
                         case "waiting":
-                            shouldWarn = elapsed > WatchdogWaitingThresholdMs;
+                            shouldWarn = entry.WaitingDeadlineTick.HasValue
+                                ? nowTick >= entry.WaitingDeadlineTick.Value
+                                : elapsed > WatchdogWaitingThresholdMs;
                             break;
                         default:
                             shouldWarn = elapsed > WatchdogAbsoluteThresholdMs;
                             break;
                     }
-    
+
                     if (shouldWarn && !entry.IsStuck)
                     {
                         entry.IsStuck = true;
@@ -487,7 +520,10 @@ namespace CodingRiver.UPilot
         }
 
         /// <summary>返回超过绝对超时阈值的操作 ID 列表（用于触发强制重启）。</summary>
-        public List<string> GetCriticallyStuckCommandIds()
+        public List<string> GetCriticallyStuckCommandIds() =>
+            GetCriticallyStuckCommandIds(System.Diagnostics.Stopwatch.GetTimestamp());
+
+        internal List<string> GetCriticallyStuckCommandIds(long nowTick)
         {
             var result = new List<string>();
             var now = DateTime.Now;
@@ -499,6 +535,8 @@ namespace CodingRiver.UPilot
                 lock (entry)
                 {
                     if (entry.CompletedAt.HasValue) continue;
+                    if (entry.Phase == "waiting" && entry.WaitingDeadlineTick.HasValue &&
+                        nowTick < entry.WaitingDeadlineTick.Value) continue;
                     var elapsed = (long)(now - entry.ReceivedAt).TotalMilliseconds;
                     if (elapsed > WatchdogAbsoluteThresholdMs)
                         result.Add(kvp.Key);

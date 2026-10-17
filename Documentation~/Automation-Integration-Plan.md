@@ -592,3 +592,19 @@ Skill资源按权威源更新为AgentRules40/SkillPack44，source和四份instal
 - 中间直接回归 148 项曾有 1 失败：OldFinalizationFailureDoesNotPreventNewExecutorCreation。原测试注入抛异常时钟，新增最终日志采样未隔离异常；已将整个日志收尾及开始/清理采样纳入尽力记录边界，保留原断言并补回归。失败报告保留在 `Tests~/UPilotTest/Log/UPilotAcceptance/1792050955642_req-e6cfaf1d-5359-4767-b448-8a5f99e09d44/summary.json`。另修正文件日期独立取实际写入时钟，延迟事件仍保留原事件时间，新增跨午夜文件与保留期用例。
 - 真实官方 Operation=`op-293a81f1-469f-43a4-a3db-04936c2c635e`，run=`4aac44253c39425fbc2bdb02975aab79`：完整 validate 后 start 一次，进入 PlayMode、等待 0.1 秒、Finally 返回 EditMode；Succeeded，businessTerminal/cleanupTerminal/editorTerminal=true，editorVerification=verified，unresolvedResources 为空。相同 Editor PID 下 domainGeneration 24→25。
 - 核对 `Logs/UPilot/step-2026-10-15.log` 中该任务 23 条记录：run.started/run.plan/run.finished 各 1 次，run.reloading/run.restoring 各 1 次，三个步骤各开始/结束 1 次，最终报告提交早于任务结束。执行器总耗时 15.518s，进入 PlayMode 的执行耗时 13.663s 包含重载等待。最终 EditMode/Ready、活动 Capture=0；没有重启服务或 Unity。真实硬停止、进程崩溃和真实符号链接/目录联接夹具未现场执行，硬停止日志和异常隔离已有隔离用例覆盖。
+
+### 服务观察日志与失败分组
+
+仅 Capture 在实际内部发射时记录的 diagnosticSource=upilot.service.observation
+Warning 归为诊断忽略；普通 Warning、Error/Exception、同正文业务日志以及没有来源
+的旧记录保持原策略。证据缺失仍失败，不使用全局 Warning 豁免。
+
+报告保留 blockingSamples/omittedBlockingCount，增加最多十组 blockingGroups
+及 omittedBlockingGroupCount；使用未截断指纹、阶段、实例、规则分组，记录次数、
+代表样本和首末 sequence，按首次出现排序。完整 console-policy.json 不裁剪。
+只有存在新分组时才追加文本段落，旧报告重新渲染的字节和哈希保持兼容。
+失败摘要包含策略有效性、阻断/允许/忽略、证据完整性、丢失数和已写入策略报告路径；
+首个业务失败与 secondaryErrors 保留。
+
+有界采样必须明确有效样本数、阶段覆盖和业务断言。样本不足不能通过。
+本轮不新增通用采样框架，也不实现外部 H 项目的业务 Step。

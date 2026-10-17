@@ -590,15 +590,22 @@ namespace CodingRiver.UPilot.Tests
         }
 
         [Test]
-        public void BridgeHealthMissingIsNotAnIdentityConflict()
+        public void HealthIdentityChangesAreDiagnosticOnly()
         {
             Assert.That(UPilotServiceMaintenance.BridgeIdentityChanged(default, 42, _root), Is.False);
-            var status = new McpServerStatus { HealthEndpointResponded = true, HealthServerProcessId = 42, HealthProjectPath = _root };
+            var status = new McpServerStatus { HealthEndpointResponded = true, HealthServerProcessId = 43, HealthProjectPath = _root + "-foreign" };
             Assert.That(UPilotServiceMaintenance.BridgeIdentityChanged(status, 42, _root), Is.False);
-            status.HealthServerProcessId = 43;
+        }
+
+        [Test]
+        public void CurrentHelloIdentityConflictsRemainBlocking()
+        {
+            var status = new McpServerStatus { IdentityAvailable = true, IdentityServerProcessId = 42, IdentityProjectPath = _root };
+            Assert.That(UPilotServiceMaintenance.BridgeIdentityChanged(status, 42, _root), Is.False);
+            status.IdentityServerProcessId = 43;
             Assert.That(UPilotServiceMaintenance.BridgeIdentityChanged(status, 42, _root), Is.True);
-            status.HealthServerProcessId = 42;
-            status.HealthProjectPath = _root + "-foreign";
+            status.IdentityServerProcessId = 42;
+            status.IdentityProjectPath = _root + "-foreign";
             Assert.That(UPilotServiceMaintenance.BridgeIdentityChanged(status, 42, _root), Is.True);
         }
 

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from bridge_readiness_helpers import mark_bridge_ready
 from upilot_mcp.dispatcher import CommandDispatcher
 from upilot_mcp.domain.task_service import TaskDomainService
 from upilot_mcp.responses import fail, ok
@@ -104,6 +105,7 @@ def _connected_server(project, socket):
         "verificationLevel": "test-verified", "processRole": "mainEditor",
     })
     server._ws = socket
+    mark_bridge_ready(server, socket)
     return server
 
 
@@ -149,7 +151,8 @@ def test_disconnected_send_is_not_counted_as_socket_entry(tmp_path):
     async def scenario():
         server = WsOrchestratorServer(expected_project_path=str(tmp_path))
         record = server.state.create_command("original", "request", "reflection.call", {})
-        await server.send_command("original", "reflection.call", {})
+        with pytest.raises(ConnectionError, match="unavailable"):
+            await server.send_command("original", "reflection.call", {})
         assert record.send_attempts == 0
         assert record.response_wait_started_at == 0
     asyncio.run(scenario())

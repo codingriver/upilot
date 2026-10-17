@@ -233,13 +233,16 @@ namespace CodingRiver.UPilot.Tests
             WithIsolatedHealthUi(() =>
             {
                 var status = Waiting("enteringPlay", 180000);
-                UPilotQuickStart.TrackLifecycleRecovery(status);
                 status.EditorObservationStatus = "responsive";
                 status.EditorObservationLifecyclePhase = "verifying_recovery";
                 status.EditorObservationObservedAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 status.EditorObservationHeartbeatAgeMs = 100;
                 status.EditorObservationPumpAgeMs = 100;
                 PopulateDeploymentIdentity(status.Health);
+                status.Identity = status.Health;
+                status.IdentityAvailable = status.IdentityIdentifiesUPilot = true;
+                status.IdentityServerProcessId = status.Health.server_pid;
+                status.IdentityProjectPath = status.Health.configured_project_path;
                 var bridge = new BridgeStatus { IsStarted = true, IsWsOpen = true, IsAuthenticated = true, SessionId = "session-a" };
                 var prefix = typeof(UPilotQuickStart);
                 var flags = BindingFlags.Static | BindingFlags.NonPublic;
@@ -247,7 +250,8 @@ namespace CodingRiver.UPilot.Tests
                 var failureKey = (string)prefix.GetProperty("FailureKey", flags).GetValue(null);
                 var autoKey = (string)prefix.GetProperty("AutoAttemptKey", flags).GetValue(null);
                 var generation = (int)prefix.GetField("_repairGeneration", flags).GetValue(null);
-                var token = SessionState.GetString(pendingKey, "");
+                const string token = "legacy-observation-token";
+                SessionState.SetString(pendingKey, token);
                 EditorPrefs.SetString(failureKey, "old health timeout");
                 EditorPrefs.SetBool(autoKey, true);
                 DiagnosticIssues()["timeout"] = new UPilotDeploymentIssue { Code = "timeout", Confirmed = false };
@@ -255,11 +259,15 @@ namespace CodingRiver.UPilot.Tests
                 var historicalStatus = record?.status;
                 var historicalError = record?.error;
                 var latest = status;
-                if (!valid) latest.EditorObservationSessionId = "old-session";
+                if (!valid)
+                {
+                    latest.Identity = UnityEngine.JsonUtility.FromJson<UPilotServerHealth>(UnityEngine.JsonUtility.ToJson(status.Identity));
+                    latest.Identity.bridge_session_id = "old-session";
+                }
                 Assert.That(UPilotQuickStart.CompleteObservedRecovery(status, bridge.SessionId, generation, token, bridge, latest), Is.EqualTo(valid));
                 Assert.That(SessionState.GetString(pendingKey, ""), Is.EqualTo(valid ? "" : token));
                 Assert.That(EditorPrefs.HasKey(failureKey), Is.EqualTo(!valid));
-                Assert.That(EditorPrefs.HasKey(autoKey), Is.EqualTo(!valid));
+                Assert.That(EditorPrefs.GetBool(autoKey), Is.True, "Observations never rearm automatic repair.");
                 if (valid) Assert.That(DiagnosticIssues().Values.Any(issue => !issue.Confirmed), Is.False);
                 Assert.That(record?.status, Is.EqualTo(historicalStatus));
                 Assert.That(record?.error, Is.EqualTo(historicalError));

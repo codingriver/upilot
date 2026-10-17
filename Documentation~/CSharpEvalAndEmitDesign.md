@@ -401,3 +401,15 @@ skills/upilot-unity-mcp/references/execution-tools.md # AI 使用契约
 - 真实组合调用：泛型推断返回 `Int32:String`，jagged array 返回 4，多行 bind span 覆盖完整 44 字符（1:1→3:2）；callback 返回 3 后因 limit 返回 0，session status 为 invocations=2/rejected=1 且包含 `CALLBACK_LIMIT_EXCEEDED`；custom property set 4/get 5，session close 无 cleanup error。
 - AI 集成说明随后补齐：MCP schemas 为四个执行工具公开关键参数描述，移除“未来的 csharp_eval”过时措辞；Skill Install 23 增加结构化错误恢复、cache-hit session/instance 隔离和 callback 异常模式说明，Agent Rules 保持 25，Registry 保持 v5/187。
 - AI 集成定向验收：Python execution/reflection/install/Agent Rules 契约 49 passed，最终 execution/reflection schema 复跑 16 passed；主 Skill 与规范项目 `.agents`/`.claude` 三份校验通过且安装哈希一致。Unity 6000.6.0a2 安全编译 0 error/0 warning，新增 capability fixture 1/1（runGuid `c1f3d35f-2de8-4043-9e2d-4daec589e004`）；Unity 2022.3.62f2 同一 fixture 1/1，XML `Tests~/ExecutionCompat2022/CapabilityContractResults.xml` 为 3443 bytes、SHA-256 `A682FE793EEE5C826F9C22EE68ACF32A1DFF9C1D178DF9B1B4439FC85A52A8CF`。真实 MCP 重启后 tools/list 仍为 187，四工具描述及参数 schema 已生效，capability 返回全部新增字段。
+
+### 2026-10-16 预算与调用诊断补充
+
+EXECUTION_BUDGET_EXCEEDED 的 metric、actual、limit 保持内部原值；
+后两者为 long，Python 嵌套错误归一化不截成 32 位。lastCompletedSpan
+只表示最后完成的边界，不表示业务采样完成。原异常、堆栈、副作用和清理信息继续保留。
+
+executionDiagnostics 新增调度累计等待 dispatchWaitMs（含调度开销）、
+观察到的目标时间 targetInvokeMs、dispatchCount、targetStartedCount、
+targetFinishedCount（含异常退出）。调用返回时冻结本次观察；仍运行和迟到回调
+不能改写已返回证据。直接执行的调度次数为零；invokeMs 保留原义，不要求等于两项之和。
+预算失败优先检查部分状态、缩小数据范围或使用项目采样 Step，不自动重试、换后端或提高超时。

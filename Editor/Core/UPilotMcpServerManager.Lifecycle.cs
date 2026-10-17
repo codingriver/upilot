@@ -16,6 +16,48 @@ namespace CodingRiver.UPilot
         private int _lifecycleProcessId;
         private long _lifecycleDeadlineUtcMs;
         private long _lifecycleStartedAtUtcMs;
+        private long _readyRecoveryDeadlineUtcMs;
+        // Isolated tests supply Bridge readiness without mutating the live Editor connection.
+        internal Func<bool> StateSynchronizedOverride;
+
+        private bool OrdinaryStatusAllowed => _initialServiceRecoveryCompleted &&
+            _lifecyclePhase == UPilotServerLifecyclePhase.None && !CaptureServiceShutdown().Stopping &&
+            !IsServiceTransitionActive && !UPilotServiceMaintenance.IsActive && !UPilotQuickStart.IsExplicitlyStopped &&
+            (StateSynchronizedOverride?.Invoke() ?? UPilotBridge.Instance.IsStateSynchronized);
+
+        internal void ResetReadyRecoveryBudget()
+        {
+            lock (_statusLock) _readyRecoveryDeadlineUtcMs = 0;
+        }
+
+        internal void MarkReadyRecoveryCompleted() => ResetReadyRecoveryBudget();
+
+        internal long GetReadyRecoveryDeadlineUtcMs()
+        {
+            lock (_statusLock) return _readyRecoveryDeadlineUtcMs;
+        }
+
+        internal int GetReadyBudgetRemainingMs()
+        {
+            lock (_statusLock)
+            {
+                var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                long parent = 0;
+                void Limit(long deadline) { if (deadline > 0) parent = parent == 0 ? deadline : Math.Min(parent, deadline); }
+                if (_restartMaintenanceDeadlineUtcMs > 0) Limit(_restartMaintenanceDeadlineUtcMs);
+                if (IsRestartObservationActive()) Limit(_restartVerificationDeadlineUtcMs);
+                if (_lifecyclePhase != UPilotServerLifecyclePhase.None) Limit(_lifecycleDeadlineUtcMs);
+                if (_existingServiceRecovery?.status == "verifying") Limit(_existingServiceRecovery.reuseDeadline);
+                if (_launchNeedsRevalidation && _launchState != null)
+                    Limit(_launchReloadRevalidation ? _launchState.reloadRevalidation?.deadlineUtcMs ?? 0 :
+                        _launchState.readyVerified ? 0 : _launchState.deadlineUtcMs);
+                if (_readyRecoveryDeadlineUtcMs == 0)
+                    _readyRecoveryDeadlineUtcMs = parent > 0 ? parent : now +
+                        Math.Max(30, Math.Min(600, UPilotProjectConfig.Current.aiServiceMaintenance?.restartTimeoutSeconds ?? 120)) * 1000L;
+                else if (parent > 0) _readyRecoveryDeadlineUtcMs = Math.Min(_readyRecoveryDeadlineUtcMs, parent);
+                return (int)Math.Max(0, Math.Min(int.MaxValue, _readyRecoveryDeadlineUtcMs - now));
+            }
+        }
 
         internal sealed class LifecycleProbeDeferredException : OperationCanceledException { }
 
@@ -100,7 +142,7 @@ namespace CodingRiver.UPilot
             {
                 status = _cachedStatus;
                 status.LifecyclePhase = _lifecyclePhase;
-                return _lifecyclePhase != UPilotServerLifecyclePhase.None;
+                return !OrdinaryStatusAllowed;
             }
         }
 
@@ -163,7 +205,7 @@ namespace CodingRiver.UPilot
 
         internal async Task<System.Net.Http.HttpResponseMessage> SendLifecycleStatusAsync(
             System.Net.Http.HttpClient client, string url, long deadlineUtcMs, CancellationToken token = default,
-            int requestTimeoutMs = 2000, long expectedGeneration = -1)
+            int requestTimeoutMs = 2000, long expectedGeneration = -1, bool ownerProbe = false)
         {
             CancellationTokenSource linked;
             Task<System.Net.Http.HttpResponseMessage> send;
@@ -172,6 +214,7 @@ namespace CodingRiver.UPilot
             lock (_statusLock)
             {
                 if (_lifecyclePhase == UPilotServerLifecyclePhase.Starting || _lifecyclePhase == UPilotServerLifecyclePhase.Stopping ||
+                    (!ownerProbe && !OrdinaryStatusAllowed) ||
                     (expectedGeneration >= 0 && expectedGeneration != _lifecycleGeneration)) throw new LifecycleProbeDeferredException();
                 generation = _lifecycleGeneration;
                 _lifecycleQueryCancellation ??= new CancellationTokenSource();
@@ -184,7 +227,8 @@ namespace CodingRiver.UPilot
                 var response = await send;
                 lock (_statusLock)
                 {
-                    if (generation != _lifecycleGeneration || linked.IsCancellationRequested)
+                    if (generation != _lifecycleGeneration || linked.IsCancellationRequested ||
+                        (!ownerProbe && !OrdinaryStatusAllowed))
                     {
                         response.Dispose();
                         token.ThrowIfCancellationRequested();

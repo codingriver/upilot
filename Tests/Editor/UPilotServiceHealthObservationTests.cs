@@ -20,6 +20,8 @@ namespace CodingRiver.UPilot.Tests
         {
             var manager = (UPilotMcpServerManager)FormatterServices.GetUninitializedObject(typeof(UPilotMcpServerManager));
             Set(manager, "_statusLock", new object());
+            Set(manager, "_initialServiceRecoveryCompleted", true);
+            manager.StateSynchronizedOverride = () => true;
             Set(manager, "_healthCheckIntervalSeconds", intervalSeconds);
             Set(manager, "_launchState", new ServerLaunchState { verified = true, readyVerified = true });
             Set(manager, "_cachedStatus", WaitingStatus());
@@ -28,9 +30,9 @@ namespace CodingRiver.UPilot.Tests
 
         private static McpServerStatus WaitingStatus() => new McpServerStatus
         {
-            IsRunning = true, ProcessId = 42, HealthServerProcessId = 42,
-            HealthEndpointResponded = true, StatusQueryCompleted = true,
-            Health = new UPilotServerHealth { server_pid = 42, server_instance_id = "health-fixture" },
+            IsRunning = true, ProcessId = 42, IdentityServerProcessId = 42,
+            IdentityAvailable = true, StatusQueryCompleted = true,
+            Identity = new UPilotServerHealth { server_pid = 42, server_instance_id = "health-fixture", configured_project_path = UPilotProjectConfig.ProjectRoot },
             EditorObservationAvailable = true, EditorObservationStatus = "waiting_editor",
             EditorObservationSessionId = "fixture-session", EditorObservationProducerEpoch = "fixture-epoch",
             EditorObservationDomainGeneration = 7,
@@ -44,7 +46,7 @@ namespace CodingRiver.UPilot.Tests
 
         private static void CacheVerified(UPilotMcpServerManager manager) =>
             typeof(UPilotMcpServerManager).GetMethod("CacheVerifiedStartupStatus", PrivateInstance)
-                .Invoke(manager, new object[] { WaitingStatus() });
+                .Invoke(manager, new object[] { WaitingStatus(), -1L, null, null });
 
         private static async Task Close(UPilotMcpServerManager manager)
         {
@@ -64,6 +66,13 @@ namespace CodingRiver.UPilot.Tests
             while (!predicate() && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() < deadline)
                 await Task.Delay(10);
             Assert.That(predicate(), Is.True, message);
+        }
+
+        [Test]
+        public void NewDefaultIsTwentySecondsAndExistingTenSecondValueIsPreserved()
+        {
+            Assert.That(UPilotMcpServerManager.DefaultHealthCheckIntervalSeconds, Is.EqualTo(20));
+            Assert.That(Manager(10).HealthCheckIntervalSeconds, Is.EqualTo(10));
         }
 
         [Test]
@@ -131,12 +140,14 @@ namespace CodingRiver.UPilot.Tests
             try
             {
                 manager.ResumePeriodicHealthObservation(client);
-                await Until(() => manager.GetStatus().FailureKind == McpStatusFailureKind.Transient &&
-                    Get<long>(manager, "_lastRefreshMs") > priorRefresh,
-                    "The first HTTP 503 must remain a transient observation failure.");
-                var completed = Get<long>(manager, "_lastRefreshMs");
+                await Until(() => !string.IsNullOrEmpty(manager.GetStatus().HealthError),
+                    "The first HTTP 503 must be recorded only as a diagnostic.");
+                Assert.That(manager.GetStatus().FailureKind, Is.EqualTo(McpStatusFailureKind.None));
+                Assert.That(manager.GetStatus().ErrorMessage, Is.Null.Or.Empty);
+                Assert.That(Get<long>(manager, "_lastRefreshMs"), Is.EqualTo(priorRefresh));
+                var completed = Get<long>(manager, "_nextEditorHealthObservationAtUtcMs") - 1000;
                 Assert.That(Get<long>(manager, "_nextEditorHealthObservationAtUtcMs"), Is.EqualTo(completed + 1000));
-                Assert.That(manager.GetStatus().HealthServerProcessId, Is.EqualTo(42));
+                Assert.That(manager.GetStatus().IdentityServerProcessId, Is.EqualTo(42));
                 await Task.Delay(150);
                 Assert.That(handler.Calls, Is.EqualTo(1), "No rapid retry may follow an HTTP failure.");
                 await Until(() => manager.GetStatus().HealthEndpointResponded && handler.Calls >= 2,
@@ -189,6 +200,102 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(UPilotMcpServerManager.ProcessProbeWaitMs(0, 100), Is.EqualTo(100));
         }
 
+        [TestCase(503)]
+        [TestCase(401)]
+        [TestCase(403)]
+        [TestCase(200)]
+        [TestCase(-1)]
+        [TestCase(-2)]
+        public async Task HealthFailureCannotChangeAuthoritativeState(int response)
+        {
+            var manager = Manager();
+            Set(manager, "_editorHealthObservationEnabled", true);
+            var before = manager.GetStatus();
+            using var client = new HttpClient(new FaultHandler(response));
+            var cancellation = new CancellationTokenSource();
+            Set(manager, "_editorHealthObservationCancellation", cancellation);
+            await (Task)typeof(UPilotMcpServerManager).GetMethod("RefreshEditorHealthObservationAsync", PrivateInstance)
+                .Invoke(manager, new object[] { 8011, 0, before, cancellation, client });
+            var after = manager.GetStatus();
+            Assert.That(after.Identity, Is.SameAs(before.Identity));
+            Assert.That(after.IdentityAvailable, Is.EqualTo(before.IdentityAvailable));
+            Assert.That(after.FailureKind, Is.EqualTo(before.FailureKind));
+            Assert.That(after.ErrorMessage, Is.EqualTo(before.ErrorMessage));
+            Assert.That(after.LastSuccessfulStatusAtUtcMs, Is.EqualTo(before.LastSuccessfulStatusAtUtcMs));
+            Assert.That(after.HealthError, Is.Not.Empty);
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public async Task HealthSuccessOrChangedIdentityCannotCompleteStartup(bool changeIdentity)
+        {
+            var manager = Manager();
+            var launch = new ServerLaunchState { verified = true, readyVerified = false };
+            Set(manager, "_launchState", launch);
+            Set(manager, "_editorHealthObservationEnabled", true);
+            var before = manager.GetStatus();
+            using var client = new HttpClient(new IdentityHandler(changeIdentity));
+            var cancellation = new CancellationTokenSource();
+            Set(manager, "_editorHealthObservationCancellation", cancellation);
+            await (Task)typeof(UPilotMcpServerManager).GetMethod("RefreshEditorHealthObservationAsync", PrivateInstance)
+                .Invoke(manager, new object[] { 8011, 0, before, cancellation, client });
+            var after = manager.GetStatus();
+            Assert.That(launch.readyVerified, Is.False);
+            Assert.That(after.Identity, Is.SameAs(before.Identity));
+            Assert.That(after.FailureKind, Is.EqualTo(before.FailureKind));
+            Assert.That(after.ErrorMessage, Is.EqualTo(before.ErrorMessage));
+            Assert.That(after.LastSuccessfulStatusAtUtcMs, Is.EqualTo(before.LastSuccessfulStatusAtUtcMs));
+            Assert.That(after.HealthEndpointResponded, Is.EqualTo(!changeIdentity));
+            if (changeIdentity) Assert.That(after.HealthError, Does.Contain("identity differs"));
+            else Assert.That(after.HealthError, Is.Empty);
+        }
+
+        [Test]
+        public async Task AnOutstandingHealthRequestCannotOverlapAnotherDueCheck()
+        {
+            var manager = Manager(1);
+            var handler = new HealthHandler { Stall = true };
+            using var client = new HttpClient(handler);
+            Set(manager, "_editorHealthObservationEnabled", true);
+            Set(manager, "_nextEditorHealthObservationAtUtcMs", 1L);
+            var request = typeof(UPilotMcpServerManager).GetMethod("RequestEditorHealthObservationIfNeeded", PrivateInstance);
+            try
+            {
+                var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                request.Invoke(manager, new object[] { manager.GetStatus(), now, client });
+                await Until(() => handler.Calls == 1, "The first observation must start.");
+                for (var i = 0; i < 10; i++)
+                    request.Invoke(manager, new object[] { manager.GetStatus(), now + 10000, client });
+                Assert.That(handler.Calls, Is.EqualTo(1), "Even overdue requests must share the outstanding observation.");
+            }
+            finally { await Close(manager); }
+        }
+
+        private sealed class IdentityHandler : HttpMessageHandler
+        {
+            private readonly bool _changed;
+            internal IdentityHandler(bool changed) { _changed = changed; }
+            protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token) =>
+                Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) {
+                    Content = new StringContent(UnityEngine.JsonUtility.ToJson(new UPilotServerHealth {
+                        server_pid = _changed ? 43 : 42, server_instance_id = "health-fixture",
+                        configured_project_path = UPilotProjectConfig.ProjectRoot,
+                    }))
+                });
+        }
+
+        private sealed class FaultHandler : HttpMessageHandler
+        {
+            private readonly int _response;
+            internal FaultHandler(int response) { _response = response; }
+            protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+            {
+                if (_response == -1) throw new HttpRequestException("offline-fixture");
+                if (_response == -2) throw new TaskCanceledException("request-timeout-fixture");
+                return Task.FromResult(new HttpResponseMessage((HttpStatusCode)_response) { Content = new StringContent("invalid-json") });
+            }
+        }
+
         private sealed class HealthHandler : HttpMessageHandler
         {
             internal int Calls;
@@ -209,7 +316,10 @@ namespace CodingRiver.UPilot.Tests
                 SecondRequestAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
                 {
-                    Content = new StringContent("{\"server_pid\":42,\"server_instance_id\":\"health-fixture\",\"editor_observation\":{\"status\":\"waiting_editor\",\"session_id\":\"fixture-session\",\"producer_epoch\":\"fixture-epoch\",\"domain_generation\":7}}")
+                    Content = new StringContent(UnityEngine.JsonUtility.ToJson(new UPilotServerHealth {
+                        server_pid = 42, server_instance_id = "health-fixture", configured_project_path = UPilotProjectConfig.ProjectRoot,
+                        editor_observation = new UPilotEditorObservation { status = "waiting_editor", session_id = "fixture-session", producer_epoch = "fixture-epoch", domain_generation = 7 }
+                    }))
                 });
             }
         }

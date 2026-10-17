@@ -625,7 +625,9 @@ namespace CodingRiver.UPilot.Automation
                 _run.logSummary = _report.WriteConsolePolicy(_run.captureSessionId, _run.captureStartSequence,
                     _run.captureEndSequence, policy, _collector.Evidence.lostRecordCount);
                 if (!policy.passed) RecordError(policy.evidenceComplete ? "STEP_CONSOLE_POLICY_FAILED" : "STEP_EVIDENCE_INCOMPLETE",
-                    "Console policy or evidence completeness failed.");
+                    $"Console policyValid={policy.policyValid}; blocked={policy.blockedCount}; allowed={policy.allowedCount}; " +
+                    $"ignored={policy.ignoredCount}; evidenceComplete={policy.evidenceComplete}; lost={_collector.Evidence.lostRecordCount}; " +
+                    $"consolePolicy={_report.GetArtifacts().First(a => a.kind == "consolePolicy").projectRelativePath}");
             }
             var references = new System.Collections.Generic.List<AutomationReportArtifactReference>();
             foreach (var artifact in _report.GetArtifacts().Where(a => a.kind == "consolePolicy"))

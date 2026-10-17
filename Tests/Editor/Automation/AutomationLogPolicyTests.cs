@@ -8,6 +8,21 @@ namespace CodingRiver.UPilot.Tests.Automation
     public class AutomationLogPolicyTests
     {
         [Test]
+        public void OnlyInternalServiceWarningsIgnoreDenyAndEvidenceStillMatters()
+        {
+            var internalWarning = Record(0, "Warning", "same body");
+            internalWarning.diagnosticSource = Logger.ServiceObservationSource;
+            var realError = Record(2, "Error", "same body");
+            realError.diagnosticSource = Logger.ServiceObservationSource;
+            var deny = Rule("deny-all", "deny", -1, "same body");
+            deny.levels = new[] { "Warning", "Error" };
+            var result = AutomationLogPolicy.Evaluate(new[] { internalWarning, Record(1, "Warning", "same body"), realError },
+                null, new[] { deny });
+            Assert.That(result.classifications.Select(c => c.disposition), Is.EqualTo(new[] { "ignored", "blocked", "blocked" }));
+            Assert.That(result.passed, Is.False);
+        }
+
+        [Test]
         public void DefaultPolicyBlocksErrorExceptionAndAssert()
         {
             AutomationLogPolicyResult result = AutomationLogPolicy.Evaluate(new[]

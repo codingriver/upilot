@@ -158,6 +158,7 @@ def test_health_roundtrip_failure_logs_bounded_identity_and_timing_without_secre
         monkeypatch, tmp_path, caplog, failure):
     import asyncio
     import time
+    import logging
     import httpx
     from upilot_mcp import mcp_stdio_server as http_server
 
@@ -173,6 +174,11 @@ def test_health_roundtrip_failure_logs_bounded_identity_and_timing_without_secre
             self.pending, self.commands = {}, []
         def is_ready(self):
             return True
+        def bridge_readiness_status(self):
+            return {"bridgeReadyContractVersion": 1, "bridgeReady": True,
+                    "connectionPhase": "ready", "bootstrapReceipt": {"bootstrapId": "fixture"}}
+        def result_connection_current(self, result):
+            return result.get("sessionId") == "session-one"
         def register_pending(self, command_id):
             future = asyncio.get_running_loop().create_future()
             self.pending[command_id] = future
@@ -221,13 +227,137 @@ def test_health_roundtrip_failure_logs_bounded_identity_and_timing_without_secre
             assert len(records) == int(failure is not None)
             if failure is not None:
                 assert data["bridge_probe_error"] == (exception.__name__ + ": " + secret_message)[:256]
+                assert records[0].levelno == logging.ERROR
+                assert records[0].exc_info[0] is exception
+                assert str(records[0].exc_info[1]) == secret_message
+                assert records[0].exc_info[2] is not None
                 message = records[0].message
                 assert f"serverPid={data['server_pid']}" in message
                 assert f"project={tmp_path.resolve()}" in message
                 assert "elapsedMs=125.0" in message and f"exceptionType={exception.__name__}" in message
                 assert nonce not in message and "secret-" not in message and "http://" not in message
                 assert "ownerToken" not in message and "nonce=" not in message and "token=" not in message
-            assert wait_budgets == ([] if failure in {"connection", "os"} else [5.0])
+            assert wait_budgets == [5.0]  # One budget starts before send, including send failures.
+    monkeypatch.setattr(http_server, "_serve_http_sockets", serve_without_sockets)
+    async def run():
+        await http_server._run_http_server("127.0.0.1", 0, asyncio.create_task(asyncio.sleep(0)))
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("transition", ["send_blocked", "stop", "replacement", "unproven_result", "unchanged", "client_cancelled", "orchestrator_replaced", "orchestrator_removed"])
+def test_health_probe_budget_covers_send_and_response_cannot_publish_old_ready(monkeypatch, tmp_path, caplog, transition):
+    import asyncio
+    import httpx
+    from upilot_mcp import mcp_stdio_server as http_server
+
+    session = SimpleNamespace(session_id="session-one", project_path=str(tmp_path),
+                              unity_version="2022.3", last_heartbeat_at=0)
+    entered, wait_budgets, registered = [], [], []
+    send_started = asyncio.Event()
+
+    class Bridge:
+        port = 8765
+        session_manager = SimpleNamespace(active=session)
+
+        def __init__(self):
+            self.pending = {}
+            self.ready, self.generation, self.phase = True, "original", "ready"
+            self.send_cancelled = False
+
+        def is_ready(self):
+            return self.ready
+
+        def bridge_readiness_status(self):
+            return {"bridgeReadyContractVersion": 1, "bridgeReady": self.ready,
+                    "connectionPhase": self.phase,
+                    "bootstrapReceipt": {"bootstrapId": self.generation}}
+
+        def result_connection_current(self, result):
+            return self.ready and result.get("_connectionGeneration") == self.generation
+
+        def register_pending(self, command_id):
+            future = asyncio.get_running_loop().create_future()
+            self.pending[command_id] = future
+            registered.append(future)
+            return future
+
+        async def send_command(self, command_id, name, payload):
+            entered.append("send")
+            send_started.set()
+            if transition in {"send_blocked", "client_cancelled"}:
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    self.send_cancelled = True
+                    raise
+            result = {"type": "result", "name": name, "sessionId": "session-one",
+                      "_connectionGeneration": self.generation}
+            if transition == "stop":
+                self.ready, self.phase = False, "stopping"
+            elif transition == "replacement":
+                self.generation = "replacement"
+            elif transition == "unproven_result":
+                result.pop("_connectionGeneration")
+            elif transition == "orchestrator_replaced":
+                monkeypatch.setattr(http_server, "_orchestrator", Bridge())
+            elif transition == "orchestrator_removed":
+                monkeypatch.setattr(http_server, "_orchestrator", None)
+            self.pending[command_id].set_result(result)
+
+        def unregister_pending(self, command_id):
+            future = self.pending.pop(command_id, None)
+            if future is not None and not future.done():
+                future.cancel()
+
+    bridge = Bridge()
+    monkeypatch.setattr(http_server, "_orchestrator", bridge)
+    monkeypatch.setattr(http_server, "refresh_config_if_changed", lambda: {})
+    monkeypatch.setattr(http_server, "configured_project_root", lambda: tmp_path)
+    monkeypatch.setattr(http_server, "Server", lambda config: SimpleNamespace(app=config.app))
+    original_wait_for = asyncio.wait_for
+    async def bounded_wait_for(awaitable, timeout):
+        entered.append("budget")
+        wait_budgets.append(timeout)
+        # Accelerate only the module's observation timer; the public budget
+        # remains five seconds and real asyncio cancellation is exercised.
+        return await original_wait_for(awaitable, timeout=min(timeout, 0.02))
+    local_asyncio = SimpleNamespace(**{name: getattr(asyncio, name) for name in dir(asyncio)})
+    local_asyncio.wait_for = bounded_wait_for
+    monkeypatch.setattr(http_server, "asyncio", local_asyncio)
+
+    async def serve_without_sockets(server, _host, _port):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url="http://fixture") as client:
+            request = client.get("/health", params={
+                "probe": "bridge", "session": "session-one", "nonce": "a" * 32})
+            if transition == "client_cancelled":
+                task = asyncio.create_task(request)
+                await send_started.wait()
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                assert bridge.send_cancelled and not bridge.pending
+                assert registered and all(future.cancelled() for future in registered)
+                assert not [record for record in caplog.records if "phase=bridge_roundtrip" in record.message]
+                return
+            response = await original_wait_for(request, timeout=0.2)
+            data = response.json()
+            verified = transition == "unchanged"
+            assert data["bridge_probe_ok"] is verified
+            assert data["unity_connected"] is verified
+            assert data["bridgeReady"] is verified and data["bridge_ready"] is verified
+            assert data["bootstrapReceipt"] == ({"bootstrapId": "original"} if verified else None)
+            assert data["bootstrap_receipt"] == data["bootstrapReceipt"]
+            if not verified:
+                assert data["connectionPhase"] != "ready"
+                assert data["connection_phase"] == data["connectionPhase"]
+                assert data["editor_observation"]["status"] == "unknown"
+            assert wait_budgets == [5.0]
+            assert entered == ["budget", "send"]
+            assert not bridge.pending
+            assert registered and all(future.done() for future in registered)
+            if transition == "send_blocked":
+                assert all(future.cancelled() for future in registered)
+            assert bridge.send_cancelled is (transition == "send_blocked")
     monkeypatch.setattr(http_server, "_serve_http_sockets", serve_without_sockets)
     async def run():
         await http_server._run_http_server("127.0.0.1", 0, asyncio.create_task(asyncio.sleep(0)))
@@ -256,6 +386,11 @@ def test_health_bridge_probe_requires_real_roundtrip_and_matching_session(monkey
 
         def is_ready(self):
             return True
+        def bridge_readiness_status(self):
+            return {"bridgeReadyContractVersion": 1, "bridgeReady": True,
+                    "connectionPhase": "ready", "bootstrapReceipt": {"bootstrapId": "fixture"}}
+        def result_connection_current(self, result):
+            return result.get("sessionId") == "session-one"
 
         def register_pending(self, command_id):
             future = asyncio.get_running_loop().create_future()
@@ -309,3 +444,23 @@ def test_health_bridge_probe_requires_real_roundtrip_and_matching_session(monkey
         await http_server._run_http_server("127.0.0.1", 0, asyncio.create_task(asyncio.sleep(0)))
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("schema,expected", [(4, False), (5, True), (6, False)])
+def test_restart_v5_never_requires_health_or_deployment_and_future_is_unverified(tmp_path, schema, expected):
+    required = ["old_identity", "bridge_stop", "old_exit", "ports",
+                "new_process", "identity", "bridge_session", "readonly"]
+    _write_record(tmp_path, schemaVersion=schema, healthVerified=False, deploymentVerified=False,
+                  readOnlyVerified=True, gateDiagnostics=[{"key": key, "state": "passed"} for key in required])
+    result = _service()._read_server_restart_summary(tmp_path, SimpleNamespace(session_id="new-session"))
+    assert result["verifiedSucceeded"] is expected
+
+
+@pytest.mark.parametrize("missing", ["old_identity", "old_exit", "ports", "new_process", "identity", "bridge_session", "readonly"])
+def test_restart_v5_requires_each_necessary_gate(tmp_path, missing):
+    required = ["old_identity", "bridge_stop", "old_exit", "ports",
+                "new_process", "identity", "bridge_session", "readonly"]
+    _write_record(tmp_path, schemaVersion=5, readOnlyVerified=True,
+                  gateDiagnostics=[{"key": key, "state": "passed"} for key in required if key != missing])
+    result = _service()._read_server_restart_summary(tmp_path, SimpleNamespace(session_id="new-session"))
+    assert result["verifiedSucceeded"] is False

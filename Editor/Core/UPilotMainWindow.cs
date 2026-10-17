@@ -689,7 +689,7 @@ namespace CodingRiver.UPilot
                 EditorGUILayout.HelpBox(
                     UPilotHealthAssessment.LifecycleTitle(_mcpStatus.EditorObservationLifecyclePhase) +
                     $"，已等待 {FormatObservationDuration(waitingMs)}；正常生命周期等待不会触发自动修复或重启。\n" +
-                    $"Server HTTP：{(_mcpStatus.HealthEndpointResponded ? "已响应" : "尚未确认")}；" +
+                    $"Health 诊断：{(_mcpStatus.HealthEndpointResponded ? "已响应" : "未响应（不影响就绪判定）")}；" +
                     $"Bridge 心跳年龄：{FormatObservationDuration(_mcpStatus.EditorObservationHeartbeatAgeMs)}；" +
                     $"UPilot 主线程观测年龄：{FormatObservationDuration(_mcpStatus.EditorObservationPumpAgeMs)}。",
                     MessageType.Info);

@@ -53,6 +53,19 @@ namespace CodingRiver.UPilot.Automation
                     .Append(" | ").Append(Line(item.sha256)).Append(" | ").Append(Line(item.diagnostic)).Append("\r\n");
             text.Append("\r\nBusiness assertions and metrics remain in project attachments. ")
                 .Append("Step success is not proof of Operation-owned Capture shutdown.\r\n");
+            if (summary.logSummary?.blockingGroups?.Length > 0)
+            {
+                text.AppendLine();
+                text.AppendLine("Blocking console groups");
+                foreach (var group in summary.logSummary.blockingGroups)
+                {
+                    var sample = group.representative;
+                    Field("Group", $"count={group.count}; sequence=[{group.firstSequence},{group.lastSequence}]; " +
+                        $"phase={sample.phaseId}; instance={sample.instanceId}; rule={sample.ruleId}; fingerprint={sample.fingerprint}");
+                    Field("Sample", sample.message);
+                }
+                Field("Omitted blocking groups", Number(summary.logSummary.omittedBlockingGroupCount));
+            }
             return text.ToString();
         }
 

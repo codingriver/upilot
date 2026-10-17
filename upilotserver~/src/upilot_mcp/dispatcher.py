@@ -61,7 +61,11 @@ class CommandDispatcher:
             "prefixes": dict(self.PREFIX_TIMEOUT_MS),
         }
 
-    async def call(self, request_id: str, name: str, payload: dict[str, Any], timeout_ms: int | None = None) -> ToolResponse:
+    async def call_maintenance_control(self, request_id: str, payload: dict[str, Any]) -> ToolResponse:
+        return await self.call(request_id, "service.restart", payload, _maintenance_control=True)
+
+    async def call(self, request_id: str, name: str, payload: dict[str, Any], timeout_ms: int | None = None,
+                   *, _maintenance_control: bool = False) -> ToolResponse:
         started = time.monotonic()
         call_started_at = int(time.time() * 1000)
         call_timeout_ms = self._resolve_timeout_ms(name, timeout_ms)
@@ -76,7 +80,10 @@ class CommandDispatcher:
                 {"command": name, "nextAction": "Pass Unity wire IDs as decimal strings."},
                 timing={"totalMs": 0, "queueMs": 0, "bridgeMs": 0, "unityExecutionMs": 0},
             )
-        if not self.transport.is_ready():
+        control_allowed = getattr(self.transport, "maintenance_control_allowed", None)
+        if _maintenance_control and (name != "service.restart" or not callable(control_allowed) or not control_allowed(payload)):
+            return fail(request_id, "SERVICE_RESTART_IDENTITY_CHANGED", "Current maintenance owner or authorization changed.")
+        if not self.transport.is_ready() and not _maintenance_control:
             wait_s = env_float("UPILOT_CALL_WAIT_READY_S", 300.0)
             waiter = getattr(self.transport, "wait_until_ready", None)
             if callable(waiter):
@@ -124,8 +131,10 @@ class CommandDispatcher:
 
         future = self.transport.register_pending(command_id)
         try:
+            send = (self.transport.send_maintenance_control(command_id, payload) if _maintenance_control
+                    else self.transport.send_command(command_id=command_id, name=name, payload=payload))
             await asyncio.wait_for(
-                self.transport.send_command(command_id=command_id, name=name, payload=payload),
+                send,
                 timeout=max(0.0, deadline - time.monotonic()),
             )
         except asyncio.TimeoutError:
@@ -176,6 +185,15 @@ class CommandDispatcher:
             self.state.mark_failed(command_id, {"code": "CANCELLED", "message": "命令已取消",
                 "detail": {"outcome": "unknown", "replayAttempted": False}})
             raise
+
+        # Receive admission and continuation commit are separate await boundaries.
+        # A socket can be superseded after resolving the future but before this resumes.
+        check_connection = getattr(self.transport, "result_connection_current", None)
+        if callable(check_connection) and result.get("_connectionGeneration") and not check_connection(result):
+            result = {"type": "error", "payload": {
+                "code": "CONNECTION_CHANGED", "message": "Bridge connection changed before result commit.",
+                "detail": {"commandId": command_id, "outcome": "unknown", "replayAttempted": False},
+            }}
 
         # A prior recovery/timeout/cancellation terminal wins over any late result.
         record = self.state.commands.get(command_id)

@@ -37,6 +37,7 @@ namespace CodingRiver.UPilot
         private string _shutdownResetError = "";
         private ServerLaunchState _shutdownLaunch;
         private int _shutdownLaunchStartGeneration;
+        private bool _shutdownLaunchIdentityConfirmed;
         private string _restartShutdownOwnerId = "";
         internal Func<string, string> ServiceWorkResetOverride;
 
@@ -49,6 +50,8 @@ namespace CodingRiver.UPilot
         internal ServiceShutdownSnapshot BeginServiceShutdown(string ownerId, string phase, long deadlineUtcMs = 0)
         {
             if (string.IsNullOrEmpty(ownerId)) throw new ArgumentException("A shutdown owner is required.", nameof(ownerId));
+            // Revoke ordinary work before physical shutdown; never acquire Bridge state while holding ShutdownLock.
+            if (ReferenceEquals(this, Instance)) UPilotBridge.Instance.CloseOrdinaryAdmission("service_shutdown:" + phase);
             lock (ShutdownLock)
             {
                 var newOwner = _shutdownOwnerId != ownerId || !_shutdownStopping;
@@ -58,6 +61,7 @@ namespace CodingRiver.UPilot
                     _shutdownStartedTick = Stopwatch.GetTimestamp();
                     _shutdownResetPerformed = false; _shutdownResetError = "";
                     _shutdownLaunch = null; _shutdownReplacementEligible = false;
+                    _shutdownLaunchIdentityConfirmed = false;
                 }
                 _shutdownOwnerId = ownerId; _shutdownPhase = phase ?? "stopping";
                 _shutdownStopping = true;
@@ -169,6 +173,7 @@ namespace CodingRiver.UPilot
                 ++_shutdownGeneration;
                 _shutdownStopping = false; _shutdownReplacementEligible = true; _shutdownPhase = "replacement_verifying";
                 _shutdownLaunch = _launchState; _shutdownLaunchStartGeneration = _startAttemptGeneration;
+                _shutdownLaunchIdentityConfirmed = false;
                 Logger.Lifecycle("replacement_handshake_allowed", $"{CaptureServiceShutdown().Detail} launcherPid={_launchState.launcherPid} startGeneration={_shutdownLaunchStartGeneration}");
             }
         }
@@ -182,10 +187,17 @@ namespace CodingRiver.UPilot
                 (_shutdownDeadlineUtcMs <= 0 || StopNow < _shutdownDeadlineUtcMs);
         }
 
+        private void ConfirmOwnedResetLaunchIdentity(ServerLaunchState state, ServiceShutdownSnapshot captured)
+        {
+            lock (ShutdownLock)
+                if (MatchesOwnedResetLaunch(captured) && ReferenceEquals(state, _shutdownLaunch) && state.verified)
+                    _shutdownLaunchIdentityConfirmed = true;
+        }
+
         internal bool IsOwnedResetVerificationPending(ServiceShutdownSnapshot captured)
         {
             lock (ShutdownLock) return MatchesOwnedResetLaunch(captured) &&
-                (!_shutdownLaunch.verified || _launchNeedsRevalidation);
+                (!_shutdownLaunch.verified || !_shutdownLaunchIdentityConfirmed);
         }
 
         internal bool CanReuseOwnedReset(ServiceShutdownSnapshot captured, string serverLifetime, string serverInstanceId, out string ownerId)
@@ -193,7 +205,7 @@ namespace CodingRiver.UPilot
             lock (ShutdownLock)
             {
                 ownerId = "";
-                if (!MatchesOwnedResetLaunch(captured) || !_shutdownLaunch.verified || _launchNeedsRevalidation ||
+                if (!MatchesOwnedResetLaunch(captured) || !_shutdownLaunch.verified || !_shutdownLaunchIdentityConfirmed ||
                     string.IsNullOrEmpty(serverLifetime) || string.IsNullOrEmpty(serverInstanceId) ||
                     serverInstanceId != _shutdownLaunch.instanceId ||
                     _shutdownLaunch.servicePid <= 0 || _shutdownLaunch.serviceCreatedAt <= 0 || _trackedProcess == null)
@@ -221,6 +233,7 @@ namespace CodingRiver.UPilot
                 _shutdownStartedTick = 0;
                 _shutdownStopping = false; _shutdownReplacementEligible = false;
                 _shutdownResetPerformed = false; _shutdownResetError = ""; _shutdownLaunch = null;
+                _shutdownLaunchIdentityConfirmed = false;
             }
         }
     }

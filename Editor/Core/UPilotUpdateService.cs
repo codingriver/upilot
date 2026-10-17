@@ -808,7 +808,8 @@ namespace CodingRiver.UPilot
         internal async Task<bool> InstallManagedServerAfterPackageUpdateAsync(
             string expectedServerVersion,
             bool shouldRestart,
-            Action<string, MessageType> notice = null)
+            Action<string, MessageType> notice = null,
+            long startupDeadlineUtcMs = 0)
         {
             if (CompleteIfSourceUpdateChannel(notice))
                 return false;
@@ -835,14 +836,16 @@ namespace CodingRiver.UPilot
                 expectedServerVersion,
                 shouldRestart,
                 stopFirst: false,
-                notice: notice);
+                notice: notice,
+                startupDeadlineUtcMs: startupDeadlineUtcMs);
         }
 
         internal async Task<bool> ActivatePreparedManagedServerAfterPackageUpdateAsync(
             string preparedServerPath,
             string expectedServerVersion,
             bool shouldRestart,
-            Action<string, MessageType> notice = null)
+            Action<string, MessageType> notice = null,
+            long startupDeadlineUtcMs = 0)
         {
             if (CompleteIfSourceUpdateChannel(notice))
                 return false;
@@ -898,7 +901,8 @@ namespace CodingRiver.UPilot
             return await RestartAndConfirmManagedServerAsync(
                 expectedServerVersion,
                 notice,
-                failureNotice: "UPilot 包已更新，但服务未能自动启动。请在主窗口点击启动或重启服务。");
+                failureNotice: "UPilot 包已更新，但服务未能自动启动。请在主窗口点击启动或重启服务。",
+                startupDeadlineUtcMs: startupDeadlineUtcMs);
         }
 
         private async Task<UPilotPreparedServerDownload> InstallManagedServerBeforePackageUpdateAsync(
@@ -1199,7 +1203,8 @@ namespace CodingRiver.UPilot
             string expectedServerVersion,
             bool shouldRestart,
             bool stopFirst,
-            Action<string, MessageType> notice)
+            Action<string, MessageType> notice,
+            long startupDeadlineUtcMs = 0)
         {
             if (CompleteIfSourceUpdateChannel(notice))
                 return false;
@@ -1267,33 +1272,58 @@ namespace CodingRiver.UPilot
             return await RestartAndConfirmManagedServerAsync(
                 expectedServerVersion,
                 notice,
-                failureNotice: "MCP 服务已更新，但未能自动启动。请在主窗口点击启动或重启服务。");
+                failureNotice: "MCP 服务已更新，但未能自动启动。请在主窗口点击启动或重启服务。",
+                startupDeadlineUtcMs: startupDeadlineUtcMs);
         }
 
         private static async Task<bool> RestartAndConfirmManagedServerAsync(
             string expectedServerVersion,
             Action<string, MessageType> notice,
-            string failureNotice)
+            string failureNotice,
+            long startupDeadlineUtcMs = 0)
         {
+            var operationId = Instance.GetOperationStatus().OperationId;
             var manager = UPilotMcpServerManager.Instance;
-            manager.ValidateAndAutoFixPath();
-            manager.StartServer();
-            UPilotBridge.Instance.EnsureStarted();
-            var runningVersion = await manager.WaitForServerVersionAsync(expectedServerVersion);
-            if (string.IsNullOrWhiteSpace(runningVersion) ||
-                UPilotServerRuntimeService.CompareVersions(runningVersion, expectedServerVersion) < 0)
+            try
             {
-                var versionText = string.IsNullOrWhiteSpace(runningVersion) ? "未能读取版本" : runningVersion;
-                var message = $"MCP 服务已更新，但启动确认失败（当前：{versionText}，期望：{expectedServerVersion}），请检查服务日志";
-                SetOperationFailed(message);
-                notice?.Invoke(message, MessageType.Error);
-                UPilotMainWindow.OpenWithNotice(failureNotice, MessageType.Warning);
+                if (startupDeadlineUtcMs > 0 && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= startupDeadlineUtcMs)
+                    throw new TimeoutException("包更新恢复的原定期限已结束，未再次启动服务。");
+                manager.ValidateAndAutoFixPath();
+                manager.StartServer();
+                UPilotBridge.Instance.EnsureStarted();
+                var status = await manager.WaitForVerifiedStartupAsync(expectedServerVersion, startupDeadlineUtcMs);
+                var current = Instance.GetOperationStatus();
+                if (current.OperationId != operationId || !current.IsRunning) return false;
+                SetOperationCompleted($"MCP 服务已更新并通过启动验证，当前版本 {status.ServerVersion}");
+                notice?.Invoke($"MCP 服务已更新并通过启动验证，当前版本 {status.ServerVersion}", MessageType.Info);
+                return true;
+            }
+            catch (OperationCanceledException)
+            {
+                var current = Instance.GetOperationStatus();
+                if (current.OperationId == operationId && current.IsRunning)
+                {
+                    SetOperationCompleted("MCP 服务启动验证已取消");
+                    notice?.Invoke("MCP 服务启动验证已取消", MessageType.Info);
+                }
                 return false;
             }
-
-            SetOperationCompleted($"MCP 服务已更新并启动，当前版本 {runningVersion}");
-            notice?.Invoke($"MCP 服务已更新并启动，当前版本 {runningVersion}", MessageType.Info);
-            return true;
+            catch (Exception ex)
+            {
+                var message = $"MCP 服务已更新，但启动验证失败（期望版本：{expectedServerVersion}）：{ex.Message}";
+                var current = Instance.GetOperationStatus();
+                if (current.OperationId == operationId && current.IsRunning)
+                {
+                    SetOperationFailed(message);
+                    ReportUpdateFailure(message, ex);
+                    notice?.Invoke(message, MessageType.Error);
+                    UPilotMainWindow.OpenWithNotice(failureNotice, MessageType.Error);
+                }
+                else
+                    Logger.ReportFailure("UPDATE", $"operationId={operationId} {message}", ex,
+                        "update|" + operationId, terminal: true);
+                return false;
+            }
         }
 
         public async void UpdateUpmFromManifest(Action<string, MessageType> notice)

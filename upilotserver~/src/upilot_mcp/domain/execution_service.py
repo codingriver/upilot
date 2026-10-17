@@ -221,7 +221,8 @@ def normalize_execution_error(response: ToolResponse) -> ToolResponse:
     if nested is not detail:
         for key in ("sourceSpan", "lastCompletedSpan", "diagnostics", "candidates", "executionDiagnostics",
                     "resourceDiagnostics", "resourceDiagnosticsDroppedCount",
-                    "resource", "limit", "used", "requestedTypeName", "nextAction", "sideEffectsMayHaveOccurred"):
+                    "resource", "metric", "actual", "limit", "used", "requestedTypeName", "nextAction", "sideEffectsMayHaveOccurred",
+                    "exceptionType", "exceptionMessage", "stackTrace", "wrapperExceptionType", "cleanupDiagnostics", "sessionId"):
             if key in nested:
                 detail[key] = nested[key]
     return response

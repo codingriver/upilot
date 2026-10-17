@@ -16,6 +16,7 @@ namespace CodingRiver.UPilot
         private long _helloConnectionEpoch;
         private PendingHello _pendingOwnedHello;
         private PendingHello _pendingAuthenticationHello;
+        private PendingHello _identityHello;
         private string _boundServerLifetime;
         private long _lastReceivedHelloEpoch = -1;
         private string _lastReceivedHelloId;
@@ -66,6 +67,7 @@ namespace CodingRiver.UPilot
                 if (!_started || token.IsCancellationRequested || _cts == null || _cts.Token != token) return false;
                 epoch = ++_helloConnectionEpoch;
                 wasAuthenticated = _isAuthenticated;
+                CloseOrdinaryAdmissionLocked();
                 _ws = socket;
                 _isAuthenticated = false;
                 _admissionClosed = true;
@@ -87,6 +89,7 @@ namespace CodingRiver.UPilot
                 mayClose = current || !ReferenceEquals(socket, _ws);
                 if (current)
                 {
+                    CloseOrdinaryAdmissionLocked();
                     _ws = null;
                     _isAuthenticated = false;
                     _admissionClosed = true;
@@ -108,7 +111,8 @@ namespace CodingRiver.UPilot
             {
                 if (!string.IsNullOrEmpty(envelope.id) && _lastReceivedHelloEpoch == receivingEpoch &&
                     _lastReceivedHelloId == envelope.id) return;
-                if (IsConnectionCycleCurrentLocked(receivingSocket, receivingEpoch, token) && envelope.sessionId == _sessionId)
+                if (IsConnectionCycleCurrentLocked(receivingSocket, receivingEpoch, token) && envelope.sessionId == _sessionId &&
+                    !string.IsNullOrEmpty(_readyHelloId) && envelope.id == _readyHelloId)
                 {
                     _lastReceivedHelloEpoch = receivingEpoch;
                     _lastReceivedHelloId = envelope.id;
@@ -135,6 +139,7 @@ namespace CodingRiver.UPilot
                     var payload = hello.Ack?.payload;
                     _pendingAuthenticationHello = payload != null && payload.accepted &&
                         payload.identityContractVersion == IdentityContractVersion &&
+                        payload.bridgeReadyContractVersion == BridgeReadyContractVersion &&
                         !string.IsNullOrEmpty(payload.verificationLevel) ? hello : null;
                 }, hello.SessionId))
             {
@@ -188,8 +193,38 @@ namespace CodingRiver.UPilot
                 { reason = "connection_cycle_changed"; return false; }
                 if (hello.Socket != null && hello.Socket.State != WebSocketState.Open)
                 { reason = "socket_not_open"; return false; }
+                // Called at receipt and again before main-thread apply: only the exact sent challenge may bind.
+                if (string.IsNullOrEmpty(_readyHelloId) || hello.Ack?.id != _readyHelloId)
+                { reason = "hello_id_mismatch"; return false; }
             }
             return LifecycleManager.CanApplyHello(hello.Shutdown, out reason);
+        }
+
+        // Candidate ACK is observable before authentication so OS verification cannot deadlock with hello.
+        // Never synthesize this identity from /health, cached status or a previous socket.
+        internal bool TryGetServerIdentity(out UPilotServerHealth identity)
+        {
+            identity = null;
+            lock (ConnectionStateLock)
+            {
+                var hello = _pendingAuthenticationHello ?? _identityHello;
+                if (hello == null || hello.Discarded || hello.Socket?.State != WebSocketState.Open || !CanApplyHello(hello, out _) ||
+                    !IsConnectionCycleCurrentLocked(hello.Socket, hello.ConnectionEpoch, hello.Token)) return false;
+                var p = hello.Ack?.payload;
+                if (p == null || !p.accepted || p.identityContractVersion != IdentityContractVersion ||
+                    p.bridgeReadyContractVersion != BridgeReadyContractVersion || p.server_pid <= 0 ||
+                    string.IsNullOrEmpty(p.configured_project_path) || string.IsNullOrEmpty(p.server_instance_id)) return false;
+                identity = new UPilotServerHealth {
+                    server_pid = p.server_pid, configured_project_path = p.configured_project_path,
+                    project_path = p.configured_project_path, server_instance_id = p.server_instance_id,
+                    bridge_session_id = hello.SessionId, identity_contract_version = p.identityContractVersion,
+                    server_version = p.server_version, protocol_version = p.protocol_version,
+                    build_channel = p.build_channel, build_commit = p.build_commit,
+                    server_started_at_ms = p.server_started_at_ms, server_entry_path = p.server_entry_path,
+                    server_module_root = p.server_module_root, server_install_source = p.server_install_source,
+                };
+                return true;
+            }
         }
 
         private static string KnownHelloIdentity(string value) => string.IsNullOrEmpty(value) ? "unknown" : value;
@@ -284,6 +319,30 @@ namespace CodingRiver.UPilot
                 return;
             }
 
+            if (payload.bridgeReadyContractVersion != BridgeReadyContractVersion)
+            {
+                RejectHello(hello, "READY_CONTRACT_MISMATCH", "Server and Bridge readiness contracts must be upgraded together.");
+                return;
+            }
+            if (payload.server_pid <= 0 || string.IsNullOrWhiteSpace(payload.configured_project_path) ||
+                string.IsNullOrWhiteSpace(payload.server_instance_id))
+            {
+                RejectHello(hello, "READY_IDENTITY_CONTRACT_MISMATCH",
+                    "Server readiness ACK lacks PID/project/instance identity; deploy the paired Server and Bridge. No Health fallback.");
+                return;
+            }
+            if (!UPilotDeploymentDiagnostics.SamePath(payload.configured_project_path, UPilotProjectConfig.ProjectRoot))
+            {
+                RejectHello(hello, "READY_PROJECT_IDENTITY_MISMATCH", "Server readiness ACK identifies a different project.");
+                return;
+            }
+            if (!LifecycleManager.CanAuthenticateServerHello(payload))
+            {
+                if (!TryUpdateConnectionCycle(hello.Socket, hello.ConnectionEpoch, hello.Token,
+                    () => _pendingOwnedHello = hello, hello.SessionId))
+                    DiscardHello(hello, "connection_cycle_changed");
+                return;
+            }
             var serverLifetime = payload.serverLifecycleId;
             var previous = SessionState.GetString(ServerLifetimeSessionKey, "");
             var decision = string.IsNullOrEmpty(serverLifetime) ? "legacy_binding" :
@@ -343,7 +402,10 @@ namespace CodingRiver.UPilot
                 _mcpPortFromServer = payload.mcpPort;
                 _mcpWorkspacePathFromServer = payload.mcpWorkingDirectory ?? "";
                 _authenticationErrorCode = ""; _authenticationError = ""; _authenticationFailureAtUtcMs = 0;
-                _resettingWork = false; _admissionClosed = false; _isAuthenticated = true;
+                _resettingWork = false; _admissionClosed = true; _isAuthenticated = true;
+                _readyServerInstanceId = payload.server_instance_id;
+                _initializingHello = hello;
+                _identityHello = hello;
                 _lastAuthenticatedAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 if (ReferenceEquals(_pendingOwnedHello, hello)) _pendingOwnedHello = null;
                 if (ReferenceEquals(_pendingAuthenticationHello, hello)) _pendingAuthenticationHello = null;
@@ -358,7 +420,7 @@ namespace CodingRiver.UPilot
             UPilotQuickStart.NotifyDeploymentChanged();
             UPilotOperationTracker.Instance.RecordSystemEvent("sys.auth.success", "认证成功",
                 $"sessionId={_sessionId} {FormatMcpServerHintForLog()}");
-            if (_ws?.State == WebSocketState.Open) _ = SendEditorStateEventAsync(hello.Token);
+            // First data is requested by the Server after this frame has refreshed the Editor observation.
         }
 
         private void RejectHello(PendingHello hello, string code, string message)

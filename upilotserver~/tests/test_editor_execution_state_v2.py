@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from bridge_readiness_helpers import mark_bridge_ready
 from upilot_mcp.config import CONFIG
 from upilot_mcp.dispatcher import CommandDispatcher
 from upilot_mcp.domain.status_service import StatusDomainService
@@ -362,6 +363,8 @@ def test_v2_heartbeat_notifies_pending_batch_coordinator_in_same_lifetime(tmp_pa
     async def scenario() -> None:
         server = WsOrchestratorServer()
         server.state.configure_project(str(tmp_path))
+        server.session_manager.on_hello("session-a", {"projectPath": str(tmp_path)})
+        mark_bridge_ready(server)
         batch = server.state.register_write_batch(
             [str(tmp_path / "A.cs")], created_at=1000, files_sha256="a", compile_when_edit_mode=True
         )

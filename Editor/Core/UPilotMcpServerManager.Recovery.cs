@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT
 using System;
 using System.IO;
 using System.Linq;
@@ -37,6 +37,7 @@ namespace CodingRiver.UPilot
             public long discoveryWorkMs, discoveryDispatchDelayMs, discoveryResumeDelayMs, healthElapsedMs, readOnlyElapsedMs;
             [NonSerialized] internal long validationStartedTicks;
             [NonSerialized] internal string lastLoggedValidationState;
+            [NonSerialized] internal ServerStopResult? verifiedStopResult;
         }
 
         // Isolated acceptance supplies a real process launcher without touching the global Bridge.
@@ -45,6 +46,9 @@ namespace CodingRiver.UPilot
         private ExistingServiceRecoveryRecord _existingServiceRecovery;
         private CancellationTokenSource _existingServiceRecoveryCancellation;
         private ServerStopTarget _recoveredServiceTarget;
+        // Borrowed only during the existing discovery round; no ownership transfer or new observer.
+        private ServerStopTarget _helloCandidateTarget;
+        private string _helloCandidateInstance;
         private ServerLaunchSpec _recoveredServiceSpec;
         private string _recoveredServiceInstanceId;
         private bool _automaticStartRequest;
@@ -119,9 +123,11 @@ namespace CodingRiver.UPilot
         internal bool ExistingServiceRecoveryOwnsStartup => _existingServiceRecovery != null;
         internal bool ExistingServiceReplacementNeedsReceiptRestore =>
             _existingServiceRecovery?.status == "replacement_started" || _existingServiceRecovery?.replacementRestoreBlocked == true;
-        internal string ExistingServiceRecoveryFailure => _existingServiceRecovery?.status == "failed"
+        private bool HasExistingServiceRecoveryFailure => _existingServiceRecovery?.status == "failed" ||
+            (_existingServiceRecovery?.status == "stopped" && !string.IsNullOrEmpty(_existingServiceRecovery.error));
+        internal string ExistingServiceRecoveryFailure => HasExistingServiceRecoveryFailure
             ? _existingServiceRecovery.error : "";
-        internal string ExistingServiceRecoveryFailureId => _existingServiceRecovery?.status == "failed"
+        internal string ExistingServiceRecoveryFailureId => HasExistingServiceRecoveryFailure
             ? _existingServiceRecovery.id ?? "" : "";
         internal bool HasVerifiedRecoveredAttachment
         {
@@ -268,22 +274,22 @@ namespace CodingRiver.UPilot
 
         internal static bool CanReuseExistingService(McpServerStatus status, string projectPath, int processId,
             bool alive, bool ownsHttp, bool ownsWs) => alive && ownsHttp && ownsWs && processId > 0 &&
-            status.HealthEndpointResponded && status.HealthIdentifiesUPilot && status.HealthServerProcessId == processId &&
-            !string.IsNullOrEmpty(status.Health?.server_instance_id) &&
-            UPilotDeploymentDiagnostics.SamePath(status.HealthProjectPath, projectPath);
+            status.IdentityAvailable && status.IdentityIdentifiesUPilot && status.IdentityServerProcessId == processId &&
+            !string.IsNullOrEmpty(status.Identity?.server_instance_id) &&
+            UPilotDeploymentDiagnostics.SamePath(status.IdentityProjectPath, projectPath);
 
         private static string ExistingServiceOwnershipBlock(McpServerStatus status, string projectPath,
             ServerStopTarget target, bool ownsHttp, bool ownsWs, bool unmatchedOwners)
         {
-            if (!status.HealthEndpointResponded) return "health_unavailable";
-            if (!status.HealthIdentifiesUPilot) return "health_identity_missing";
+            if (!status.IdentityAvailable) return "hello_identity_unavailable";
+            if (!status.IdentityIdentifiesUPilot) return "hello_identity_missing";
             if (target == null) return "process_not_discovered";
             if (target.HasExited) return "process_exited";
             if (!ownsHttp) return "http_owner_unverified";
             if (!ownsWs) return "ws_owner_unverified";
-            if (status.HealthServerProcessId != target.ProcessId || target.ProcessId <= 0) return "health_pid_mismatch";
-            if (string.IsNullOrEmpty(status.Health?.server_instance_id)) return "server_instance_missing";
-            if (!UPilotDeploymentDiagnostics.SamePath(status.HealthProjectPath, projectPath)) return "project_mismatch";
+            if (status.IdentityServerProcessId != target.ProcessId || target.ProcessId <= 0) return "hello_pid_mismatch";
+            if (string.IsNullOrEmpty(status.Identity?.server_instance_id)) return "server_instance_missing";
+            if (!UPilotDeploymentDiagnostics.SamePath(status.IdentityProjectPath, projectPath)) return "project_mismatch";
             return unmatchedOwners ? "unmatched_port_owner" : "";
         }
 
@@ -312,30 +318,32 @@ namespace CodingRiver.UPilot
                         try
                         {
                             record.validationAttemptCount++;
-                            record.validationStage = "health";
+                            record.validationStage = "identity";
                             var healthStartedAt = Stopwatch.GetTimestamp();
                             McpServerStatus status;
                             try { status = await GetRestartHealthAsync(client, scope.HttpPort, record.reuseDeadline, token, this, 1000); }
                             finally { record.healthElapsedMs += Logger.LifecycleElapsedMs(healthStartedAt); }
                             token.ThrowIfCancellationRequested();
-                            var target = discovery.Targets.FirstOrDefault(p => p.ProcessId == status.HealthServerProcessId);
-                            var ownsHttp = discovery.ListeningPorts.TryGetValue(status.HealthServerProcessId, out var ports) &&
+                            var target = discovery.Targets.FirstOrDefault(p => p.ProcessId == status.IdentityServerProcessId);
+                            var ownsHttp = discovery.ListeningPorts.TryGetValue(status.IdentityServerProcessId, out var ports) &&
                                 ports.Contains(scope.HttpPort);
                             var ownsWs = ports != null && ports.Contains(scope.WsPort);
                             var ownershipBlock = ExistingServiceOwnershipBlock(status, scope.ProjectPath, target,
                                 ownsHttp, ownsWs, discovery.UnmatchedPortOwners.Length > 0);
                             if (ownershipBlock.Length == 0)
                             {
+                                _helloCandidateInstance = status.Identity.server_instance_id;
+                                _helloCandidateTarget = target;
                                 status.ProcessId = target.ProcessId;
                                 status.IsRunning = status.HttpPortListening = status.WsPortListening = true;
                                 status.ProcessOwnership = McpProcessOwnership.CurrentUPilot;
-                                status.ProcessOwnershipEvidence = "当前精确入口及双端口参数、活体句柄与 health PID 已核实";
+                                status.ProcessOwnershipEvidence = "当前精确入口及双端口参数、活体句柄与当前 ACK PID 已核实";
                                 var bridge = UPilotBridge.Instance.GetStatus();
                                 var bridgeBlock = !bridge.IsWsOpen ? "bridge_closed" : !bridge.IsAuthenticated ? "bridge_not_authenticated" :
                                     string.IsNullOrEmpty(bridge.SessionId) ? "bridge_session_missing" :
-                                    status.Health?.bridge_session_id != bridge.SessionId ? "bridge_session_mismatch" : "";
+                                    status.Identity?.bridge_session_id != bridge.SessionId ? "bridge_session_mismatch" : "";
                                 var deployment = bridgeBlock.Length == 0 ? UPilotDeploymentDiagnostics.Observe(bridge, status, record.spec) : null;
-                                if (bridgeBlock.Length == 0 && deployment.Length == 0)
+                                if (bridgeBlock.Length == 0 && !deployment.Any(issue => issue.Blocking))
                                 {
                                     record.validationStage = "readonly";
                                     var readOnlyStartedAt = Stopwatch.GetTimestamp();
@@ -347,18 +355,18 @@ namespace CodingRiver.UPilot
                                         DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() < record.reuseDeadline &&
                                         after.IsWsOpen && after.IsAuthenticated && after.SessionId == bridge.SessionId)
                                     {
-                                        discovery.Targets.Remove(target);
-                                        lock (_statusLock)
+                                        if (!CacheVerifiedStartupStatus(status, lifecycle, bridge.SessionId, () =>
                                         {
+                                            discovery.Targets.Remove(target);
                                             _recoveredServiceTarget = target;
                                             _recoveredServiceSpec = record.spec.Snapshot();
-                                            _recoveredServiceInstanceId = status.Health.server_instance_id;
-                                        }
-                                        record.status = "reused"; record.error = "";
-                                        RecordExistingServiceValidation(record, "verified");
-                                        SaveExistingServiceRecovery();
-                                        ResetStopObservation("new_service_start_or_restart");
-                                        if (EndLifecyclePhase(lifecycle)) CacheVerifiedStartupStatus(status);
+                                            _recoveredServiceInstanceId = status.Identity.server_instance_id;
+                                            record.status = "reused"; record.error = "";
+                                            RecordExistingServiceValidation(record, "verified");
+                                            SaveExistingServiceRecovery();
+                                            ResetStopObservation("new_service_start_or_restart");
+                                            return true;
+                                        })) throw new LifecycleProbeDeferredException();
                                         Logger.CloseDiagnostics(record.id);
                                         UnityEngine.Debug.Log($"[UPilotMcpServerManager] 已复用遗留服务；PID={target.ProcessId}；HTTP={scope.HttpPort}；WS={scope.WsPort}；recoveryId={record.id}；当前 Bridge 及实际只读调用已验证。");
                                         FinishExistingServiceRecoveryWork(record, cancellation);
@@ -393,6 +401,8 @@ namespace CodingRiver.UPilot
             }
             finally
             {
+                _helloCandidateTarget = null;
+                _helloCandidateInstance = null;
                 Logger.Lifecycle("recovery_validation_completed", $"recoveryId={record.id} status={record.status} " +
                     $"stage={record.validationStage} lastBlockReason={record.lastBlockReason} attempts={record.validationAttemptCount} " +
                     $"elapsedMs={RecoveryDuration(Logger.LifecycleElapsedMs(record.validationStartedTicks), record.validationStartedTicks > 0)} " +
@@ -410,6 +420,10 @@ namespace CodingRiver.UPilot
                     restartGeneration != _restartGeneration) return;
                 if (record.status == "reused") return;
                 if (revalidateOnly) throw validationError ?? new InvalidOperationException("重载后的遗留服务附着未通过验证。");
+                var authenticationCode = UPilotBridge.Instance.GetStatus().AuthenticationErrorCode;
+                if (authenticationCode == "READY_CONTRACT_MISMATCH" || authenticationCode == "READY_IDENTITY_CONTRACT_MISMATCH" ||
+                    authenticationCode == "identity_contract_mismatch" || authenticationCode == "READY_PROJECT_IDENTITY_MISMATCH")
+                    throw new InvalidOperationException("配套就绪协议或项目身份不兼容，未自动重启或重新安装：" + authenticationCode);
                 Logger.ReportWarning("SERVER", $"遗留服务复用验证失败，将在原期限内清理并启动一次；recoveryId={record.id}；" + validationError,
                     record.id, "existing-service-reuse");
                 record.status = "cleaning";
@@ -457,6 +471,7 @@ namespace CodingRiver.UPilot
             if (record.replacementStarted) throw new InvalidOperationException("本次遗留服务恢复已派发一次启动，不重复派发。");
             if (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= record.deadline)
                 throw new TimeoutException("遗留服务清理后原恢复期限已到，未启动新服务。");
+            record.verifiedStopResult = stopped;
             record.replacementStarted = true; record.status = "replacement_starting";
             SaveExistingServiceRecovery(); // Persist intent before the single Process.Start.
             if (ExistingServiceReplacementStartOverride != null)
@@ -727,6 +742,7 @@ namespace CodingRiver.UPilot
             var cancellation = _existingServiceRecoveryCancellation;
             _existingServiceRecoveryCancellation = null;
             record.status = "stopped";
+            record.error = "service_reset：服务生命周期已变化，本次恢复验证已中断；尚未确认服务就绪，请检查当前状态后明确启动或重启。";
             _startInProgress = false;
             cancellation?.Cancel();
             SaveExistingServiceRecovery();
@@ -734,6 +750,9 @@ namespace CodingRiver.UPilot
             ReleaseRecoveredServiceAttachment();
             Logger.Lifecycle("recovery_superseded", $"recoveryId={record.id} stopId={record.stopObservationId} " +
                 $"reason=service_reset deadlineUtcMs={record.deadline}");
+            Logger.ReportFailure("SERVER", $"服务恢复验证被生命周期重置中断；recoveryId={record.id}；project={record.projectPath}；" +
+                $"HTTP={record.spec?.httpPort.ToString() ?? "unknown"}；WS={record.spec?.wsPort.ToString() ?? "unknown"}；" +
+                $"deadlineUtcMs={record.deadline}；reason=service_reset。{record.error}", scope: record.id, terminal: true);
         }
 
         private void BeforeExistingServiceRecoveryReload()
@@ -749,10 +768,10 @@ namespace CodingRiver.UPilot
         {
             lock (_statusLock)
             {
-                if (!HasVerifiedRecoveredAttachment || !status.HealthEndpointResponded || !status.HealthIdentifiesUPilot ||
-                    status.HealthServerProcessId != _recoveredServiceTarget.ProcessId ||
-                    status.Health?.server_instance_id != _recoveredServiceInstanceId ||
-                    !UPilotDeploymentDiagnostics.SamePath(status.HealthProjectPath, _recoveredServiceSpec.projectPath)) return false;
+                if (!HasVerifiedRecoveredAttachment || !status.IdentityAvailable || !status.IdentityIdentifiesUPilot ||
+                    status.IdentityServerProcessId != _recoveredServiceTarget.ProcessId ||
+                    status.Identity?.server_instance_id != _recoveredServiceInstanceId ||
+                    !UPilotDeploymentDiagnostics.SamePath(status.IdentityProjectPath, _recoveredServiceSpec.projectPath)) return false;
                 status.ProcessId = _recoveredServiceTarget.ProcessId;
                 status.IsRunning = true;
                 status.ProcessOwnership = McpProcessOwnership.CurrentUPilot;

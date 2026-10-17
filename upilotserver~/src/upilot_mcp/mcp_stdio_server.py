@@ -509,6 +509,15 @@ async def _run_http_server(
         payload.update(tool_summary)
         payload.update(config_status)
         payload.update(version_payload())
+        readiness = _orchestrator.bridge_readiness_status() if _orchestrator else {
+            "bridgeReadyContractVersion": 1, "bridgeReady": False,
+            "connectionPhase": "disconnected", "bootstrapReceipt": None,
+        }
+        payload.update(readiness)
+        payload["bridge_ready"] = readiness["bridgeReady"]
+        payload["bridge_ready_contract_version"] = readiness["bridgeReadyContractVersion"]
+        payload["connection_phase"] = readiness["connectionPhase"]
+        payload["bootstrap_receipt"] = readiness["bootstrapReceipt"]
         payload["configured_project_path"] = str(configured_project_root().resolve())
         payload["bridge_session_id"] = session.session_id if session else ""
         # Bounded transport evidence; never return the underlying event history.
@@ -531,7 +540,12 @@ async def _run_http_server(
             ),
         }
         observation_builder = getattr(_orchestrator, "editor_observation", None) if _orchestrator else None
-        if callable(observation_builder):
+        if not connected:
+            payload["editor_observation"] = {
+                "status": "unknown", "reason": readiness["connectionPhase"],
+                "observed_at_ms": now_ms,
+            }
+        elif callable(observation_builder):
             try:
                 payload["editor_observation"] = observation_builder(
                     observed_at_ms=now_ms, network_connected=connected
@@ -562,29 +576,71 @@ async def _run_http_server(
                 payload["bridge_probe_error"] = "Bridge session is absent or changed."
             else:
                 command_id = new_id("repair-probe")
-                pending = _orchestrator.register_pending(command_id)
+                probe_server = _orchestrator
+                pending = probe_server.register_pending(command_id)
                 probe_started_at = time.monotonic()
+                async def observe_probe():
+                    await probe_server.send_command(command_id, "editor.state", {})
+                    return await pending
                 try:
-                    await _orchestrator.send_command(command_id, "editor.state", {})
-                    result = await asyncio.wait_for(pending, timeout=5.0)
+                    result = await asyncio.wait_for(observe_probe(), timeout=5.0)
                     payload["bridge_probe_ok"] = (
                         result.get("type") == "result"
                         and result.get("name") == "editor.state"
                         and result.get("sessionId") == expected_session
-                        and _orchestrator.session_manager.active is session
+                        and _orchestrator is probe_server
+                        and probe_server.session_manager.active is session
+                        and probe_server.result_connection_current(result)
                     )
                     if not payload["bridge_probe_ok"]:
                         payload["bridge_probe_error"] = "Read-only response or session did not match."
                 except (asyncio.TimeoutError, ConnectionError, OSError) as ex:
                     payload["bridge_probe_error"] = (type(ex).__name__ + ": " + str(ex))[:256]
-                    logger.warning(
+                    logger.error(
                         "[UPilot][Health] Bridge 只读探测失败 serverPid=%s project=%s "
                         "phase=bridge_roundtrip elapsedMs=%.1f exceptionType=%s",
                         payload["server_pid"], payload["configured_project_path"].replace("\r", " ").replace("\n", " ")[:512],
                         max(0.0, (time.monotonic() - probe_started_at) * 1000), type(ex).__name__,
+                        exc_info=True,
                     )
                 finally:
-                    _orchestrator.unregister_pending(command_id)
+                    probe_server.unregister_pending(command_id)
+                    current_session = _orchestrator.session_manager.active if _orchestrator else None
+                    current_readiness = _orchestrator.bridge_readiness_status() if _orchestrator else {
+                        "bridgeReadyContractVersion": 1, "bridgeReady": False,
+                        "connectionPhase": "disconnected", "bootstrapReceipt": None,
+                    }
+                    same_owner = bool(_orchestrator is probe_server and current_session is session
+                                      and readiness["bootstrapReceipt"]
+                                      and current_readiness["bootstrapReceipt"] == readiness["bootstrapReceipt"])
+                    verified = bool(payload["bridge_probe_ok"] and same_owner and current_readiness["bridgeReady"])
+                    phase = current_readiness["connectionPhase"]
+                    if current_readiness["bridgeReady"] and not verified:
+                        phase = "connection_changed" if not same_owner else "probe_unverified"
+                    response_at = time.time()
+                    heartbeat_at = int(current_session.last_heartbeat_at) if current_session else 0
+                    payload.update(current_readiness)
+                    payload.update(_build_tool_availability_summary(
+                        flow_enabled=CONFIG.flow_enabled, connected=verified, server_ready=verified,
+                        write_access_approved=CONFIG.write_access_approved,
+                    ))
+                    payload.update({
+                        "bridge_probe_ok": verified, "unity_connected": verified,
+                        "bridgeReady": verified, "bridge_ready": verified,
+                        "connectionPhase": phase, "connection_phase": phase,
+                        "bootstrapReceipt": current_readiness["bootstrapReceipt"] if verified else None,
+                        "bootstrap_receipt": current_readiness["bootstrapReceipt"] if verified else None,
+                        "bridge_session_id": current_session.session_id if current_session else "",
+                        "project_path": current_session.project_path if current_session else "",
+                        "unity_version": current_session.unity_version if current_session else "",
+                        "heartbeat_age_ms": max(0, int(response_at * 1000) - heartbeat_at) if heartbeat_at else None,
+                        "timestamp": response_at,
+                    })
+                    if not verified:
+                        payload.setdefault("bridge_probe_error", "Bridge readiness or connection changed before probe response.")
+                        payload["editor_observation"] = {
+                            "status": "unknown", "reason": phase, "observed_at_ms": int(response_at * 1000),
+                        }
         return JSONResponse(payload)
 
     # Stats endpoint for the upilot status window
@@ -598,7 +654,7 @@ async def _run_http_server(
                 http_sessions = len(getattr(sm, "_sessions", {}))
         except Exception:
             pass
-        connected = bool(_orchestrator and _orchestrator.session_manager.is_connected())
+        connected = bool(_orchestrator and _orchestrator.is_ready())
         server_ready = bool(_orchestrator and _orchestrator.is_ready())
         tool_summary = _build_tool_availability_summary(
             flow_enabled=CONFIG.flow_enabled,

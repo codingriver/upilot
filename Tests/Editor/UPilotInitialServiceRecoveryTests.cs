@@ -173,6 +173,76 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(SessionState.GetString(LaunchKey, ""), Is.EqualTo(persistedSuccessor));
         }
 
+        [TestCase(false)]
+        [TestCase(true)]
+        public void DuplicateStartPreservesDispatchedLaunchUntilReadyVerification(bool identityVerified)
+        {
+            var manager = Manager();
+            Set(manager, "_initialServiceRecoveryCompleted", true);
+            Set(manager, "_stoppingProcesses", new List<System.Diagnostics.Process>());
+            Set(manager, "_startAttemptGeneration", 7);
+            Set(manager, "_restartGeneration", 9L);
+            Set(manager, "_restartOperationId", "");
+            var entry = Path.Combine(UPilotProjectConfig.ProjectRoot, "PendingLaunchFixture.exe");
+            manager.EndpointOverride = new UPilotMcpServerManager.ServerStopScope(
+                UPilotProjectConfig.ProjectRoot, entry, entry, 18011, 18765);
+            int mutations = 0;
+            manager.StopDiscoveryOverride = (_, _, _) => { ++mutations; throw new InvalidOperationException("Duplicate Start must not stop a service."); };
+            manager.StopTerminationOverride = _ => { ++mutations; throw new InvalidOperationException("Duplicate Start must not terminate a process."); };
+            manager.ExistingServiceShutdownOverride = _ => { ++mutations; throw new InvalidOperationException("Duplicate Start must not reset service work."); };
+            manager.ExistingServiceReplacementStartOverride = _ => { ++mutations; throw new InvalidOperationException("Duplicate Start must not dispatch a replacement."); };
+            using var current = System.Diagnostics.Process.GetCurrentProcess();
+            var deadline = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 60000;
+            var state = new ServerLaunchState {
+                spec = new ServerLaunchSpec { projectPath = UPilotProjectConfig.ProjectRoot,
+                    executablePath = entry, expectedEntry = entry, httpPort = 18011, wsPort = 18765 },
+                launcherPid = current.Id, launcherCreatedAt = current.StartTime.ToUniversalTime().Ticks,
+                deadlineUtcMs = deadline, verified = identityVerified, readyVerified = false,
+            };
+            Set(manager, "_launchState", state);
+            Set(manager, "_trackedProcessId", (int?)current.Id);
+            Set(manager, "_trackedProcessCreatedAtTicks", state.launcherCreatedAt);
+            manager.SetLifecyclePhase(identityVerified ? UPilotServerLifecyclePhase.Verifying : UPilotServerLifecyclePhase.Starting,
+                current.Id, "pending-launch-fixture", deadline);
+            Call(manager, "PersistLaunchState");
+            Call(manager, "BeginLaunchObservation");
+            var observer = Field<CancellationTokenSource>(manager, "_launchObservationCancellation");
+            var originalToken = observer.Token;
+            var persisted = SessionState.GetString(LaunchKey, "");
+            bool identityPreserved = false, observerPreserved = false, originalCanceled = false;
+            bool recoveryCreated = false, persistencePreserved = false;
+            int generation = -1;
+            long lifecycleDeadline = 0;
+            try
+            {
+                // Invoke the public entry while the first launch awaits identity/round-trip verification.
+                // This synchronous test never pumps Editor callbacks; cancellation below precedes any
+                // recovery continuation, and every stop/reset/replacement route is guarded above.
+                manager.StartServer();
+                identityPreserved = ReferenceEquals(Field<ServerLaunchState>(manager, "_launchState"), state);
+                observerPreserved = ReferenceEquals(Field<CancellationTokenSource>(manager, "_launchObservationCancellation"), observer);
+                originalCanceled = originalToken.IsCancellationRequested;
+                recoveryCreated = Field<object>(manager, "_existingServiceRecovery") != null;
+                persistencePreserved = SessionState.GetString(LaunchKey, "") == persisted;
+                generation = Field<int>(manager, "_startAttemptGeneration");
+                lifecycleDeadline = Field<long>(manager, "_lifecycleDeadlineUtcMs");
+            }
+            finally
+            {
+                Call(manager, "BeforeExistingServiceRecoveryReload");
+                Call(manager, "StopLaunchObservation");
+            }
+            Assert.That(mutations, Is.Zero);
+            Assert.That(identityPreserved, Is.True, "A repeated Start must retain the already-dispatched launch identity.");
+            Assert.That(observerPreserved && !originalCanceled, Is.True, "The original verification observer must remain responsible.");
+            Assert.That(recoveryCreated, Is.False, "The original launch must not be replaced with legacy-service recovery.");
+            Assert.That(persistencePreserved, Is.True);
+            Assert.That(generation, Is.EqualTo(7));
+            Assert.That(lifecycleDeadline, Is.EqualTo(deadline));
+            Assert.That(state.deadlineUtcMs, Is.EqualTo(deadline));
+            Assert.That(state.readyVerified, Is.False, "Merging a Start is not readiness evidence.");
+        }
+
         [TestCase("observing", false)]
         [TestCase("unverified", false)]
         [TestCase("succeeded", true)]

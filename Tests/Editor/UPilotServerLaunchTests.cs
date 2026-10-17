@@ -223,7 +223,10 @@ namespace CodingRiver.UPilot.Tests
                 }
                 Assert.That(manager.CompleteExplicitAttachmentFailure(state, 7, lifecycle, operation, exception), Is.False);
                 Assert.That(JsonUtility.ToJson(state), Is.EqualTo(original));
-                typeof(UPilotMcpServerManager).GetMethod("CacheVerifiedStartupStatus", flags).Invoke(manager, new object[] { status });
+                // Model a newly synchronized completion without consulting the live Editor Bridge.
+                manager.StateSynchronizedOverride = () => true;
+                Assert.That((bool)typeof(UPilotMcpServerManager).GetMethod("CacheVerifiedStartupStatus", flags)
+                    .Invoke(manager, new object[] { status, -1L, null, null }), Is.True);
                 Assert.That(manager.AttachmentFailure, Is.Null);
                 Assert.That(JsonUtility.ToJson(state), Is.EqualTo(original));
             }
@@ -510,7 +513,16 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(record.resetReceipt.error, Is.EqualTo(resetError));
             Assert.That(state.TryConfirm(editor.Id, editor.StartTime.ToUniversalTime().Ticks, "restored-instance",
                 DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()), Is.True);
-            typeof(UPilotMcpServerManager).GetField("_launchNeedsRevalidation", flags).SetValue(manager, false);
+            typeof(UPilotMcpServerManager).GetField("_launchNeedsRevalidation", flags).SetValue(manager, true);
+            Assert.That(manager.IsOwnedResetVerificationPending(shutdown), Is.True);
+            Assert.That(manager.CanReuseOwnedReset(shutdown, "replacement-lifetime", "restored-instance", out _), Is.False);
+            typeof(UPilotMcpServerManager).GetMethod("ConfirmOwnedResetLaunchIdentity", flags).Invoke(
+                manager, new object[] { state, shutdown });
+            Assert.That(manager.IsOwnedResetVerificationPending(shutdown), Is.False);
+            Assert.That(typeof(UPilotMcpServerManager).GetField("_launchNeedsRevalidation", flags).GetValue(manager), Is.True);
+            Assert.That(state.readyVerified, Is.False);
+            Assert.That(state.deadlineUtcMs, Is.EqualTo(record.deadlineAtUtcMs));
+            Assert.That(manager.CaptureServiceShutdown().DeadlineUtcMs, Is.EqualTo(record.deadlineAtUtcMs));
             Assert.That(manager.CanReuseOwnedReset(shutdown, "replacement-lifetime", "restored-instance", out var owner), Is.True);
             Assert.That(owner, Is.EqualTo(record.resetReceipt.ownerId));
             Assert.That(resets, Is.Zero);

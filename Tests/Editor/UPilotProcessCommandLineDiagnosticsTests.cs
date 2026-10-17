@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Text.RegularExpressions;
+using System.Threading;
 using NUnit.Framework;
 using UnityEngine;
 using UnityEngine.TestTools;
@@ -18,6 +19,7 @@ namespace CodingRiver.UPilot.Tests
         [TestCase("start", "HelperStartFailed")]
         [TestCase("helper_timeout", "HelperTimedOut")]
         [TestCase("helper_cleanup", "HelperTimedOut")]
+        [TestCase("success_cleanup", "HelperCleanupFailed")]
         [TestCase("stdout_timeout", "OutputTimedOut")]
         [TestCase("exit_code", "HelperExitFailed")]
         [TestCase("empty", "EmptyValue")]
@@ -35,6 +37,7 @@ namespace CodingRiver.UPilot.Tests
                 case "helper_timeout": observation.FailureStage = "process_exit"; observation.Exited = false; break;
                 case "helper_cleanup": observation.FailureStage = "process_exit"; observation.Exited = false;
                     observation.HelperProcessId = 321; observation.CleanupException = new Win32Exception(5); break;
+                case "success_cleanup": observation.CleanupException = new Win32Exception(5); break;
                 case "stdout_timeout": observation.FailureStage = "stdout_read"; observation.StdoutComplete = false; break;
                 case "exit_code": observation.ExitCode = 5; observation.Stdout = sensitive; break;
                 case "empty": observation.Stdout = "\r\nCommandLine= \r\n"; break;
@@ -108,6 +111,47 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(result.LegacyValue, Is.EqualTo("python example.py --token private-token-value"));
             Assert.That(result.SafeDetail, Does.Not.Contain("python"));
             Assert.That(result.SafeDetail, Does.Not.Contain("private-token-value"));
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void OwnerCancellationPropagatesWithoutReportingAProcessQueryFailure(bool cancelDuringQuery)
+        {
+            using var cancellation = new CancellationTokenSource();
+            if (!cancelDuringQuery) cancellation.Cancel();
+            var calls = 0;
+            var scope = "command-line-cancellation-test|" + Guid.NewGuid().ToString("N");
+            try
+            {
+                Assert.Throws<OperationCanceledException>(() => Manager.ProbeProcessCommandLine(123,
+                    queryOverride: (_, _) =>
+                    {
+                        ++calls;
+                        cancellation.Cancel();
+                        var observed = Observation();
+                        observed.Exception = new OperationCanceledException(cancellation.Token);
+                        return observed;
+                    }, diagnosticScope: scope, token: cancellation.Token));
+                Assert.That(calls, Is.EqualTo(cancelDuringQuery ? 1 : 0));
+                LogAssert.NoUnexpectedReceived();
+            }
+            finally { Logger.CloseDiagnostics(scope); }
+        }
+
+        [TestCase(0, 8000, 1000, 9000)]
+        [TestCase(6000, 8000, 1000, 6000)]
+        [TestCase(9000, 5000, 2000, 7000)]
+        [TestCase(6000, 5000, 2000, 6000)]
+        [TestCase(1500, 8000, 2000, 1500)]
+        public void BackgroundRoundAndHelperDeadlinesNeverExtendTheirParent(long parent, int cap, long now, long expected) =>
+            Assert.That(Manager.ProcessQueryDeadline(parent, cap, now), Is.EqualTo(expected));
+
+        [Test]
+        public void SynchronousDiagnosticReaderRetainsItsOneSecondDefault()
+        {
+            var timeout = typeof(Manager).GetMethod("ProbeProcessCommandLine", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)
+                .GetParameters()[6].DefaultValue;
+            Assert.That(timeout, Is.EqualTo(1000));
         }
 
         [TestCase(0, 1000, 500, 1000)]

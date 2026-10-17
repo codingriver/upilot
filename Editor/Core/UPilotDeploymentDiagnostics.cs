@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -94,39 +94,29 @@ namespace CodingRiver.UPilot
     {
         internal static bool HasServiceIdentity(McpServerStatus server) =>
             server.ProcessOwnership == McpProcessOwnership.CurrentUPilot && server.ProcessId > 0 &&
-            server.Health?.server_pid == server.ProcessId && !string.IsNullOrEmpty(server.Health.server_instance_id) &&
-            UPilotDeploymentDiagnostics.SamePath(server.Health.configured_project_path, UPilotProjectConfig.ProjectRoot);
+            server.Identity?.server_pid == server.ProcessId && !string.IsNullOrEmpty(server.Identity.server_instance_id) &&
+            UPilotDeploymentDiagnostics.SamePath(server.Identity.configured_project_path, UPilotProjectConfig.ProjectRoot);
 
         internal static bool HasLifecycleEvidence(McpServerStatus server) =>
             server.EditorObservationAvailable && server.EditorObservationStatus == "waiting_lifecycle" &&
             !string.IsNullOrEmpty(server.EditorObservationLifecycleId) &&
             server.EditorObservationLifecycleStartedAtUtcMs > 0 && HasServiceIdentity(server) &&
             !string.IsNullOrEmpty(server.EditorObservationSessionId) &&
-            server.EditorObservationSessionId == server.Health.bridge_session_id &&
+            server.EditorObservationSessionId == server.Identity.bridge_session_id &&
             (server.EditorObservationLifecyclePhase == "enteringPlay" || server.EditorObservationLifecyclePhase == "exitingPlay" ||
              server.EditorObservationLifecyclePhase == "compiling" || server.EditorObservationLifecyclePhase == "domain_reload");
 
-        // Only source-classified transient failures may be suppressed. Unknown strings remain errors.
+        // Health and cached Editor observations are advisory, including reported identity changes.
         internal static UPilotHealthDisposition Classify(BridgeStatus bridge, McpServerStatus server)
         {
             if (!string.IsNullOrEmpty(bridge.AuthenticationError) || server.ProcessOwnership == McpProcessOwnership.Foreign ||
                 server.FailureKind == McpStatusFailureKind.Confirmed ||
-                (!string.IsNullOrEmpty(server.ErrorMessage) && server.FailureKind != McpStatusFailureKind.Transient) ||
-                server.EditorObservationReason == "unity_process_exited" ||
-                server.EditorObservationReason == "unity_process_identity_mismatch" ||
-                (server.HealthEndpointResponded && server.Health != null &&
-                 ((server.ProcessId > 0 && server.Health.server_pid > 0 && server.Health.server_pid != server.ProcessId) ||
-                  (!string.IsNullOrEmpty(server.Health.configured_project_path) &&
-                   !UPilotDeploymentDiagnostics.SamePath(server.Health.configured_project_path, UPilotProjectConfig.ProjectRoot)))))
+                (server.IdentityAvailable && server.Identity != null &&
+                 ((server.ProcessId > 0 && server.Identity.server_pid != server.ProcessId) ||
+                  !UPilotDeploymentDiagnostics.SamePath(server.Identity.configured_project_path, UPilotProjectConfig.ProjectRoot))))
                 return UPilotHealthDisposition.ConfirmedFailure;
-            if (HasLifecycleEvidence(server))
-                return UPilotPlayModeTransitions.HasEndedLifecycle(server.EditorObservationLifecycleId,
-                    server.EditorObservationLifecycleStartedAtUtcMs)
-                    ? UPilotHealthDisposition.Unconfirmed : UPilotHealthDisposition.WaitingLifecycle;
-            if (server.FailureKind == McpStatusFailureKind.Transient || server.DiagnosisPending ||
-                server.EditorObservationStatus == "unknown" || server.EditorObservationStatus == "waiting_lifecycle" ||
-                (server.StatusQueryCompleted && server.IsRunning &&
-                 (!server.HealthEndpointResponded || server.ProcessOwnership == McpProcessOwnership.Unknown)))
+            if (!server.StatusQueryCompleted || !server.IdentityAvailable || server.DiagnosisPending ||
+                server.ProcessOwnership == McpProcessOwnership.Unknown)
                 return UPilotHealthDisposition.Unconfirmed;
             return UPilotHealthDisposition.Normal;
         }
@@ -140,21 +130,8 @@ namespace CodingRiver.UPilot
                 ? "unknown" : server.EditorObservationStatus;
 
         internal static bool CanVerifyRecovery(BridgeStatus bridge, McpServerStatus server, long observedNowUtcMs = 0) =>
-            HasServiceIdentity(server) && server.HealthEndpointResponded && bridge.IsWsOpen && bridge.IsAuthenticated &&
-            bridge.SessionId == server.Health.bridge_session_id &&
-            (!server.EditorObservationAvailable || (server.EditorObservationStatus == "responsive" &&
-                server.EditorObservationSessionId == bridge.SessionId && server.EditorObservationObservedAtUtcMs > 0 &&
-                server.EditorObservationHeartbeatAgeMs >= 0 && server.EditorObservationPumpAgeMs >= 0 &&
-                // HTTP 健康检查间隔仅补偿缓存年龄；心跳使用配置超时，主线程新鲜度保持 5 秒。
-                server.EditorObservationHeartbeatAgeMs <= UPilotBridge.Instance.HeartbeatTimeoutMs &&
-                server.EditorObservationPumpAgeMs <= 5000 &&
-                server.EditorObservationHeartbeatAgeMs + ObservationAge(server, observedNowUtcMs) <=
-                    UPilotMcpServerManager.Instance.HealthCheckIntervalMs + UPilotBridge.Instance.HeartbeatTimeoutMs &&
-                server.EditorObservationPumpAgeMs + ObservationAge(server, observedNowUtcMs) <=
-                    UPilotMcpServerManager.Instance.HealthCheckIntervalMs + 5000));
-
-        private static long ObservationAge(McpServerStatus server, long now) => Math.Max(0,
-            (now > 0 ? now : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) - server.EditorObservationObservedAtUtcMs);
+            HasServiceIdentity(server) && server.IdentityAvailable && bridge.IsWsOpen && bridge.IsAuthenticated &&
+            bridge.SessionId == server.Identity.bridge_session_id;
     }
 
     internal sealed class UPilotDeploymentIssue
@@ -162,6 +139,8 @@ namespace CodingRiver.UPilot
         public string Code;
         public string Message;
         public bool Confirmed;
+        public bool Blocking => Code != "health" && Code != "version" && Code != "channel" &&
+            Code != "configured_entry" && Code != "module" && Code != "timeout";
     }
 
     // A domain's Bridge and its package identity stay together until reload.
@@ -265,8 +244,8 @@ namespace CodingRiver.UPilot
                 Check("ownership", server.ProcessOwnership == McpProcessOwnership.Unknown ? (bool?)null :
                         server.ProcessOwnership == McpProcessOwnership.CurrentUPilot,
                     $"{(server.ProcessOwnership == McpProcessOwnership.Foreign ? "已确认端口属于其他项目或程序；" : "")}项目或进程身份未通过：期望 {UPilotProjectConfig.ProjectRoot}；PID={server.ProcessId?.ToString() ?? "未知"}；{server.ProcessOwnershipEvidence}");
-                Check("health", server.HealthEndpointResponded ? true : server.FailureKind == McpStatusFailureKind.Confirmed ? false : (bool?)null,
-                    "状态获取失败：/health 未成功返回；" + server.StatusFailureStage);
+                Check("identity", server.IdentityAvailable ? true : (bool?)null,
+                    "等待当前连接的 Server 身份 ACK。");
                 if (!string.IsNullOrEmpty(module))
                     Check("configured_entry", launchSpec != null ? SamePath(launchSpec.expectedEntry, PythonEntry) : SamePath(
                         Path.IsPathRooted(UPilotMcpServerManager.Instance.PythonEntryPath)
@@ -275,8 +254,8 @@ namespace CodingRiver.UPilot
                         PythonEntry),
                         $"配置入口与当前包不一致：配置={UPilotMcpServerManager.Instance.PythonEntryPath}；配套={PythonEntry}。自定义入口需要明确修改。");
             }
-            var health = server.Health;
-            if (server.HealthEndpointResponded && health != null)
+            var health = server.Identity;
+            if (server.IdentityAvailable && health != null)
             {
                 Compare("version", IsMain ? true : Known(health.server_version)
                     ? string.Equals(Version, health.server_version, StringComparison.Ordinal) : (bool?)null,
@@ -300,9 +279,9 @@ namespace CodingRiver.UPilot
                     server.ProcessId == health.server_pid : (bool?)null,
                     $"进程身份不完整或冲突：监听 PID={server.ProcessId?.ToString() ?? "未知"}；Server PID={health.server_pid}；实例={Text(health.server_instance_id)}");
             }
-            var complete = server.StatusQueryCompleted && server.HealthEndpointResponded &&
+            var complete = server.StatusQueryCompleted && server.IdentityAvailable &&
                            bridge.IsAuthenticated && bridge.IsWsOpen && server.HttpPortListening && server.WsPortListening &&
-                           Issues.Keys.All(key => key == "timeout");
+                           !Issues.Values.Any(issue => issue.Blocking);
             if (complete)
             {
                 Issues.Remove("timeout");
@@ -335,14 +314,17 @@ namespace CodingRiver.UPilot
 
         private static void Check(string key, bool? passed, string message, bool missingIsError = true)
         {
-            if (passed == true) { Issues.Remove(key); return; }
+            if (passed == true) { if (Issues.Remove(key)) Logger.CloseDiagnostics("deployment-observation|" + key); return; }
             if (!passed.HasValue && !missingIsError)
             {
                 if (key == "status" && _transientStatus) Issues.Remove(key);
                 return;
             }
             if (!passed.HasValue && Issues.TryGetValue(key, out var existing) && existing.Confirmed) return;
-            Issues[key] = new UPilotDeploymentIssue { Code = key, Message = message, Confirmed = passed.HasValue };
+            var issue = new UPilotDeploymentIssue { Code = key, Message = message, Confirmed = passed.HasValue };
+            if (!issue.Blocking && (!Issues.TryGetValue(key, out var previous) || previous.Message != message))
+                Logger.ReportServiceObservation("SERVER", message, scope: "deployment-observation|" + key, fingerprint: key);
+            Issues[key] = issue;
         }
 
         private static bool Known(string value) => !string.IsNullOrWhiteSpace(value) && value != "unknown";

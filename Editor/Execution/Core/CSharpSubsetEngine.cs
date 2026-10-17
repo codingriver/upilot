@@ -128,6 +128,8 @@ namespace CodingRiver.UPilot.Execution
         private long _bindTicks;
         private long _invokeTicks;
         private long _encodeTicks;
+        private long _dispatchWaitTicks, _targetInvokeTicks;
+        private int _dispatchCount, _targetStartedCount, _targetFinishedCount;
         private int _getterCallCount;
         private int _methodCallCount;
         private readonly string[] _completedBoundaries = new string[MaxCompletedBoundaries];
@@ -137,6 +139,11 @@ namespace CodingRiver.UPilot.Execution
         public long ResolveMs => ToMilliseconds(Interlocked.Read(ref _resolveTicks));
         public long BindMs => ToMilliseconds(Interlocked.Read(ref _bindTicks));
         public long InvokeMs => ToMilliseconds(Interlocked.Read(ref _invokeTicks));
+        public long DispatchWaitMs => ToMilliseconds(Interlocked.Read(ref _dispatchWaitTicks));
+        public long TargetInvokeMs => ToMilliseconds(Interlocked.Read(ref _targetInvokeTicks));
+        public int DispatchCount => Volatile.Read(ref _dispatchCount);
+        public int TargetStartedCount => Volatile.Read(ref _targetStartedCount);
+        public int TargetFinishedCount => Volatile.Read(ref _targetFinishedCount);
         public long EncodeMs => ToMilliseconds(Interlocked.Read(ref _encodeTicks));
         public int GetterCallCount => Volatile.Read(ref _getterCallCount);
         public int MethodCallCount => Volatile.Read(ref _methodCallCount);
@@ -161,6 +168,59 @@ namespace CodingRiver.UPilot.Execution
         public T MeasureEncode<T>(Func<T> action) { return Measure(action, ref _encodeTicks, "encode.completed"); }
         internal void CountGetter() { Interlocked.Increment(ref _getterCallCount); }
         internal void CountMethod() { Interlocked.Increment(ref _methodCallCount); }
+
+        internal object Dispatch(Func<Func<object>, object> scheduler, Func<object> action)
+        {
+            var gate = new object();
+            var dispatched = Stopwatch.GetTimestamp();
+            var running = new List<long>();
+            long wait = 0, target = 0;
+            int started = 0, finished = 0;
+            bool frozen = false;
+            object InvokeTarget()
+            {
+                var begin = Stopwatch.GetTimestamp();
+                lock (gate)
+                {
+                    if (!frozen)
+                    {
+                        ++started;
+                        running.Add(begin);
+                        if (scheduler != null) wait += begin - dispatched;
+                    }
+                }
+                try { return action(); }
+                finally
+                {
+                    var end = Stopwatch.GetTimestamp();
+                    lock (gate)
+                    {
+                        if (!frozen)
+                        {
+                            ++finished;
+                            running.Remove(begin);
+                            target += end - begin;
+                        }
+                    }
+                }
+            }
+            try { return scheduler == null ? InvokeTarget() : scheduler(InvokeTarget); }
+            finally
+            {
+                lock (gate)
+                {
+                    var returned = Stopwatch.GetTimestamp();
+                    frozen = true;
+                    foreach (var begin in running) target += returned - begin;
+                    if (scheduler != null && started == 0) wait = returned - dispatched;
+                    Interlocked.Add(ref _dispatchWaitTicks, wait);
+                    Interlocked.Add(ref _targetInvokeTicks, target);
+                    if (scheduler != null) Interlocked.Increment(ref _dispatchCount);
+                    Interlocked.Add(ref _targetStartedCount, started);
+                    Interlocked.Add(ref _targetFinishedCount, finished);
+                }
+            }
+        }
 
         private T Measure<T>(Func<T> action, ref long ticks, string completedBoundary)
         {
@@ -290,7 +350,7 @@ namespace CodingRiver.UPilot.Execution
         {
             Budget.CheckTime();
             SideEffectsMayHaveOccurred = true;
-            object result = _invocationScheduler == null ? action() : _invocationScheduler(action);
+            object result = Diagnostics.Dispatch(_invocationScheduler, action);
             _state.LastCompletedSpan = CurrentSpan?.Clone();
             Budget.CheckTime();
             return result;

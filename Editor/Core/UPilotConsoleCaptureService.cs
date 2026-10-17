@@ -109,6 +109,7 @@ namespace CodingRiver.UPilot
     [Serializable]
     public sealed class ConsoleCaptureRecord
     {
+        public string diagnosticSource;
         public long sequence;
         public long timestampUtcMs;
         public string logType;
@@ -489,6 +490,7 @@ namespace CodingRiver.UPilot
                     timestampUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                     logType = LogTypeToString(logType),
                     message = condition ?? string.Empty,
+                    diagnosticSource = Logger.CaptureDiagnosticSource(condition, logType),
                     stackTrace = manifest.includeStackTrace ? stackTrace ?? string.Empty : string.Empty,
                     isPlaying = s_isPlaying,
                     threadId = Thread.CurrentThread.ManagedThreadId,

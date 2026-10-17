@@ -68,6 +68,7 @@ class CompileSnapshot:
     last_terminal_compile_at: int = 0
     reload_id: str = ""
     domain_reload_observed: bool = False
+    compile_evidence: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -120,6 +121,22 @@ class StateStore:
         self.pre_reload_publish_failure_count = 0
         self._project_path = ""
         self._db_path: Path | None = None
+        # Installed by the live transport. Standalone stores retain their existing API.
+        self.live_update_allowed: Callable[[], bool] | None = None
+        self.active_producer_epoch = ""
+        self._bootstrap_commit = False
+
+    def _live_updates_allowed(self) -> bool:
+        return self._bootstrap_commit or self.live_update_allowed is None or self.live_update_allowed()
+
+    def commit_bridge_bootstrap(self, payload: dict[str, Any], diagnostics: dict[str, Any]) -> bool:
+        """Persist the current ordered snapshot together with its full diagnostics."""
+        self._bootstrap_commit = True
+        try:
+            snapshot = {**payload, "bootstrapCompileDiagnostics": diagnostics}
+            return self.update_editor_execution_state(snapshot)
+        finally:
+            self._bootstrap_commit = False
 
     def configure_project(self, project_path: str) -> None:
         self._terminal_association_key = None
@@ -1302,6 +1319,8 @@ class StateStore:
         return tuple(payload.get(field) for field in fields)
 
     def update_editor_execution_state(self, payload: dict[str, Any], *, restored: bool = False) -> bool:
+        if not restored and not self._live_updates_allowed():
+            return False
         if int(payload.get("stateContractVersion") or 0) < 2:
             return False
         incoming_epoch = str(payload.get("producerEpoch") or "")
@@ -1309,6 +1328,9 @@ class StateStore:
         incoming_sequence = int(payload.get("sequence") or 0)
         incoming_session_id = str(payload.get("sessionId") or "")
         if not incoming_epoch or incoming_sequence <= 0:
+            return False
+        if not restored and self.active_producer_epoch and incoming_epoch != self.active_producer_epoch:
+            self.rejected_out_of_order_count += 1
             return False
         if (
             not restored
@@ -1395,6 +1417,12 @@ class StateStore:
         compile_state.domain_reload_observed = bool(payload.get("domainReloadObserved", compile_state.domain_reload_observed))
         compile_state.error_count = int(payload.get("errorCount") or 0)
         compile_state.warning_count = int(payload.get("warningCount") or 0)
+        evidence = payload.get("compileEvidence")
+        if "compileEvidence" in payload:
+            compile_state.compile_evidence = dict(evidence) if isinstance(evidence, dict) else None
+        bootstrap_diagnostics = payload.get("bootstrapCompileDiagnostics")
+        if (restored or self._bootstrap_commit) and isinstance(bootstrap_diagnostics, dict):
+            compile_state.errors = list(bootstrap_diagnostics.get("errors") or [])
         compile_state.last_progress_at = max(self.observed_at, compile_state.last_compile_verified_at, compile_state.last_compiler_finished_at, compile_state.last_compile_started_at)
         association_key = self._terminal_compile_key(payload)
         reuse_terminal = bool(
@@ -1482,6 +1510,8 @@ class StateStore:
 
     def update_editor_context(self, payload: dict[str, Any]) -> bool:
         """Apply legacy context; unordered contexts cannot refresh v2 evidence."""
+        if not self._live_updates_allowed():
+            return False
         if not self.producer_epoch:
             return self.update_editor_state(payload)
         incoming_snapshot_id = str(payload.get("snapshotId") or "")
@@ -1679,6 +1709,8 @@ class StateStore:
         )
 
     def update_compile_errors(self, payload: dict[str, Any]) -> bool:
+        if not self._live_updates_allowed():
+            return False
         self._terminal_association_key = None
         if not self.matches_authoritative_compile_identity(payload):
             self.rejected_out_of_order_count += 1
@@ -1736,6 +1768,8 @@ class StateStore:
         return True
 
     def update_editor_state(self, payload: dict[str, Any]) -> bool:
+        if payload.get("connected") is not False and not self._live_updates_allowed():
+            return False
         incoming_session_id = str(payload.get("sessionId") or "")
         if (
             incoming_session_id
@@ -1867,7 +1901,9 @@ class StateStore:
             or age_ms > max(250, int(stale_after_ms))
             or not self.editor.authoritative
         )
-        authoritative = bool(self.editor.connected and self.editor.authoritative and not is_stale)
+        live = self.live_update_allowed is None or self.live_update_allowed()
+        is_stale = is_stale or not live
+        authoritative = bool(live and self.editor.connected and self.editor.authoritative and not is_stale)
         compile_phase = self._normalize_compile_phase(
             self.compile.status,
             self.compile.phase,
@@ -1889,7 +1925,11 @@ class StateStore:
         blocked_reason = ""
         next_action = ""
         status = "ready"
-        if not self.editor.connected:
+        if not live:
+            status = "recovering_after_reload" if self.editor.connected else "disconnected"
+            blocked_reason = "BridgeBootstrapPending" if self.editor.connected else "UnityDisconnected"
+            next_action = "Wait for the current Bridge bootstrap; ordinary Editor calls are gated."
+        elif not self.editor.connected:
             status = "disconnected"
             blocked_reason = "UnityDisconnected"
             next_action = "Reconnect the intended Unity project and call unity_mcp_status(forceFresh=true)."
@@ -1922,6 +1962,10 @@ class StateStore:
             status = "unknown"
             blocked_reason = "CompilationStatePending"
             next_action = "Unity reports compiler activity without a matching lifecycle snapshot; observe the original batch and wait for its compile identity."
+        elif compile_phase == "unknown":
+            status = "unknown"
+            blocked_reason = "CompileEvidenceUnknown"
+            next_action = "Compilation outcome is unknown; a newly authorized write batch may request compilation."
         elif compile_phase == "failed":
             status = "failed"
             blocked_reason = "CompileErrors"
@@ -1956,7 +2000,7 @@ class StateStore:
             "blocked": bool(blocked_reason),
             "blockedReason": blocked_reason,
             "nextAction": next_action,
-            "unityConnected": self.editor.connected,
+            "unityConnected": bool(live and self.editor.connected),
             "authoritative": authoritative,
             "source": self.editor.source or "cache",
             "sessionId": self.editor.session_id,
@@ -1981,6 +2025,7 @@ class StateStore:
             "terminal": self.compile.terminal and not compile_identity_pending,
             "verificationPending": self.compile.verification_pending or compile_identity_pending,
             "errorsVerified": self.compile.errors_verified and not compile_identity_pending,
+            "compileEvidence": self.compile.compile_evidence,
             "lastCompileRequestedAt": self.compile.last_compile_requested_at,
             "lastCompileStartedAt": self.compile.last_compile_started_at,
             "lastCompilerFinishedAt": self.compile.last_compiler_finished_at,

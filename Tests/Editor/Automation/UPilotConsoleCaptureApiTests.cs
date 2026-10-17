@@ -73,6 +73,31 @@ namespace CodingRiver.UPilot.Tests.Automation
         }
 
         [Test]
+        public void ServiceObservationSourceIsCapturedPerEmissionAndSurvivesAggregation()
+        {
+            var started = Start();
+            Assert.That(started.ok, Is.True, started.error);
+            var marker = "observation-" + Guid.NewGuid().ToString("N");
+            try
+            {
+                Logger.ReportServiceObservation("SERVER", marker, scope: marker);
+                Logger.ReportServiceObservation("SERVER", marker, scope: marker);
+                Logger.CloseDiagnostics(marker);
+                Debug.LogWarning(marker);
+                var stopped = UPilotConsoleCaptureApi.Stop(_sessionId, _ownerToken);
+                Assert.That(stopped.ok, Is.True, stopped.error);
+                var records = File.ReadAllLines(stopped.session.jsonlPath)
+                    .Select(JsonUtility.FromJson<ConsoleCaptureRecord>).Where(x => x.message.Contains(marker)).ToArray();
+                Assert.That(records.Length, Is.EqualTo(3));
+                Assert.That(records[0].diagnosticSource, Is.EqualTo(Logger.ServiceObservationSource));
+                Assert.That(records[1].diagnosticSource, Is.EqualTo(Logger.ServiceObservationSource));
+                Assert.That(records[1].message, Does.Contain("count=1"));
+                Assert.That(records[2].diagnosticSource, Is.Null.Or.Empty);
+            }
+            finally { Logger.CloseDiagnostics(marker); }
+        }
+
+        [Test]
         public void UninitializedCleanupNeverResolvesToProjectRoot()
         {
             _relativeDirectory = null;

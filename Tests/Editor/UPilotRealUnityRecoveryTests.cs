@@ -132,37 +132,114 @@ namespace CodingRiver.UPilot.Tests
             var socket = new ClientWebSocket();
             sockets.Add(socket);
             var session = "real-unity-recovery-" + Guid.NewGuid().ToString("N");
+            var epoch = (long)typeof(UPilotBridge).GetField("_helloConnectionEpoch", Private).GetValue(bridge) + 1;
+            bridge.CloseOrdinaryAdmission("owned-peer-connection");
             Set(bridge, "_ws", socket);
             Set(bridge, "_sessionId", session);
+            Set(bridge, "_helloConnectionEpoch", epoch);
             Set(bridge, "_isAuthenticated", false);
             await socket.ConnectAsync(new Uri("ws://127.0.0.1:" + port), token);
+            var readyDeadline = OperationContext.CreateWaitDeadline(10000);
             var hello = new HelloMessage
             {
                 id = Guid.NewGuid().ToString("N"), type = "hello", name = "session.hello", sessionId = session,
                 timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                 payload = new HelloPayload
                 {
-                    identityContractVersion = 1, unityVersion = identity.unityVersion, projectPath = identity.project,
+                    identityContractVersion = 1, bridgeReadyContractVersion = UPilotBridge.BridgeReadyContractVersion,
+                    readyBudgetMs = OperationContext.RemainingWaitMilliseconds(readyDeadline),
+                    unityVersion = identity.unityVersion, projectPath = identity.project,
                     platform = "windows", processId = identity.processId, processCreatedAt = identity.processCreatedAt,
                     processRole = "mainEditor"
                 }
             };
             var json = JsonUtility.ToJson(hello);
             File.WriteAllText(Path.Combine(directory, phase + "-hello.json"), json, new UTF8Encoding(false));
-            await (Task)typeof(UPilotBridge).GetMethod("SendJsonAsync", Private).Invoke(bridge, new object[] { json, token });
+            await (Task)typeof(UPilotBridge).GetMethod("SendConnectionJsonAsync", Private)
+                .Invoke(bridge, new object[] { json, token, socket, epoch });
             var incoming = await Receive(socket, token);
             File.WriteAllText(Path.Combine(directory, phase + "-ack.json"), incoming, new UTF8Encoding(false));
             var ack = JsonUtility.FromJson<HelloAckMessage>(incoming);
             Assert.That(ack.type, Is.EqualTo("result"));
             Assert.That(ack.name, Is.EqualTo("session.hello"));
+            Assert.That(ack.id, Is.EqualTo(hello.id));
             Assert.That(ack.sessionId, Is.EqualTo(session));
             Assert.That(ack.payload.accepted, Is.True, incoming);
             Assert.That(ack.payload.identityContractVersion, Is.EqualTo(1));
+            Assert.That(ack.payload.bridgeReadyContractVersion, Is.EqualTo(UPilotBridge.BridgeReadyContractVersion));
             Assert.That(ack.payload.verificationLevel, Is.EqualTo("windows-pid-creation-executable-role-project"));
             Assert.That(ack.payload.serverLifecycleId, Is.Not.Empty);
-            // Production hello application resets project-wide resources on a new lifetime.
-            // Validate the real ack, but authenticate only this object without applying it.
+            Assert.That(ack.payload.server_instance_id, Is.Not.Empty);
+            // Keep the real peer identity on this clone. Applying production hello to the
+            // shared SessionState would reset the canonical project's unrelated resources.
             Set(bridge, "_isAuthenticated", true);
+            Set(bridge, "_boundServerLifetime", ack.payload.serverLifecycleId);
+            Set(bridge, "_readyHelloId", hello.id);
+            Set(bridge, "_readyServerInstanceId", ack.payload.server_instance_id);
+            Set(bridge, "_readyProjectPath", identity.project);
+            Set(bridge, "_readyDeadlineTick", readyDeadline);
+            Set(bridge, "_localReadyAnnounced", true);
+            Assert.That(bridge.IsStateSynchronized, Is.False);
+            var origin = typeof(UPilotBridge).GetMethod("CaptureOrigin", Private).Invoke(bridge, new object[] { token });
+            var ready = new EventMessage<BridgeReadyPayload> {
+                id = "ready-" + hello.id, name = "session.ready", sessionId = session,
+                timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                payload = new BridgeReadyPayload { helloId = hello.id,
+                    serverLifecycleId = ack.payload.serverLifecycleId, serverInstanceId = ack.payload.server_instance_id },
+            };
+            Assert.That(await (Task<bool>)typeof(UPilotBridge).GetMethod("SendOriginJsonAsync", Private)
+                .Invoke(bridge, new object[] { JsonUtility.ToJson(ready), token, origin, false }), Is.True);
+            var bootstrapJson = await Receive(socket, token);
+            File.WriteAllText(Path.Combine(directory, phase + "-bootstrap-request.json"), bootstrapJson, new UTF8Encoding(false));
+            var bootstrap = JsonUtility.FromJson<BridgeBootstrapMessage>(bootstrapJson);
+            Assert.That(bootstrap.type, Is.EqualTo("command"));
+            Assert.That(bootstrap.name, Is.EqualTo("session.bootstrap"));
+            Assert.That(bootstrap.sessionId, Is.EqualTo(session));
+            Assert.That(bootstrap.payload.helloId, Is.EqualTo(hello.id));
+            Assert.That(bootstrap.payload.serverLifecycleId, Is.EqualTo(ack.payload.serverLifecycleId));
+            Assert.That(bootstrap.payload.serverInstanceId, Is.EqualTo(ack.payload.server_instance_id));
+            Assert.That(bootstrap.payload.nonce, Has.Length.EqualTo(32));
+            // Use the production observation/builder, with persistence restricted to the
+            // fixture directory. Never overwrite the shared EditorExecutionState.json.
+            Assert.That(Thread.CurrentThread.ManagedThreadId, Is.EqualTo(identity.mainThreadId));
+            typeof(UPilotBridge).GetMethod("RefreshMainThreadObservation", Private).Invoke(bridge, null);
+            var snapshot = (EditorExecutionStatePayload)typeof(UPilotBridge).GetMethod("BuildExecutionStatePayload", Private)
+                .Invoke(bridge, new object[] { "owned_peer_bootstrap" });
+            var persist = typeof(UPilotBridge).GetMethod("PersistExecutionState", BindingFlags.Static | BindingFlags.NonPublic,
+                null, new[] { typeof(EditorExecutionStatePayload), typeof(string) }, null);
+            Assert.That((bool)persist.Invoke(null, new object[] { snapshot, Path.Combine(directory, phase + "-execution-state.json") }), Is.True);
+            var compile = (UPilotCompileService)typeof(UPilotBridge).GetField("_compileService", Private).GetValue(bridge);
+            var result = new ResultMessage<BridgeBootstrapResult> {
+                id = bootstrap.id, name = "session.bootstrap", sessionId = session,
+                timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                payload = new BridgeBootstrapResult { helloId = hello.id,
+                    serverLifecycleId = ack.payload.serverLifecycleId, serverInstanceId = ack.payload.server_instance_id,
+                    nonce = bootstrap.payload.nonce, state = snapshot,
+                    compileEvidence = compile.BuildLastCompileErrorsPayload(includeWarnings: true) },
+            };
+            Set(bridge, "_bootstrapRequestId", bootstrap.id);
+            Set(bridge, "_bootstrapNonce", bootstrap.payload.nonce);
+            Set(bridge, "_bootstrapSnapshotId", snapshot.snapshotId);
+            Set(bridge, "_bootstrapSnapshot", snapshot);
+            var resultJson = UPilotBridge.SerializeBootstrapResult(result);
+            File.WriteAllText(Path.Combine(directory, phase + "-bootstrap-result.json"), resultJson, new UTF8Encoding(false));
+            Assert.That(await (Task<bool>)typeof(UPilotBridge).GetMethod("SendOriginJsonAsync", Private)
+                .Invoke(bridge, new object[] { resultJson, token, origin, false }), Is.True);
+            var receiptJson = await Receive(socket, token);
+            File.WriteAllText(Path.Combine(directory, phase + "-bootstrap-ack.json"), receiptJson, new UTF8Encoding(false));
+            var receiptEnvelope = JsonUtility.FromJson<BridgeEnvelope>(receiptJson);
+            Assert.That(receiptEnvelope.name, Is.EqualTo("session.bootstrap.ack"));
+            Assert.That((bool)typeof(UPilotBridge).GetMethod("TryHandleReadinessControl", Private)
+                .Invoke(bridge, new object[] { receiptJson, receiptEnvelope, token, socket, epoch }), Is.True);
+            Assert.That(bridge.IsStateSynchronized, Is.True);
+            Assert.That(bridge.TryGetBootstrapReceipt(session, ack.payload.server_instance_id, out var receipt), Is.True);
+            Assert.That(receipt.SnapshotId, Is.EqualTo(snapshot.snapshotId));
+            Assert.That(receipt.ConnectionEpoch, Is.EqualTo(epoch));
+            // The clone's scheduled lifecycle notification would touch shared manager/UI state.
+            // Its ACK gate has already executed synchronously; retain this owned callback as evidence only.
+            var control = (ConcurrentQueue<Action>)typeof(UPilotBridge).GetField("_controlQueue", Private).GetValue(bridge);
+            Assert.That(control.Count, Is.EqualTo(1));
+            Assert.That(control.TryDequeue(out _), Is.True);
             Save(directory, "authenticated-" + phase, new Count());
             return socket;
         }
@@ -172,6 +249,7 @@ namespace CodingRiver.UPilot.Tests
             var paths = new[]
             {
                 "Tests/Editor/UPilotRealUnityRecoveryTests.cs", "Editor/Core/UPilotBridge.cs",
+                "Editor/Core/UPilotBridge.Readiness.cs", "Editor/Core/UPilotBridge.Handshake.cs",
                 "Editor/Core/UPilotTimingSettings.cs", "Editor/Core/UPilotOperationTracker.cs",
                 "Editor/Core/UPilotCommandRouter.cs", "Editor/Core/UPilotProtocol.cs",
                 "upilotserver~/tests/real_unity_recovery_peer.py", "upilotserver~/src/upilot_mcp/server.py",
@@ -337,11 +415,17 @@ namespace CodingRiver.UPilot.Tests
                 Assert.That(port, Is.GreaterThan(0));
                 var router = new UPilotCommandRouter();
                 bridge = (UPilotBridge)FormatterServices.GetUninitializedObject(typeof(UPilotBridge));
+                Set(bridge, "_started", true);
+                Set(bridge, "_mainThreadId", identity.mainThreadId);
+                Set(bridge, "_producerEpoch", "owned-recovery-producer-" + Guid.NewGuid().ToString("N"));
+                Set(bridge, "_controlQueue", new ConcurrentQueue<Action>());
                 Set(bridge, "_sendLock", gate);
                 Set(bridge, "_mainThreadQueue", queue);
                 Set(bridge, "_trackedQueueActions", tracked);
                 Set(bridge, "_queueObservationLock", queueLock);
-                Set(bridge, "_compileService", FormatterServices.GetUninitializedObject(typeof(UPilotCompileService)));
+                Set(bridge, "_compileService", new UPilotCompileService(
+                    Path.Combine(Path.GetTempPath(), "UPilotCompileFixture-" + Guid.NewGuid().ToString("N") + ".json"),
+                    Path.GetTempPath(), 123, 456, "isolated-producer"));
                 Set(bridge, "_router", router);
                 router.Register("fixture.mutation", (id, json, token) => Track(id, async () =>
                 {
@@ -395,7 +479,10 @@ namespace CodingRiver.UPilot.Tests
                             sessionId = (string)typeof(UPilotBridge).GetField("_sessionId", Private).GetValue(bridge)
                         });
                         File.WriteAllText(Path.Combine(directory, "receive-probe-result.json"), response, new UTF8Encoding(false));
-                        await (Task)typeof(UPilotBridge).GetMethod("SendJsonAsync", Private).Invoke(bridge, new object[] { response, token });
+                        var origin = typeof(UPilotBridge).GetMethod("OriginForSend", Private)
+                            .Invoke(bridge, new object[] { id, token, true });
+                        Assert.That(await (Task<bool>)typeof(UPilotBridge).GetMethod("SendOriginJsonAsync", Private)
+                            .Invoke(bridge, new object[] { response, token, origin, true }), Is.True);
                     }));
                 var socket = await Authenticate(bridge, port, directory, "initial", identity, sockets, deadline.Token);
                 var received = 0;
@@ -472,9 +559,17 @@ namespace CodingRiver.UPilot.Tests
                 socket = await Authenticate(bridge, port, directory, "reconnect", identity, sockets, deadline.Token);
                 Task reconnectLoop = productionReceiveLoop ? StartReceiveLoop() : null;
                 await WaitFor(directory, "terminal-frozen", peer, deadline.Token);
-                // Contradict the original result on the new authenticated socket. The following
-                // inspector reply is the ordered barrier proving that this late frame was consumed.
-                await bridge.SendResultAsync(cleanup.originalId, "fixture.mutation", new Count { effectCount = 999 }, deadline.Token);
+                // Inject a contradictory peer frame deliberately: the normal result path now
+                // refuses to rebind an old command origin. Keep testing Server terminal freezing.
+                Assert.That(bridge.IsStateSynchronized, Is.True);
+                var lateOrigin = typeof(UPilotBridge).GetMethod("CaptureOrigin", Private).Invoke(bridge, new object[] { deadline.Token });
+                var lateResult = JsonUtility.ToJson(new ResultMessage<Count> {
+                    id = cleanup.originalId, name = "fixture.mutation", payload = new Count { effectCount = 999 },
+                    sessionId = (string)typeof(UPilotBridge).GetField("_sessionId", Private).GetValue(bridge),
+                    timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                });
+                Assert.That(await (Task<bool>)typeof(UPilotBridge).GetMethod("SendOriginJsonAsync", Private)
+                    .Invoke(bridge, new object[] { lateResult, deadline.Token, lateOrigin, true }), Is.True);
                 while (!Volatile.Read(ref inspected))
                 {
                     if (productionReceiveLoop)

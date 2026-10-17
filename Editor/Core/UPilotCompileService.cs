@@ -13,7 +13,7 @@ using UnityEngine;
 
 namespace CodingRiver.UPilot
 {
-    public sealed class UPilotCompileService
+    public sealed partial class UPilotCompileService
     {
         private static readonly string CompileLogDir = Path.Combine(
             Directory.GetParent(Application.dataPath)?.FullName ?? ".",
@@ -75,61 +75,11 @@ namespace CodingRiver.UPilot
             CompilationPipeline.compilationStarted += OnCompilationStarted;
             CompilationPipeline.assemblyCompilationFinished += OnAssemblyCompilationFinished;
             CompilationPipeline.compilationFinished += OnCompilationFinished;
+            AssemblyReloadEvents.beforeAssemblyReload += MarkDomainReload;
 
             // Restore persistent errors after domain reload
             TryRestoreFromDisk();
-            // AssemblyReloadEvents subscriptions do not survive into the new AppDomain.
-            // Normalize a restored reload snapshot during construction as the reliable path.
-            MarkVerifyingAfterReload();
-        }
-
-        /// <summary>
-        /// Persist compile errors to disk so they survive domain reload.
-        /// </summary>
-        private void PersistToDisk()
-        {
-            try
-            {
-                Directory.CreateDirectory(CompileLogDir);
-                var payload = new CompileErrorsPayload
-                {
-                    requestId = _lastRequestId,
-                    compileOperationId = _compileOperationId,
-                    writeBatchId = _writeBatchId,
-                    writeBatchCreatedAt = _writeBatchCreatedAt,
-                    compileOrigin = _compileOrigin,
-                    status = Status,
-                    phase = Phase,
-                    terminal = Terminal,
-                    verificationPending = VerificationPending,
-                    errorsVerified = ErrorsVerified,
-                    total = _lastErrors.Count,
-                    warningCount = _lastWarningCount,
-                    warningDetailsAvailable = _warningDetailsAvailable,
-                    warningsTruncated = _warningsTruncated,
-                    startedAt = CompileStartedAt,
-                    finishedAt = CompileFinishedAt,
-                    lastProgressAt = LastProgressAt,
-                    lastCompileRequestedAt = LastCompileRequestedAt,
-                    lastCompileStartedAt = LastCompileStartedAt,
-                    lastCompilerFinishedAt = LastCompilerFinishedAt,
-                    lastCompileVerifiedAt = LastCompileVerifiedAt,
-                    lastTerminalCompileAt = LastTerminalCompileAt,
-                    reloadId = _reloadId,
-                    domainReloadObserved = DomainReloadObserved,
-                    errors = new List<CompileErrorItemPayload>(_lastErrors),
-                    warnings = _warningDetailsAvailable
-                        ? new List<CompileErrorItemPayload>(_lastWarnings)
-                        : null,
-                };
-                var json = JsonUtility.ToJson(payload, true);
-                File.WriteAllText(CompileErrorsPath, json);
-                Logger.Log("COMPILE", $"编译错误已持久化: {CompileErrorsPath} errors={_lastErrors.Count}");
-            }
-            catch (Exception ex)
-            {
-                Logger.ReportFailure("COMPILE", "持久化编译错误失败", ex);
-            }
+            // ConfigureEvidenceIdentity restores/verifies the current producer before normalizing reload.
         }
 
         /// <summary>
@@ -137,72 +87,81 @@ namespace CodingRiver.UPilot
         /// </summary>
         public void TryRestoreFromDisk()
         {
-            try
+            lock (CompileEvidenceLock)
             {
-                if (!File.Exists(CompileErrorsPath))
-                    return;
-
-                var json = File.ReadAllText(CompileErrorsPath);
-                var payload = JsonUtility.FromJson<CompileErrorsPayload>(json);
-                if (payload == null)
-                    return;
-
-                _lastRequestId = payload.requestId ?? string.Empty;
-                _compileOperationId = payload.compileOperationId ?? string.Empty;
-                _writeBatchId = payload.writeBatchId ?? string.Empty;
-                _writeBatchCreatedAt = payload.writeBatchCreatedAt;
-                _compileOrigin = payload.compileOrigin ?? string.Empty;
-                _reloadId = payload.reloadId ?? string.Empty;
-                Status = string.IsNullOrEmpty(payload.status) ? "finished" : payload.status;
-                Phase = string.IsNullOrEmpty(payload.phase)
-                    ? (payload.total > 0 ? "failed" : "completed")
-                    : payload.phase;
-                IsCompiling = string.Equals(Phase, "queued", StringComparison.OrdinalIgnoreCase) ||
-                              string.Equals(Phase, "compiling", StringComparison.OrdinalIgnoreCase) ||
-                              string.Equals(Phase, "domain_reload", StringComparison.OrdinalIgnoreCase);
-                IsRequestCompileActive = IsCompiling && !string.IsNullOrEmpty(_lastRequestId);
-                Terminal = payload.terminal;
-                VerificationPending = payload.verificationPending;
-                ErrorsVerified = payload.errorsVerified;
-                DomainReloadObserved = payload.domainReloadObserved;
-                _lastWarningCount = payload.warningCount;
-                // JsonUtility uses false for a field absent from legacy payloads.
-                // Do not infer availability from an empty/missing list: it may mean
-                // that the historical compile only persisted its aggregate count.
-                _warningDetailsAvailable = payload.warningDetailsAvailable;
-                CompileStartedAt = payload.startedAt;
-                CompileFinishedAt = payload.finishedAt;
-                LastProgressAt = payload.lastProgressAt > 0
-                    ? payload.lastProgressAt
-                    : Math.Max(CompileStartedAt, CompileFinishedAt);
-                LastCompileRequestedAt = payload.lastCompileRequestedAt;
-                LastCompileStartedAt = payload.lastCompileStartedAt;
-                LastCompilerFinishedAt = payload.lastCompilerFinishedAt;
-                LastCompileVerifiedAt = payload.lastCompileVerifiedAt;
-                LastTerminalCompileAt = payload.lastTerminalCompileAt;
-                _lastErrors.Clear();
-                if (payload.errors != null)
-                    _lastErrors.AddRange(payload.errors);
-                _lastWarnings.Clear();
-                if (_warningDetailsAvailable && payload.warnings != null)
+                try
                 {
-                    var retained = Math.Min(payload.warnings.Count, MaxPersistedWarnings);
-                    for (var index = 0; index < retained; index++)
-                        _lastWarnings.Add(payload.warnings[index]);
-                    _warningsTruncated = payload.warningsTruncated ||
-                        payload.warnings.Count > retained || _lastWarningCount > retained;
+                    if (!File.Exists(EvidencePath))
+                        return;
+
+                    var json = File.ReadAllText(EvidencePath);
+                    var payload = JsonUtility.FromJson<CompileErrorsPayload>(json);
+                    if (payload == null)
+                        throw new InvalidDataException("Compile evidence payload is empty.");
+
+                    _lastRequestId = payload.requestId ?? string.Empty;
+                    _compileOperationId = payload.compileOperationId ?? string.Empty;
+                    _writeBatchId = payload.writeBatchId ?? string.Empty;
+                    _writeBatchCreatedAt = payload.writeBatchCreatedAt;
+                    _compileOrigin = payload.compileOrigin ?? string.Empty;
+                    _reloadId = payload.reloadId ?? string.Empty;
+                    Status = string.IsNullOrEmpty(payload.status) ? "finished" : payload.status;
+                    Phase = string.IsNullOrEmpty(payload.phase)
+                        ? (payload.total > 0 ? "failed" : "completed")
+                        : payload.phase;
+                    IsCompiling = string.Equals(Phase, "queued", StringComparison.OrdinalIgnoreCase) ||
+                                  string.Equals(Phase, "compiling", StringComparison.OrdinalIgnoreCase) ||
+                                  string.Equals(Phase, "domain_reload", StringComparison.OrdinalIgnoreCase);
+                    IsRequestCompileActive = IsCompiling && !string.IsNullOrEmpty(_lastRequestId);
+                    Terminal = payload.terminal;
+                    VerificationPending = payload.verificationPending;
+                    ErrorsVerified = payload.errorsVerified;
+                    DomainReloadObserved = payload.domainReloadObserved;
+                    _lastWarningCount = payload.warningCount;
+                    // JsonUtility uses false for a field absent from legacy payloads.
+                    // Do not infer availability from an empty/missing list: it may mean
+                    // that the historical compile only persisted its aggregate count.
+                    _warningDetailsAvailable = payload.warningDetailsAvailable;
+                    CompileStartedAt = payload.startedAt;
+                    CompileFinishedAt = payload.finishedAt;
+                    LastProgressAt = payload.lastProgressAt > 0
+                        ? payload.lastProgressAt
+                        : Math.Max(CompileStartedAt, CompileFinishedAt);
+                    LastCompileRequestedAt = payload.lastCompileRequestedAt;
+                    LastCompileStartedAt = payload.lastCompileStartedAt;
+                    LastCompilerFinishedAt = payload.lastCompilerFinishedAt;
+                    LastCompileVerifiedAt = payload.lastCompileVerifiedAt;
+                    LastTerminalCompileAt = payload.lastTerminalCompileAt;
+                    _lastErrors.Clear();
+                    if (payload.errors != null)
+                        _lastErrors.AddRange(payload.errors);
+                    _lastWarnings.Clear();
+                    if (_warningDetailsAvailable && payload.warnings != null)
+                    {
+                        var retained = Math.Min(payload.warnings.Count, MaxPersistedWarnings);
+                        for (var index = 0; index < retained; index++)
+                            _lastWarnings.Add(payload.warnings[index]);
+                        _warningsTruncated = payload.warningsTruncated ||
+                            payload.warnings.Count > retained || _lastWarningCount > retained;
+                    }
+                    else
+                    {
+                        // An unavailable legacy detail list is unknown, not truncated.
+                        _warningsTruncated = false;
+                    }
+                    HasCompileErrors = _lastErrors.Count > 0;
+                    ApplyRestoredEvidence(payload);
+                    Logger.Log("COMPILE", $"编译错误已从磁盘恢复: errors={_lastErrors.Count} requestId={_lastRequestId}");
                 }
-                else
+                catch (Exception ex)
                 {
-                    // An unavailable legacy detail list is unknown, not truncated.
-                    _warningsTruncated = false;
+                    _compileEvidence = null;
+                    ErrorsVerified = false; Terminal = false; VerificationPending = false;
+                    IsCompiling = false; IsRequestCompileActive = false;
+                    Phase = "unknown"; Status = "unknown";
+                    Logger.ReportFailure("COMPILE", "恢复编译错误失败", ex);
                 }
-                HasCompileErrors = _lastErrors.Count > 0;
-                Logger.Log("COMPILE", $"编译错误已从磁盘恢复: errors={_lastErrors.Count} requestId={_lastRequestId}");
-            }
-            catch (Exception ex)
-            {
-                Logger.ReportFailure("COMPILE", "恢复编译错误失败", ex);
+
             }
         }
 
@@ -211,17 +170,27 @@ namespace CodingRiver.UPilot
         /// </summary>
         public void ClearPersistentErrors()
         {
-            try
+            lock (CompileEvidenceLock)
             {
-                if (File.Exists(CompileErrorsPath))
+                try
                 {
-                    File.Delete(CompileErrorsPath);
-                    Logger.Log("COMPILE", "已清除持久化编译错误");
+                    if (File.Exists(EvidencePath))
+                    {
+                        File.Delete(EvidencePath);
+                        Logger.Log("COMPILE", "已清除持久化编译错误");
+                    }
+                    _compileEvidence = null;
+                    ErrorsVerified = false; Terminal = false;
+                    if (!IsCompiling)
+                    {
+                        Phase = "unknown"; Status = "unknown"; VerificationPending = false;
+                    }
                 }
-            }
-            catch (Exception ex)
-            {
-                Logger.ReportFailure("COMPILE", "清除持久化编译错误失败", ex);
+                catch (Exception ex)
+                {
+                    Logger.ReportFailure("COMPILE", "清除持久化编译错误失败", ex);
+                }
+
             }
         }
 
@@ -250,61 +219,64 @@ namespace CodingRiver.UPilot
             long writeBatchCreatedAt = 0,
             Func<bool> beforeRequest = null)
         {
-            LastStartFailureCode = string.Empty;
-            if (UPilotPlayModeCompilePolicy.CurrentMode != "edit")
+            bool queuedPersisted;
+            lock (CompileEvidenceLock)
             {
-                LastStartFailureCode = "EditorInPlayMode";
-                // The command response reports this once, with its WriteBatch diagnostic scope.
-                return false;
-            }
+                LastStartFailureCode = string.Empty;
+                if (UPilotPlayModeCompilePolicy.CurrentMode != "edit")
+                {
+                    LastStartFailureCode = "EditorInPlayMode";
+                    return false;
+                }
+                if (IsCompiling || EditorApplication.isCompiling)
+                {
+                    LastStartFailureCode = "EditorBusy";
+                    return false;
+                }
 
-            if (IsCompiling || EditorApplication.isCompiling)
-            {
-                LastStartFailureCode = "EditorBusy";
-                return false;
-            }
-
-            var focus = GetFocusStateString();
-            Logger.Log("COMPILE", $"开始编译: requestId={requestId} 焦点={focus}");
-
-            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            _lastRequestId = requestId;
-            _compileOperationId = Guid.NewGuid().ToString("N");
-            _writeBatchId = writeBatchId ?? string.Empty;
-            _writeBatchCreatedAt = Math.Max(0, writeBatchCreatedAt);
-            _compileOrigin = "mcp";
-            _reloadId = string.Empty;
-            IsCompiling = true;
-            IsRequestCompileActive = true;
-            Status = "queued";
-            Phase = "queued";
-            Terminal = false;
-            VerificationPending = true;
-            ErrorsVerified = false;
-            DomainReloadObserved = false;
-            LastCompileRequestedAt = now;
-            LastProgressAt = now;
-            ResetCompileCompletionEvidence();
-            _compileTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-
-            // Clear previous persistent errors when starting a new compile
-            ClearPersistentErrors();
-
-            // Refresh to detect newly added scripts before compiling
-            if (beforeRequest != null && !beforeRequest())
-            {
-                IsCompiling = false;
-                IsRequestCompileActive = false;
-                Status = "failed";
-                Phase = "failed";
-                Terminal = true;
-                VerificationPending = false;
+                Logger.Log("COMPILE", $"开始编译: requestId={requestId} 焦点={GetFocusStateString()}");
+                var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                _lastRequestId = requestId;
+                _compileOperationId = Guid.NewGuid().ToString("N");
+                _writeBatchId = writeBatchId ?? string.Empty;
+                _writeBatchCreatedAt = Math.Max(0, writeBatchCreatedAt);
+                _compileOrigin = "mcp";
+                _reloadId = string.Empty;
+                IsCompiling = true;
+                IsRequestCompileActive = true;
+                Status = "queued";
+                Phase = "queued";
+                Terminal = false;
+                VerificationPending = true;
                 ErrorsVerified = false;
-                LastTerminalCompileAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                LastProgressAt = LastTerminalCompileAt;
-                LastStartFailureCode = "StatePersistenceFailed";
-                _compileTcs?.TrySetResult(false);
-                Logger.LogWarning("COMPILE", $"编译未触发: queued 状态持久化失败 requestId={requestId}");
+                DomainReloadObserved = false;
+                LastCompileRequestedAt = now;
+                LastProgressAt = now;
+                ResetCompileCompletionEvidence();
+                _compileTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                // Replace prior evidence before notifying observers or requesting compilation.
+                queuedPersisted = RecordMilestoneAndPersist("queued");
+            }
+            NotifyLocalState("queued");
+            if (!queuedPersisted || (beforeRequest != null && !beforeRequest()))
+            {
+                lock (CompileEvidenceLock)
+                {
+                    IsCompiling = false;
+                    IsRequestCompileActive = false;
+                    Status = "failed";
+                    Phase = "failed";
+                    Terminal = true;
+                    VerificationPending = false;
+                    ErrorsVerified = false;
+                    LastTerminalCompileAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    LastProgressAt = LastTerminalCompileAt;
+                    LastStartFailureCode = "StatePersistenceFailed";
+                    if (queuedPersisted) RecordMilestoneAndPersist("terminal");
+                    _compileTcs?.TrySetResult(false);
+                }
+                NotifyLocalState("terminal");
+                Logger.LogError("COMPILE", $"编译未触发: queued 状态持久化失败 requestId={requestId}");
                 return false;
             }
             AssetDatabase.Refresh();
@@ -338,172 +310,220 @@ namespace CodingRiver.UPilot
         // Called when compilation starts (both auto and request-scoped)
         private void OnCompilationStarted(object context)
         {
-            if (UPilotDiagnosticModuleService.IsCompilationContext(context)) return;
-            if (!IsRequestCompileActive || string.IsNullOrEmpty(_compileOperationId))
+            lock (CompileEvidenceLock)
             {
-                _lastRequestId = string.Empty;
-                _compileOperationId = Guid.NewGuid().ToString("N");
-                _writeBatchId = string.Empty;
-                _writeBatchCreatedAt = 0;
-                _compileOrigin = "unity_auto";
-                _reloadId = string.Empty;
-                LastCompileRequestedAt = 0;
-                DomainReloadObserved = false;
+                if (UPilotDiagnosticModuleService.IsCompilationContext(context)) return;
+                if (!IsRequestCompileActive || string.IsNullOrEmpty(_compileOperationId))
+                {
+                    _lastRequestId = string.Empty;
+                    _compileOperationId = Guid.NewGuid().ToString("N");
+                    _writeBatchId = string.Empty;
+                    _writeBatchCreatedAt = 0;
+                    _compileOrigin = "unity_auto";
+                    _reloadId = string.Empty;
+                    LastCompileRequestedAt = 0;
+                    DomainReloadObserved = false;
+                }
+                IsCompiling = true;
+                Status = "compiling";
+                Phase = "compiling";
+                Terminal = false;
+                VerificationPending = true;
+                ErrorsVerified = false;
+                ResetCompileCompletionEvidence();
+                CompileStartedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                LastCompileStartedAt = CompileStartedAt;
+                LastProgressAt = CompileStartedAt;
+                RecordMilestoneAndPersist("compiling");
+                Logger.Log("COMPILE", "编译流水线开始");
+
             }
-            IsCompiling = true;
-            Status = "compiling";
-            Phase = "compiling";
-            Terminal = false;
-            VerificationPending = true;
-            ErrorsVerified = false;
-            ResetCompileCompletionEvidence();
-            CompileStartedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            LastCompileStartedAt = CompileStartedAt;
-            LastProgressAt = CompileStartedAt;
-            Logger.Log("COMPILE", "编译流水线开始");
+            NotifyLocalState("compiling");
         }
 
         public void ClearStaleCompileBusy(string reason, bool ignoreEditorCompiling = false)
         {
-            if (!IsCompiling || (!ignoreEditorCompiling && EditorApplication.isCompiling))
-                return;
+            lock (CompileEvidenceLock)
+            {
+                if (!IsCompiling || (!ignoreEditorCompiling && EditorApplication.isCompiling))
+                    return;
 
-            IsCompiling = false;
-            IsRequestCompileActive = false;
-            CompileFinishedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            LastProgressAt = CompileFinishedAt;
-            Status = "failed";
-            Phase = "failed";
-            Terminal = true;
-            VerificationPending = false;
-            ErrorsVerified = false;
-            LastTerminalCompileAt = CompileFinishedAt;
-            _compileTcs?.TrySetResult(false);
-            Logger.LogWarning("COMPILE", $"清理编译忙状态: {reason}");
+                IsCompiling = false;
+                IsRequestCompileActive = false;
+                LastProgressAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                Status = "failed";
+                Phase = "failed";
+                Terminal = true;
+                VerificationPending = false;
+                ErrorsVerified = false;
+                LastTerminalCompileAt = LastProgressAt;
+                RecordMilestoneAndPersist("terminal");
+                _compileTcs?.TrySetResult(false);
+                Logger.LogError("COMPILE", $"清理未完成的编译忙状态: {reason}");
+
+            }
+            NotifyLocalState("terminal");
         }
 
         // Called on main thread for each assembly as it finishes (both auto and request-scoped)
         private void OnAssemblyCompilationFinished(string assembly, CompilerMessage[] messages)
         {
-            if (UPilotDiagnosticModuleService.IsCompilationPath(assembly)) return;
-            bool hadError = false;
-            foreach (var msg in messages)
+            lock (CompileEvidenceLock)
             {
-                if (msg.type == CompilerMessageType.Warning)
+                if (UPilotDiagnosticModuleService.IsCompilationPath(assembly)) return;
+                bool hadError = false;
+                foreach (var msg in messages)
                 {
-                    _lastWarningCount++;
-                    if (_lastWarnings.Count < MaxPersistedWarnings)
+                    if (msg.type == CompilerMessageType.Warning)
                     {
-                        _lastWarnings.Add(new CompileErrorItemPayload
+                        _lastWarningCount++;
+                        if (_lastWarnings.Count < MaxPersistedWarnings)
                         {
-                            assemblyName = assembly,
-                            file = msg.file,
-                            line = msg.line,
-                            column = msg.column,
-                            message = msg.message,
-                            severity = "warning",
-                        });
+                            _lastWarnings.Add(new CompileErrorItemPayload
+                            {
+                                assemblyName = assembly,
+                                file = msg.file,
+                                line = msg.line,
+                                column = msg.column,
+                                message = msg.message,
+                                severity = "warning",
+                            });
+                        }
+                        else _warningsTruncated = true;
+                        continue;
                     }
-                    else _warningsTruncated = true;
-                    continue;
-                }
-                if (msg.type != CompilerMessageType.Error) continue;
+                    if (msg.type != CompilerMessageType.Error) continue;
 
-                hadError = true;
-                _lastErrors.Add(new CompileErrorItemPayload
+                    hadError = true;
+                    _lastErrors.Add(new CompileErrorItemPayload
+                    {
+                        assemblyName = assembly,
+                        file = msg.file,
+                        line = msg.line,
+                        column = msg.column,
+                        message = msg.message,
+                        severity = "error",
+                    });
+                }
+                if (hadError)
                 {
-                    assemblyName = assembly,
-                    file = msg.file,
-                    line = msg.line,
-                    column = msg.column,
-                    message = msg.message,
-                    severity = "error",
-                });
-            }
-            if (hadError)
-            {
-                HasCompileErrors = true;
+                    HasCompileErrors = true;
+                }
+
             }
         }
 
         // Called on main thread when all assemblies are done (both auto and request-scoped)
         private void OnCompilationFinished(object context)
         {
-            if (UPilotDiagnosticModuleService.IsCompilationContext(context)) return;
-            CompileFinishedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            LastProgressAt = CompileFinishedAt;
-            IsCompiling = false;
-            IsRequestCompileActive = false;
-            Status = "compiler_finished";
-            Phase = "compiler_finished";
-            Terminal = false;
-            VerificationPending = true;
-            ErrorsVerified = false;
-            LastCompilerFinishedAt = CompileFinishedAt;
-            var elapsed = CompileFinishedAt - CompileStartedAt;
-            var focus = GetFocusStateString();
-            Logger.Log("COMPILE", $"编译流水线完成: requestId={_lastRequestId} errors={_lastErrors.Count} warnings={_lastWarningCount} elapsed={elapsed}ms 焦点={focus}");
+            lock (CompileEvidenceLock)
+            {
+                if (UPilotDiagnosticModuleService.IsCompilationContext(context)) return;
+                CompileFinishedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                LastProgressAt = CompileFinishedAt;
+                IsCompiling = false;
+                IsRequestCompileActive = false;
+                Status = "compiler_finished";
+                Phase = "compiler_finished";
+                Terminal = false;
+                VerificationPending = true;
+                ErrorsVerified = false;
+                LastCompilerFinishedAt = CompileFinishedAt;
+                var elapsed = CompileFinishedAt - CompileStartedAt;
+                var focus = GetFocusStateString();
+                Logger.Log("COMPILE", $"编译流水线完成: requestId={_lastRequestId} errors={_lastErrors.Count} warnings={_lastWarningCount} elapsed={elapsed}ms 焦点={focus}");
 
-            // Persist errors to disk so they survive domain reload
-            PersistToDisk();
+                RecordMilestoneAndPersist("compiler_finished");
 
-            _compileTcs?.TrySetResult(true);
+                _compileTcs?.TrySetResult(true);
+
+            }
+            NotifyLocalState("compiler_finished");
         }
 
         public void MarkDomainReload()
         {
-            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            var recentCompile = CompileFinishedAt > 0 && now - CompileFinishedAt <= 30000;
-            if (!IsCompiling && !IsRequestCompileActive && !recentCompile &&
-                (Terminal || !VerificationPending))
-                return;
+            lock (CompileEvidenceLock)
+            {
+                if (!MatchesEvidenceIdentity(_compileEvidence) || Phase == "domain_reload") return;
+                var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                var recentCompile = CompileFinishedAt > 0 && now - CompileFinishedAt <= 30000;
+                if (!IsCompiling && !IsRequestCompileActive && !recentCompile &&
+                    (Terminal || !VerificationPending))
+                    return;
 
-            Status = "domain_reload";
-            Phase = "domain_reload";
-            Terminal = false;
-            VerificationPending = true;
-            DomainReloadObserved = true;
-            _reloadId = Guid.NewGuid().ToString("N");
-            LastProgressAt = now;
-            PersistToDisk();
+                Status = "domain_reload";
+                Phase = "domain_reload";
+                Terminal = false;
+                VerificationPending = true;
+                DomainReloadObserved = true;
+                _reloadId = Guid.NewGuid().ToString("N");
+                LastProgressAt = now;
+                RecordMilestoneAndPersist("domain_reload");
+
+            }
+            NotifyLocalState("domain_reload");
         }
 
         public void MarkVerifyingAfterReload()
         {
-            if (!string.Equals(Phase, "domain_reload", StringComparison.OrdinalIgnoreCase))
-                return;
+            lock (CompileEvidenceLock)
+            {
+                if (!MatchesEvidenceIdentity(_compileEvidence) ||
+                    !string.Equals(Phase, "domain_reload", StringComparison.OrdinalIgnoreCase))
+                    return;
 
-            IsCompiling = false;
-            Status = "verifying";
-            Phase = "verifying";
-            Terminal = false;
-            VerificationPending = true;
-            DomainReloadObserved = true;
-            LastProgressAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            PersistToDisk();
+                IsCompiling = false;
+                Status = "verifying";
+                Phase = "verifying";
+                Terminal = false;
+                VerificationPending = true;
+                DomainReloadObserved = true;
+                LastProgressAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                RecordMilestoneAndPersist("verifying");
+
+            }
+            NotifyLocalState("verifying");
         }
 
         public bool CompleteVerification()
         {
-            if (!string.Equals(Phase, "verifying", StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(Phase, "domain_reload", StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(Phase, "compiler_finished", StringComparison.OrdinalIgnoreCase))
-                return false;
+            lock (CompileEvidenceLock)
+            {
+                if (!string.Equals(Phase, "verifying", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(Phase, "domain_reload", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(Phase, "compiler_finished", StringComparison.OrdinalIgnoreCase))
+                    return false;
+                if (IsCompiling || EditorApplication.isCompiling || !VerifyPersistedCompilerResult()) return false;
 
-            IsCompiling = false;
-            IsRequestCompileActive = false;
-            Status = _lastErrors.Count > 0 ? "failed" : "finished";
-            Phase = _lastErrors.Count > 0 ? "failed" : "completed";
-            CompileFinishedAt = CompileFinishedAt > 0
-                ? CompileFinishedAt
-                : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            LastProgressAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            LastCompileVerifiedAt = LastProgressAt;
-            LastTerminalCompileAt = LastProgressAt;
-            Terminal = true;
-            VerificationPending = false;
-            ErrorsVerified = true;
-            PersistToDisk();
+                // Build a candidate without publishing success in memory before its checked persistence.
+                var candidate = BuildLastCompileErrorsPayload(includeWarnings: true);
+                var verifiedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                candidate.status = _lastErrors.Count > 0 ? "failed" : "finished";
+                candidate.phase = _lastErrors.Count > 0 ? "failed" : "completed";
+                candidate.lastProgressAt = verifiedAt;
+                candidate.lastCompileVerifiedAt = verifiedAt;
+                candidate.lastTerminalCompileAt = verifiedAt;
+                candidate.terminal = true;
+                candidate.verificationPending = false;
+                candidate.errorsVerified = true;
+                var evidence = candidate.compileEvidence;
+                var terminal = new CompileMilestonePayload
+                {
+                    stage = "terminal", phase = candidate.phase, revision = ++evidence.revision,
+                    observedAt = verifiedAt, terminal = true, errorsVerified = true, errorCount = candidate.total,
+                };
+                var index = evidence.milestones.FindIndex(value => value.stage == "terminal");
+                if (index < 0) evidence.milestones.Add(terminal); else evidence.milestones[index] = terminal;
+                if (!PersistToDisk(candidate)) return false;
+
+                IsCompiling = false; IsRequestCompileActive = false;
+                Status = candidate.status; Phase = candidate.phase;
+                LastProgressAt = verifiedAt; LastCompileVerifiedAt = verifiedAt; LastTerminalCompileAt = verifiedAt;
+                Terminal = true; VerificationPending = false; ErrorsVerified = true;
+                _compileEvidence = CloneEvidence(evidence);
+            }
+            NotifyLocalState("terminal");
             return true;
         }
 
@@ -529,10 +549,12 @@ namespace CodingRiver.UPilot
                 finishedAt = CompileFinishedAt,
             };
 
-        public CompileErrorsPayload BuildCompileErrorsPayload(string requestId, bool includeWarnings = false) =>
-            new CompileErrorsPayload
+        public CompileErrorsPayload BuildCompileErrorsPayload(string requestId, bool includeWarnings = false)
+        {
+            lock (CompileEvidenceLock) return new CompileErrorsPayload
             {
                 requestId = requestId,
+                compileEvidence = BuildCompileEvidencePayload(),
                 compileOperationId = _compileOperationId,
                 writeBatchId = _writeBatchId,
                 writeBatchCreatedAt = _writeBatchCreatedAt,
@@ -561,6 +583,7 @@ namespace CodingRiver.UPilot
                     ? new List<CompileErrorItemPayload>(_lastWarnings)
                     : null,
             };
+        }
 
         public CompileErrorsPayload BuildLastCompileErrorsPayload(bool includeWarnings = false) =>
             BuildCompileErrorsPayload(_lastRequestId, includeWarnings);

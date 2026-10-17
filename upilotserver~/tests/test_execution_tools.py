@@ -36,8 +36,8 @@ def _service():
     return service
 
 
-def test_execution_registry_v8_explicit_tools_are_write_gated_non_idempotent():
-    assert REGISTRY_VERSION == 8
+def test_execution_registry_v9_explicit_tools_are_write_gated_non_idempotent():
+    assert REGISTRY_VERSION == 9
     for name in ("execution_session", "csharp_eval", "reflection_emit_type"):
         descriptor = REGISTRY.resolve(name)
         assert descriptor is not None
@@ -651,3 +651,19 @@ def test_reflection_decorates_legacy_binder_diagnostics_without_losing_error_ide
     assert result.error.detail["executionDiagnostics"]["resolveMs"] == 1.25
     assert result.error.detail["executionKind"] == "method"
     assert len(service.dispatcher.calls) == 1
+
+
+def test_nested_budget_error_preserves_long_measurements_and_original_evidence():
+    evidence = {
+        "metric": "wallClockMs", "limit": 5_000_000_000, "actual": 5_000_000_001,
+        "lastCompletedSpan": {"start": 12, "length": 3},
+        "exceptionType": "TargetFailure", "exceptionMessage": "original",
+        "stackTrace": "original stack", "cleanupDiagnostics": ["cleanup pending"],
+        "sideEffectsMayHaveOccurred": True,
+        "executionDiagnostics": {"dispatchWaitMs": 123, "targetInvokeMs": 44,
+                                 "dispatchCount": 1, "targetStartedCount": 1, "targetFinishedCount": 0},
+    }
+    response = fail("budget", "EXECUTION_BUDGET_EXCEEDED", "budget", {"detail": evidence})
+    result = normalize_execution_error(response)
+    for key, value in evidence.items():
+        assert result.error.detail[key] == value

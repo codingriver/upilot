@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -202,21 +202,10 @@ namespace CodingRiver.UPilot
 
         private static int FindExplicitForeignStopOwner(ServerStopScope scope, long deadline)
         {
-            var remaining = Math.Min(750, deadline - StopNow);
-            if (remaining <= 0) throw new TimeoutException("停止前项目证据检查已超过原期限。");
-            try
-            {
-                using var client = CreateLoopbackStatusClient();
-                client.Timeout = TimeSpan.FromMilliseconds(remaining);
-                using var response = client.GetAsync($"http://127.0.0.1:{scope.HttpPort}/health").GetAwaiter().GetResult();
-                if (!response.IsSuccessStatusCode) return 0;
-                var json = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
-                var project = ResolveHealthProjectPath(json);
-                return IsUPilotServerPayload(json) && !string.IsNullOrEmpty(project) &&
-                    !UPilotDeploymentDiagnostics.SamePath(project, scope.ProjectPath) ? ParseIntFromJson(json, "server_pid") : 0;
-            }
-            catch (System.Net.Http.HttpRequestException) { return 0; }
-            catch (OperationCanceledException) { return 0; } // Health is optional stop evidence, not an ownership gate.
+            if (StopNow >= deadline) throw new TimeoutException("停止前项目证据检查已超过原期限。");
+            return UPilotBridge.Instance.TryGetServerIdentity(out var identity) &&
+                !UPilotDeploymentDiagnostics.SamePath(identity.configured_project_path, scope.ProjectPath)
+                ? identity.server_pid : 0;
         }
 
         internal bool VerifyMaintenanceEndpointIdentity(int expectedProcessId, long deadlineUtcMs = 0)

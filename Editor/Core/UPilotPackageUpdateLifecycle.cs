@@ -4,6 +4,7 @@
 // -----------------------------------------------------------------------
 
 using System;
+using System.Linq;
 using System.Threading.Tasks;
 using UnityEditor;
 using UnityEditor.PackageManager;
@@ -579,8 +580,8 @@ namespace CodingRiver.UPilot
             if (!status.IsRunning || !status.HttpPortListening || !status.WsPortListening ||
                 !UPilotMcpServerManager.IsVerifiedRestartHealth(status, status.ProcessId ?? 0,
                     UPilotProjectConfig.ProjectRoot) || !bridge.IsAuthenticated || !bridge.IsWsOpen ||
-                string.IsNullOrEmpty(bridge.SessionId) || string.IsNullOrEmpty(status.Health?.server_instance_id) ||
-                UPilotDeploymentDiagnostics.Observe(bridge, status).Length != 0) return false;
+                string.IsNullOrEmpty(bridge.SessionId) || string.IsNullOrEmpty(status.Identity?.server_instance_id) ||
+                UPilotDeploymentDiagnostics.Observe(bridge, status).Any(issue => issue.Blocking)) return false;
             try
             {
                 using (var process = System.Diagnostics.Process.GetProcessById(status.ProcessId.Value))
@@ -590,7 +591,7 @@ namespace CodingRiver.UPilot
             catch (Exception) { return false; }
             if (!CanContinueDeferredRepair(wait) || UPilotBridge.Instance.GetStatus().SessionId != bridge.SessionId) return false;
             UPilotServerRestartDiagnostics.ObserveSupersededRecovery(originalId, status.ProcessId.Value,
-                status.Health.server_instance_id, status.HealthProjectPath, true);
+                status.Identity.server_instance_id, status.IdentityProjectPath, true);
             return true;
         }
 
@@ -737,6 +738,9 @@ namespace CodingRiver.UPilot
                 return;
             }
 
+            // 先消费恢复请求，避免 update 与已排队的 delayCall 在异步服务验证期间重复启动。
+            var recovery = _restoreWait;
+            ClearUpdateState(preserveRecoveryWait: true);
             UPilotProjectConfig.Reload();
             UPilotProjectConfig.ApplyEndpoints(UPilotBridge.Instance);
             var agentConfigurationRefresh = UPilotAgentSetup.RefreshManagedConfigurationAfterPackageUpdate();
@@ -750,12 +754,10 @@ namespace CodingRiver.UPilot
                     targetServerVersion,
                     preparedServerPath,
                     shouldRestart,
-                    _restoreWait);
+                    recovery);
                 return;
             }
 
-            var recovery = _restoreWait;
-            ClearUpdateState(preserveRecoveryWait: true);
             ClearPendingManagedPackageUpdate();
             UPilotUpdateService.ClearExternalPackageManagerAbort();
             var manager = UPilotMcpServerManager.Instance;
@@ -803,11 +805,13 @@ namespace CodingRiver.UPilot
                 var updated = string.IsNullOrWhiteSpace(preparedServerPath)
                     ? await UPilotUpdateService.Instance.InstallManagedServerAfterPackageUpdateAsync(
                         targetServerVersion,
-                        shouldRestart)
+                        shouldRestart,
+                        startupDeadlineUtcMs: recovery.deadlineUtcMs)
                     : await UPilotUpdateService.Instance.ActivatePreparedManagedServerAfterPackageUpdateAsync(
                         preparedServerPath,
                         targetServerVersion,
-                        shouldRestart);
+                        shouldRestart,
+                        startupDeadlineUtcMs: recovery.deadlineUtcMs);
                 if (!IsCurrentRecoveryWait(RestoreWaitKey, recovery) || UPilotQuickStart.IsExplicitlyStopped) return;
                 ClearUpdateState();
                 ClearPendingManagedPackageUpdate();
@@ -822,12 +826,6 @@ namespace CodingRiver.UPilot
                 UPilotUpdateService.ClearExternalPackageManagerAbort();
                 UPilotUpdateService.SetOperationFailed("MCP 服务更新失败：" + ex.Message);
                 Debug.LogError("[UPilot] Managed MCP service update after package update failed: " + ex);
-                if (!shouldRestart || !UPilotSetupState.IsCompleted)
-                    return;
-
-                UPilotProjectConfig.Reload();
-                UPilotProjectConfig.ApplyEndpoints(UPilotBridge.Instance);
-                UPilotMcpServerManager.Instance.RestartServer(() => UPilotBridge.Instance.EnsureStarted());
             }
         }
 

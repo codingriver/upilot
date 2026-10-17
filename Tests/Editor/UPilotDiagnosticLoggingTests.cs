@@ -17,6 +17,126 @@ namespace CodingRiver.UPilot.Tests
             return reader.ReadToEnd();
         }
 
+        [TestCase(false)]
+        [TestCase(true)]
+        public void ServiceWarningsBypassConsoleAndMinimumLevelAndScopeProvenance(bool console)
+        {
+            var priorConsole = Logger.LogToUnityConsole;
+            var priorLevel = Logger.MinLevel;
+            var scope = Guid.NewGuid().ToString("N");
+            var observed = new List<string>();
+            Application.LogCallback callback = (message, stack, type) => {
+                if (message.Contains(scope)) observed.Add(Logger.CaptureDiagnosticSource(message, type));
+            };
+            try
+            {
+                Logger.LogToUnityConsole = console; Logger.MinLevel = Logger.LogLevel.Error;
+                Application.logMessageReceivedThreaded += callback;
+                LogAssert.Expect(LogType.Warning, new Regex(scope));
+                Logger.ReportServiceObservation("SERVER", scope, scope: scope);
+                Logger.ReportServiceObservation("SERVER", scope, scope: scope);
+                LogAssert.Expect(LogType.Warning, new Regex("count=1"));
+                Logger.CloseDiagnostics(scope);
+                LogAssert.Expect(LogType.Warning, new Regex(scope));
+                Debug.LogWarning(scope); // A matching body outside the scoped emission has no provenance.
+                Assert.That(observed, Is.EqualTo(new[] { Logger.ServiceObservationSource, Logger.ServiceObservationSource, "" }));
+                Assert.That(Logger.CaptureDiagnosticSource(scope, LogType.Warning), Is.Empty);
+            }
+            finally
+            {
+                Application.logMessageReceivedThreaded -= callback;
+                Logger.CloseDiagnostics(scope); Logger.LogToUnityConsole = priorConsole; Logger.MinLevel = priorLevel;
+            }
+        }
+
+        [Test]
+        public void NestedIdenticalAndOtherThreadLogsCannotConsumeObservationProvenance()
+        {
+            var scope = "nested-observation-" + Guid.NewGuid().ToString("N");
+            var sources = new List<string>();
+            var nested = false;
+            var callbackEntry = typeof(Application).GetMethod("CallLogCallback",
+                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+            Assert.That(callbackEntry, Is.Not.Null, "The Unity Console callback boundary must be observable.");
+            Application.LogCallback reenter = (message, stack, type) => {
+                if (!message.Contains(scope) || nested) return;
+                nested = true;
+                Assert.That(System.Threading.Tasks.Task.Run(() => Logger.CaptureDiagnosticSource(message, type))
+                    .GetAwaiter().GetResult(), Is.Empty, "Another thread cannot inherit the source scope.");
+                // Simulate a reentrant native callback, even on Unity versions that suppress
+                // Debug.Log from inside a log callback. The body and severity are identical.
+                callbackEntry.Invoke(null, new object[] { message, stack, type, true });
+            };
+            Application.LogCallback capture = (message, stack, type) => {
+                if (message.Contains(scope)) sources.Add(Logger.CaptureDiagnosticSource(message, type));
+            };
+            try
+            {
+                Application.logMessageReceived += reenter;
+                Application.logMessageReceivedThreaded += capture;
+                LogAssert.Expect(LogType.Warning, new Regex(scope));
+                LogAssert.Expect(LogType.Warning, new Regex(scope));
+                Logger.ReportServiceObservation("SERVER", scope, scope: scope);
+                Assert.That(sources, Is.EqualTo(new[] { "", Logger.ServiceObservationSource }));
+            }
+            finally
+            {
+                Application.logMessageReceived -= reenter;
+                Application.logMessageReceivedThreaded -= capture;
+                Logger.CloseDiagnostics(scope);
+            }
+        }
+
+        [Test]
+        public void ExhaustedBridgeInitializationBudgetIsRedAndAggregatesAcrossReconnectSessions()
+        {
+            var priorConsole = Logger.LogToUnityConsole;
+            var priorLevel = Logger.MinLevel;
+            var scope = "budget-diagnostic-" + Guid.NewGuid().ToString("N");
+            var observed = new List<(string message, LogType type)>();
+            UPilotBridge.InitializationBudgetExpiredException failure;
+            try { throw new UPilotBridge.InitializationBudgetExpiredException(0, 12345, 1000); }
+            catch (UPilotBridge.InitializationBudgetExpiredException exception) { failure = exception; }
+            Application.LogCallback callback = (message, stack, type) => {
+                if (message.Contains(scope)) observed.Add((message, type));
+            };
+            try
+            {
+                Logger.LogToUnityConsole = false;
+                Logger.MinLevel = Logger.LogLevel.Error;
+                Application.logMessageReceivedThreaded += callback;
+                LogAssert.Expect(LogType.Error, new Regex(scope));
+                UPilotBridge.ReportInitializationBudgetExpired(failure, scope, "original-session", 7, scope);
+                UPilotBridge.ReportInitializationBudgetExpired(failure, scope, "retry-session", 8, scope);
+                Assert.That(observed.Count, Is.EqualTo(1), "A repeated expired budget is the same root despite a new socket session.");
+                Assert.That(observed[0].type, Is.EqualTo(LogType.Error));
+                Assert.That(observed[0].message, Does.Contain("sessionId=original-session")
+                    .And.Contain("connectionEpoch=7").And.Contain("remainingBudgetMs=0")
+                    .And.Contain("originalDeadlineTick=12345").And.Contain("readyRecoveryDeadlineUtcMs=1000")
+                    .And.Contain(failure.ToString()));
+                var anotherEpisode = new UPilotBridge.InitializationBudgetExpiredException(0, 23456, 2000);
+                LogAssert.Expect(LogType.Error, new Regex(scope));
+                UPilotBridge.ReportInitializationBudgetExpired(anotherEpisode, scope, "new-episode-session", 9, scope);
+                Assert.That(observed.Count, Is.EqualTo(2), "Different recovery episodes at the same endpoint must not merge.");
+                Assert.That(observed[1].message, Does.Contain("readyRecoveryDeadlineUtcMs=2000"));
+                LogAssert.Expect(LogType.Error, new Regex("count=1"));
+                Logger.CloseDiagnostics(scope);
+                Assert.That(observed.Count, Is.EqualTo(3));
+                Assert.That(observed[2].type, Is.EqualTo(LogType.Error));
+                Assert.That(observed[2].message, Does.Contain("count=1").And.Contain("firstAt=").And.Contain("lastAt="));
+                Assert.That(failure.RemainingBudgetMs, Is.Zero);
+                Assert.That(failure.OriginalDeadlineTick, Is.EqualTo(12345));
+                Assert.That(failure.ReadyRecoveryDeadlineUtcMs, Is.EqualTo(1000));
+            }
+            finally
+            {
+                Application.logMessageReceivedThreaded -= callback;
+                Logger.CloseDiagnostics(scope);
+                Logger.LogToUnityConsole = priorConsole;
+                Logger.MinLevel = priorLevel;
+            }
+        }
+
         [Test]
         public void FirstIsImmediateAndRepeatsAreCountedWithoutQuietPollingNoise()
         {

@@ -72,9 +72,19 @@ namespace CodingRiver.UPilot.Automation
         public long lostRecordCount;
         public AutomationReportLogSample[] blockingSamples = Array.Empty<AutomationReportLogSample>();
         public int omittedBlockingCount;
+        public AutomationReportLogGroup[] blockingGroups = Array.Empty<AutomationReportLogGroup>();
+        public int omittedBlockingGroupCount;
         public AutomationDiagnostic[] diagnostics = Array.Empty<AutomationDiagnostic>();
         public int omittedDiagnosticCount;
         public bool diagnosticsTextTruncated;
+    }
+
+    [Serializable]
+    public sealed class AutomationReportLogGroup
+    {
+        public AutomationReportLogSample representative;
+        public int count;
+        public long firstSequence, lastSequence;
     }
 
     [Serializable]
@@ -357,21 +367,16 @@ namespace CodingRiver.UPilot.Automation
             }
             else WriteNewFileAtomically(path, json);
 
-            var samples = policy.classifications.Where(c => c.disposition == "blocked")
-                .Take(BlockingSampleLimit).Select(c =>
-                {
-                    var sample = new AutomationReportLogSample
-                    { sequence = c.record.sequence, hasStackTrace = !string.IsNullOrEmpty(c.record.stackTrace) };
-                    sample.level = Limit(c.record.logType, LabelLimit, ref sample.textTruncated);
-                    sample.instanceId = Limit(c.context?.caseId, LabelLimit, ref sample.textTruncated);
-                    sample.phaseId = Limit(c.context?.phaseId, LabelLimit, ref sample.textTruncated);
-                    sample.ruleId = Limit(c.ruleId, LabelLimit, ref sample.textTruncated);
-                    sample.disposition = Limit(c.disposition, LabelLimit, ref sample.textTruncated);
-                    sample.reason = Limit(c.reason, LabelLimit, ref sample.textTruncated);
-                    sample.fingerprint = Limit(c.fingerprint, LabelLimit, ref sample.textTruncated);
-                    sample.message = Limit(c.record.message, MessageLimit, ref sample.textTruncated);
-                    return sample;
-                }).ToArray();
+            var blocked = policy.classifications.Where(c => c.disposition == "blocked").ToArray();
+            var samples = blocked.Take(BlockingSampleLimit).Select(ToLogSample).ToArray();
+            // Group with complete keys before truncating display text. Preserve first occurrence order.
+            var groups = blocked.GroupBy(c => (c.fingerprint, c.context?.phaseId, c.context?.caseId, c.ruleId))
+                .OrderBy(g => g.Min(c => c.record.sequence)).ToArray();
+            var summaries = groups.Take(BlockingSampleLimit).Select(g => new AutomationReportLogGroup {
+                representative = ToLogSample(g.OrderBy(c => c.record.sequence).First()),
+                count = g.Count(), firstSequence = g.Min(c => c.record.sequence),
+                lastSequence = g.Max(c => c.record.sequence),
+            }).ToArray();
             bool diagnosticTextTruncated = false;
             var diagnostics = policy.diagnostics.Take(DiagnosticLimit).Select(d =>
             {
@@ -391,9 +396,25 @@ namespace CodingRiver.UPilot.Automation
                 totalCount = policy.totalCount, blockedCount = policy.blockedCount,
                 allowedCount = policy.allowedCount, ignoredCount = policy.ignoredCount, lostRecordCount = lostRecordCount,
                 blockingSamples = samples, omittedBlockingCount = Math.Max(0, policy.blockedCount - samples.Length),
+                blockingGroups = summaries, omittedBlockingGroupCount = Math.Max(0, groups.Length - summaries.Length),
                 diagnostics = diagnostics, omittedDiagnosticCount = Math.Max(0, policy.diagnostics.Count - diagnostics.Length),
                 diagnosticsTextTruncated = diagnosticTextTruncated,
             };
+        }
+
+        private static AutomationReportLogSample ToLogSample(AutomationLogClassification c)
+        {
+            var sample = new AutomationReportLogSample
+            { sequence = c.record.sequence, hasStackTrace = !string.IsNullOrEmpty(c.record.stackTrace) };
+            sample.level = Limit(c.record.logType, LabelLimit, ref sample.textTruncated);
+            sample.instanceId = Limit(c.context?.caseId, LabelLimit, ref sample.textTruncated);
+            sample.phaseId = Limit(c.context?.phaseId, LabelLimit, ref sample.textTruncated);
+            sample.ruleId = Limit(c.ruleId, LabelLimit, ref sample.textTruncated);
+            sample.disposition = Limit(c.disposition, LabelLimit, ref sample.textTruncated);
+            sample.reason = Limit(c.reason, LabelLimit, ref sample.textTruncated);
+            sample.fingerprint = Limit(c.fingerprint, LabelLimit, ref sample.textTruncated);
+            sample.message = Limit(c.record.message, MessageLimit, ref sample.textTruncated);
+            return sample;
         }
 
         private static string Limit(string text, int limit, ref bool truncated)

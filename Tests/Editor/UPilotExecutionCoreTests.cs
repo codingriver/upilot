@@ -275,6 +275,75 @@ namespace CodingRiver.UPilot.Tests
 
     public sealed class UPilotExecutionCoreTests
     {
+        [Test]
+        public void BudgetWireDetailPreservesLongValuesAndCompletedBoundary()
+        {
+            var ex = new ExecutionContractException("EXECUTION_BUDGET_EXCEEDED", "budget", new Dictionary<string, object> {
+                { "metric", "wallClockMs" }, { "actual", 5000000001L }, { "limit", 5000000000L },
+                { "lastCompletedSpan", new ExecutionSourceSpan { start = 7, length = 3 } },
+                { "sideEffectsMayHaveOccurred", true }, { "cleanupDiagnostics", new[] { "cleanup retained" } }
+            });
+            var detail = UPilotExecutionService.ToErrorDetail(ex, "budget-fixture", "csharp.eval");
+            Assert.That(detail.actual, Is.EqualTo(5000000001L));
+            Assert.That(detail.limit, Is.EqualTo(5000000000L));
+            Assert.That(detail.metric, Is.EqualTo("wallClockMs"));
+            Assert.That(detail.lastCompletedSpan.start, Is.EqualTo(7));
+            Assert.That(detail.sideEffectsMayHaveOccurred, Is.True);
+            Assert.That(detail.cleanupDiagnostics, Is.EqualTo(new[] { "cleanup retained" }));
+        }
+
+        [Test]
+        public void InvocationTimingIncludesDispatchAndExceptionalTargetExit()
+        {
+            var context = new CSharpEvaluationContext(invocationScheduler: target => { Thread.Sleep(25); return target(); });
+            Assert.Throws<InvalidOperationException>(() => context.Invoke(() => { Thread.Sleep(25); throw new InvalidOperationException("target"); }));
+            Assert.That(context.Diagnostics.DispatchCount, Is.EqualTo(1));
+            Assert.That(context.Diagnostics.TargetStartedCount, Is.EqualTo(1));
+            Assert.That(context.Diagnostics.TargetFinishedCount, Is.EqualTo(1));
+            Assert.That(context.Diagnostics.DispatchWaitMs, Is.GreaterThanOrEqualTo(15));
+            Assert.That(context.Diagnostics.TargetInvokeMs, Is.GreaterThanOrEqualTo(15));
+        }
+
+        [Test]
+        public void LateDispatchedTargetCannotRewriteReturnedDiagnostics()
+        {
+            Func<object> late = null;
+            var context = new CSharpEvaluationContext(invocationScheduler: target => { late = target; return null; });
+            context.Invoke(() => 42);
+            Assert.That(context.Diagnostics.TargetStartedCount, Is.Zero);
+            var wait = context.Diagnostics.DispatchWaitMs;
+            Assert.That(late(), Is.EqualTo(42));
+            Assert.That(context.Diagnostics.TargetStartedCount, Is.Zero);
+            Assert.That(context.Diagnostics.TargetFinishedCount, Is.Zero);
+            Assert.That(context.Diagnostics.DispatchWaitMs, Is.EqualTo(wait));
+        }
+
+        [Test]
+        public void RunningTargetIsFrozenAtSchedulerReturnAndPersistentContextOwnsItsMetrics()
+        {
+            using var entered = new ManualResetEventSlim();
+            using var release = new ManualResetEventSlim();
+            Task<object> work = null;
+            var context = new CSharpEvaluationContext(invocationScheduler: target => {
+                work = Task.Run(target); Assert.That(entered.Wait(2000), Is.True); return null;
+            });
+            try
+            {
+                context.Invoke(() => { entered.Set(); release.Wait(); return 42; });
+                Assert.That(context.Diagnostics.TargetStartedCount, Is.EqualTo(1));
+                Assert.That(context.Diagnostics.TargetFinishedCount, Is.Zero);
+                var observed = context.Diagnostics.TargetInvokeMs;
+                release.Set(); Assert.That(work.Wait(2000), Is.True);
+                Assert.That(context.Diagnostics.TargetFinishedCount, Is.Zero);
+                Assert.That(context.Diagnostics.TargetInvokeMs, Is.EqualTo(observed));
+                var other = new CSharpEvaluationContext();
+                other.Invoke(() => null);
+                Assert.That(other.Diagnostics.DispatchCount, Is.Zero);
+                Assert.That(other.Diagnostics.TargetFinishedCount, Is.EqualTo(1));
+            }
+            finally { release.Set(); work?.Wait(2000); }
+        }
+
         [TestCase(false, -1)]
         [TestCase(false, 0)]
         [TestCase(false, 1)]

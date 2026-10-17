@@ -1,5 +1,6 @@
 ﻿// SPDX-License-Identifier: MIT
 using System;
+using System.Linq;
 using System.Diagnostics;
 using System.IO;
 using System.Threading;
@@ -77,6 +78,161 @@ namespace CodingRiver.UPilot
         // 描述只通过副本暴露；调用方不能改变本次操作的身份依据。
         internal ServerLaunchState LaunchIdentity => _launchState?.Snapshot();
         internal ServerLaunchSpec LaunchSpec => (_launchState?.spec ?? _recoveredServiceSpec)?.Snapshot();
+
+        internal bool HasPendingLaunchVerification => _launchState?.spec != null && !_launchState.terminal &&
+            (_lifecyclePhase == UPilotServerLifecyclePhase.Starting || _lifecyclePhase == UPilotServerLifecyclePhase.Verifying) &&
+            _launchObservationCancellation != null && !_launchObservationCancellation.IsCancellationRequested &&
+            _launchState.spec.httpPort == HttpPort && _launchState.spec.wsPort == WsPort &&
+            UPilotDeploymentDiagnostics.SamePath(_launchState.spec.projectPath, CurrentProjectRoot);
+
+        internal Func<BridgeStatus> StartupBridgeStatusOverride;
+        internal Func<HelloAckPayload, bool> HelloServerIdentityOverride;
+
+        // Authentication commits only after the existing launch/discovery path has OS identity.
+        // Candidate hello is already readable by that path, so neither side waits for authentication.
+        internal bool CanAuthenticateServerHello(HelloAckPayload payload)
+        {
+            if (HelloServerIdentityOverride != null) return HelloServerIdentityOverride(payload);
+            if (payload == null || !SameProjectPath(payload.configured_project_path, CurrentProjectRoot)) return false;
+            try
+            {
+                var state = _launchState;
+                if (state?.verified == true && _trackedProcess != null && !_trackedProcess.HasExited &&
+                    state.spec.httpPort == HttpPort && state.spec.wsPort == WsPort &&
+                    state.servicePid == payload.server_pid && state.instanceId == payload.server_instance_id &&
+                    _trackedProcess.Id == state.servicePid &&
+                    _trackedProcess.StartTime.ToUniversalTime().Ticks == state.serviceCreatedAt) return true;
+                if (HasVerifiedRecoveredAttachment && _recoveredServiceTarget.ProcessId == payload.server_pid &&
+                    _recoveredServiceInstanceId == payload.server_instance_id && !_recoveredServiceTarget.HasExited) return true;
+                var candidate = _helloCandidateTarget;
+                return candidate != null && _existingServiceRecoveryCancellation?.IsCancellationRequested == false &&
+                    _existingServiceRecovery != null && StopNow < _existingServiceRecovery.reuseDeadline &&
+                    _lifecycleOperationId == _existingServiceRecovery.id &&
+                    candidate.ProcessId == payload.server_pid && _helloCandidateInstance == payload.server_instance_id &&
+                    !candidate.HasExited;
+            }
+            catch (InvalidOperationException) { return false; }
+            catch (System.ComponentModel.Win32Exception) { return false; }
+        }
+
+        // Observe only the identity already admitted by StartServer. Version availability alone
+        // cannot replace that owner's process, handshake and read-only round-trip verification.
+        internal async Task<McpServerStatus> WaitForVerifiedStartupAsync(string expectedServerVersion,
+            long deadlineUtcMs = 0, CancellationToken cancellationToken = default)
+        {
+            var launch = _launchState;
+            var recovery = launch == null ? _existingServiceRecovery : null;
+            var spec = (launch?.spec ?? recovery?.spec)?.Snapshot();
+            var originalDeadline = launch != null
+                ? (_launchReloadRevalidation ? launch.reloadRevalidation?.deadlineUtcMs ?? launch.deadlineUtcMs : launch.deadlineUtcMs)
+                : recovery?.deadline ?? 0;
+            if (spec == null || originalDeadline <= 0)
+                throw new InvalidOperationException("没有可观察的本次服务启动身份；未重新派发启动。");
+            var deadline = deadlineUtcMs > 0 ? Math.Min(originalDeadline, deadlineUtcMs) : originalDeadline;
+            var startGeneration = Volatile.Read(ref _startAttemptGeneration);
+            var restartGeneration = _restartGeneration;
+
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (recovery != null && ReferenceEquals(recovery, _existingServiceRecovery) && restartGeneration == _restartGeneration &&
+                    (recovery.status == "failed" || (recovery.status == "stopped" && !string.IsNullOrEmpty(recovery.error))))
+                    throw new InvalidOperationException("本次服务恢复未完成：" + recovery.error);
+                var currentStartGeneration = Volatile.Read(ref _startAttemptGeneration);
+                if ((startGeneration != currentStartGeneration &&
+                     !IsOwnedRecoveryStopGeneration(recovery, startGeneration, currentStartGeneration, restartGeneration)) ||
+                    restartGeneration != _restartGeneration ||
+                    UPilotQuickStart.IsExplicitlyStopped ||
+                    (launch != null ? !ReferenceEquals(launch, _launchState) : !ReferenceEquals(recovery, _existingServiceRecovery)))
+                    throw new OperationCanceledException("本次启动观察已被停止或新的服务操作取代；未重放启动。", cancellationToken);
+                if ((_lifecyclePhase == UPilotServerLifecyclePhase.Stopping || HasActiveStopObservation) &&
+                    (recovery == null || recovery.status != "cleaning" || _stopObservation?.requestId != recovery.id))
+                    throw new OperationCanceledException("本次服务正在停止，启动观察已结束。", cancellationToken);
+                if (spec.httpPort != HttpPort || spec.wsPort != WsPort ||
+                    !UPilotDeploymentDiagnostics.SamePath(spec.projectPath, CurrentProjectRoot))
+                    throw new InvalidOperationException("本次启动的项目或端口配置已变化；未接受其他服务的状态。");
+
+                var currentLaunch = launch;
+                if (recovery != null)
+                {
+                    if (recovery.status == "failed" || recovery.status == "stopped")
+                        throw new InvalidOperationException("本次服务恢复未完成：" +
+                            (string.IsNullOrEmpty(recovery.error) ? recovery.status : recovery.error));
+                    if (recovery.status == "replacement_started" || recovery.status == "succeeded")
+                    {
+                        currentLaunch = _launchState;
+                        if (currentLaunch == null || recovery.replacementPid <= 0 ||
+                            currentLaunch.launcherPid != recovery.replacementPid ||
+                            currentLaunch.launcherCreatedAt != recovery.replacementLauncherCreatedAt ||
+                            recovery.replacementSpec == null || currentLaunch.spec == null ||
+                            !UPilotDeploymentDiagnostics.SamePath(currentLaunch.spec.projectPath, spec.projectPath) ||
+                            currentLaunch.spec.httpPort != spec.httpPort || currentLaunch.spec.wsPort != spec.wsPort ||
+                            !UPilotDeploymentDiagnostics.SamePath(currentLaunch.spec.expectedEntry, recovery.replacementSpec.expectedEntry))
+                            throw new InvalidOperationException("本次恢复的新服务启动身份不匹配；未接受替代操作的结果。");
+                    }
+                }
+                if (currentLaunch?.terminal == true)
+                    throw new InvalidOperationException("本次服务启动验证失败：" + currentLaunch.error);
+                if (AttachmentFailure != null)
+                    throw new InvalidOperationException("本次服务附着验证失败：" + AttachmentFailure.Reason);
+
+                var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                if (now >= deadline)
+                    throw new TimeoutException("本次服务启动未在原定期限内完成身份、Bridge 握手及实际只读验证。");
+                var verified = currentLaunch != null
+                    ? currentLaunch.verified && currentLaunch.readyVerified && !_launchNeedsRevalidation
+                    : recovery?.status == "reused" && HasVerifiedRecoveredAttachment;
+                if (verified && _lifecyclePhase == UPilotServerLifecyclePhase.None)
+                {
+                    var status = GetStatus();
+                    var processId = currentLaunch?.servicePid ?? _recoveredServiceTarget?.ProcessId ?? 0;
+                    var instanceId = currentLaunch?.instanceId ?? _recoveredServiceInstanceId;
+                    var bridge = StartupBridgeStatusOverride != null ? StartupBridgeStatusOverride() : UPilotBridge.Instance.GetStatus();
+                    if (MatchesVerifiedStartupStatus(status, spec, processId, instanceId, bridge))
+                    {
+                        if (!string.IsNullOrWhiteSpace(expectedServerVersion) &&
+                            (string.IsNullOrWhiteSpace(status.ServerVersion) ||
+                             UPilotServerRuntimeService.CompareVersions(status.ServerVersion, expectedServerVersion) < 0))
+                            throw new InvalidOperationException($"服务已完成启动验证，但版本不匹配（当前：{status.ServerVersion}，期望：{expectedServerVersion}）。");
+                        return status;
+                    }
+                }
+                await Task.Delay((int)Math.Min(100, deadline - now), cancellationToken);
+            }
+        }
+
+        private bool MatchesVerifiedStartupStatus(McpServerStatus status, ServerLaunchSpec spec,
+            int processId, string instanceId, BridgeStatus bridge) =>
+            status.StatusQueryCompleted && status.LastSuccessfulStatusAtUtcMs > 0 &&
+            status.StatusGeneration == Volatile.Read(ref _statusGeneration) &&
+            !status.DiagnosisPending && status.FailureKind == McpStatusFailureKind.None && string.IsNullOrEmpty(status.ErrorMessage) &&
+            status.IsRunning && status.HttpPortListening && status.WsPortListening && IsVerifiedStartupHealth(status) &&
+            processId > 0 && status.ProcessId == processId && status.Identity?.server_pid == processId &&
+            !string.IsNullOrEmpty(instanceId) && status.Identity.server_instance_id == instanceId &&
+            UPilotDeploymentDiagnostics.SamePath(status.IdentityProjectPath, spec.projectPath) &&
+            UPilotDeploymentDiagnostics.SamePath(status.Identity.configured_project_path, spec.projectPath) &&
+            bridge.IsWsOpen && bridge.IsAuthenticated && !string.IsNullOrEmpty(bridge.SessionId) &&
+            status.Identity.bridge_session_id == bridge.SessionId;
+
+        private bool IsOwnedRecoveryStopGeneration(ExistingServiceRecoveryRecord recovery,
+            int originalStartGeneration, int currentStartGeneration, long restartGeneration)
+        {
+            if (recovery == null || !ReferenceEquals(recovery, _existingServiceRecovery) ||
+                string.IsNullOrEmpty(recovery.stopObservationId)) return false;
+            var stop = _stopObservation;
+            if (recovery.status == "cleaning" && stop != null && stop.id == recovery.stopObservationId &&
+                stop.requestId == recovery.id && stop.shutdownOwnerId == recovery.id && stop.preserveShutdown &&
+                stop.originalStartGeneration == originalStartGeneration && stop.originalRestartGeneration == restartGeneration &&
+                _stopStartGeneration == currentStartGeneration && _stopRestartGeneration == restartGeneration &&
+                stop.httpPort == recovery.spec.httpPort && stop.wsPort == recovery.spec.wsPort &&
+                UPilotDeploymentDiagnostics.SamePath(stop.project, recovery.projectPath)) return true;
+            // The original stop record is cleared when its replacement launches. Retain only
+            // the already accepted immutable result, never infer ownership from counters alone.
+            var receipt = recovery.verifiedStopResult;
+            return (recovery.status == "replacement_starting" || recovery.status == "replacement_started" || recovery.status == "succeeded") &&
+                receipt.HasValue && receipt.Value.StopConfirmed && receipt.Value.PortsAvailable && receipt.Value.ObservationSucceeded &&
+                receipt.Value.StartGeneration == currentStartGeneration && receipt.Value.RestartGeneration == restartGeneration;
+        }
 
         private ServerLaunchSpec PrepareLaunchSpec(long deadline)
         {
@@ -265,19 +421,21 @@ namespace CodingRiver.UPilot
                     _launchNeedsRevalidation = true;
                     var bridge = UPilotBridge.Instance.GetStatus();
                     if (!bridge.IsWsOpen || !bridge.IsAuthenticated ||
-                        UPilotDeploymentDiagnostics.Observe(bridge, status, state.spec).Length > 0) return;
+                        UPilotDeploymentDiagnostics.Observe(bridge, status, state.spec).Any(issue => issue.Blocking)) return;
                     await VerifyReadOnlyRoundTripAsync(status, bridge.SessionId, probeDeadline, roundToken, _launchReloadRevalidation);
                     var after = UPilotBridge.Instance.GetStatus();
                     if (token.IsCancellationRequested || lifecycleGeneration != _lifecycleGeneration ||
                         !ReferenceEquals(state, _launchState) || !after.IsWsOpen || !after.IsAuthenticated ||
                         after.SessionId != bridge.SessionId) return;
                     if (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= probeDeadline) return;
-                    state.readyVerified = true;
-                    state.reloadRevalidation?.Finish(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), true, "verified");
-                    PersistLaunchState();
-                    _launchNeedsRevalidation = false;
-                    if (EndLifecyclePhase(lifecycleGeneration))
-                        CacheVerifiedStartupStatus(status);
+                    if (!CacheVerifiedStartupStatus(status, lifecycleGeneration, bridge.SessionId, () =>
+                    {
+                        state.readyVerified = true;
+                        state.reloadRevalidation?.Finish(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), true, "verified");
+                        PersistLaunchState();
+                        _launchNeedsRevalidation = false;
+                        return true;
+                    })) return;
                     StopLaunchObservation();
                 }
             }
@@ -312,6 +470,7 @@ namespace CodingRiver.UPilot
         private bool TryResolveStartedService(ServerLaunchState state, McpServerStatus status, out string error, bool stopping = false)
         {
             error = "launch_identity_missing";
+            var shutdown = CaptureServiceShutdown();
             Process candidate = null;
             try
             {
@@ -335,19 +494,21 @@ namespace CodingRiver.UPilot
                     (service.pid != state.servicePid || service.createdAt != state.serviceCreatedAt))
                 { error = "service_identity_changed_or_expired"; return false; }
                 var wasVerified = state.verified;
-                if (!state.TryConfirm(service.pid, service.createdAt, status.Health.server_instance_id,
+                if (!state.TryConfirm(service.pid, service.createdAt, status.Identity.server_instance_id,
                     DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), stopping)) { error = "service_identity_changed_or_expired"; return false; }
                 DisposeTrackedProcess();
                 _trackedProcess = candidate;
                 _trackedProcessId = candidate.Id;
                 _trackedProcessCreatedAtTicks = service.createdAt;
                 candidate = null;
-                _launchNeedsRevalidation = false;
+                // OS ownership is necessary, but the current Bridge bootstrap receipt completes readiness.
+                if (!state.readyVerified) _launchNeedsRevalidation = true;
                 if (!wasVerified)
                     Logger.Lifecycle("server_launch_identity_verified", $"{CaptureServiceShutdown().Detail} serverPid={service.pid} serverCreatedAtTicks={service.createdAt} serverInstanceId={state.instanceId} launcherPid={state.launcherPid} startGeneration={_startAttemptGeneration} remainingMs={Math.Max(0, state.deadlineUtcMs - StopNow)}");
                 PersistLaunchState();
                 if (!stopping && IsRestartObservationActive())
                     UPilotServerRestartDiagnostics.RecordServiceIdentity(_restartOperationId, state);
+                if (!stopping) ConfirmOwnedResetLaunchIdentity(state, shutdown);
                 return true;
             }
             catch (ArgumentException) { error = "process_exited"; return false; }
@@ -434,7 +595,7 @@ namespace CodingRiver.UPilot
             using var editor = Process.GetCurrentProcess();
             var deadline = record == null ? 0 : UPilotServerRestartDiagnostics.Deadline(record);
             reason = "restart_reset_receipt_context_mismatch";
-            if (record?.status != "running" || string.IsNullOrEmpty(record.operationId) || receipt?.performed != true ||
+            if (record?.status != "running" || (record.schemaVersion != 4 && record.schemaVersion != 5) || string.IsNullOrEmpty(record.operationId) || receipt?.performed != true ||
                 receipt.operationId != record.operationId || receipt.restartGeneration <= 0 ||
                 receipt.restartGeneration != record.restartGeneration || receipt.unityProcessId != editor.Id ||
                 string.IsNullOrEmpty(receipt.serviceLifetime) || receipt.serviceLifetime != UPilotServiceLifetime.Id ||
@@ -467,6 +628,7 @@ namespace CodingRiver.UPilot
             _launchNeedsRevalidation = true;
             AllowServiceReplacement(receipt.ownerId);
             _restartShutdownOwnerId = receipt.ownerId;
+            UPilotServerRestartDiagnostics.MigrateVerifiedInFlight(record);
             _restoredRestartResetReceiptId = record.operationId;
             reason = "restored";
             return true;
@@ -478,8 +640,9 @@ namespace CodingRiver.UPilot
             candidate = null;
             if (stop == null || (stop.status != "failed" && stop.status != "timed_out") ||
                 !stop.MatchesScope(UPilotProjectConfig.ProjectRoot, UPilotServiceLifetime.Id, Process.GetCurrentProcess().Id) ||
-                record?.status != "succeeded" || !record.healthVerified || !record.projectIdentityVerified ||
-                !record.bridgeVerified || !record.deploymentVerified || !record.readOnlyVerified ||
+                record?.status != "succeeded" || record.schemaVersion > 5 || !record.projectIdentityVerified ||
+                !record.bridgeVerified || !record.readOnlyVerified ||
+                (record.schemaVersion < 5 && (!record.healthVerified || !record.deploymentVerified)) ||
                 record.launcherProcessId <= 0 || record.launcherProcessCreatedAtTicks <= 0 ||
                 record.newProcessId <= 0 || record.newProcessCreatedAtTicks <= 0 || record.healthProcessId != record.newProcessId ||
                 record.launchSpec == null || record.launchSpec.Validate().Length != 0 ||
@@ -489,7 +652,7 @@ namespace CodingRiver.UPilot
                 record.launchSpec.httpPort != stop.httpPort || record.launchSpec.wsPort != stop.wsPort ||
                 !record.launchSpec.TryGetLogFilePath(out _) ||
                 !UPilotDeploymentDiagnostics.SamePath(record.actualEntry, record.launchSpec.expectedEntry) ||
-                (!string.IsNullOrEmpty(record.launchSpec.expectedModuleRoot) &&
+                (record.schemaVersion < 5 && !string.IsNullOrEmpty(record.launchSpec.expectedModuleRoot) &&
                  !UPilotDeploymentDiagnostics.SamePath(record.actualModule, record.launchSpec.expectedModuleRoot))) return false;
             candidate = new ServerLaunchState { spec = record.launchSpec.Snapshot(), launcherPid = record.launcherProcessId,
                 launcherCreatedAt = record.launcherProcessCreatedAtTicks, servicePid = record.newProcessId,

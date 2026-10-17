@@ -229,13 +229,11 @@ namespace CodingRiver.UPilot
             if (!spec.serviceExecutablePaths.Any(p => UPilotDeploymentDiagnostics.SamePath(p, service.executable)))
                 return "service_executable_mismatch";
             if (!UPilotMcpServerManager.IsVerifiedStartupHealth(status) || !status.HttpPortListening || !status.WsPortListening ||
-                status.ProcessId != service.pid || status.Health?.server_pid != service.pid) return "service_ownership_unverified";
-            if (!UPilotDeploymentDiagnostics.SamePath(spec.projectPath, status.HealthProjectPath) ||
-                !UPilotDeploymentDiagnostics.SamePath(spec.projectPath, status.Health.configured_project_path)) return "project_identity_mismatch";
-            if (!UPilotDeploymentDiagnostics.SamePath(spec.expectedEntry, status.Health.server_entry_path)) return "entry_identity_mismatch";
-            if (!string.IsNullOrEmpty(spec.expectedModuleRoot) &&
-                !UPilotDeploymentDiagnostics.SamePath(spec.expectedModuleRoot, status.Health.server_module_root)) return "module_identity_mismatch";
-            if (string.IsNullOrEmpty(status.Health.server_instance_id)) return "server_instance_missing";
+                status.ProcessId != service.pid || status.Identity?.server_pid != service.pid) return "service_ownership_unverified";
+            if (!UPilotDeploymentDiagnostics.SamePath(spec.projectPath, status.IdentityProjectPath) ||
+                !UPilotDeploymentDiagnostics.SamePath(spec.projectPath, status.Identity.configured_project_path)) return "project_identity_mismatch";
+            if (!UPilotDeploymentDiagnostics.SamePath(spec.expectedEntry, status.Identity.server_entry_path)) return "entry_identity_mismatch";
+            if (string.IsNullOrEmpty(status.Identity.server_instance_id)) return "server_instance_missing";
             var tokens = Regex.Matches(status.ProcessCommandLine ?? "", "\"([^\"]*)\"|(\\S+)").Cast<Match>()
                 .Select(m => m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value);
             if (!tokens.Any(t => Path.IsPathRooted(t) && UPilotDeploymentDiagnostics.SamePath(t, spec.expectedEntry))) return "entry_command_line_mismatch";

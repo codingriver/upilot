@@ -247,7 +247,7 @@ class StatusDomainService:
                 )
 
         execution = self.server.state.execution_state()
-        connected = bool(execution["unityConnected"] or self.server.is_ready())
+        connected = self.server.is_ready()
         return ok(
             request_id,
             {
@@ -265,7 +265,7 @@ class StatusDomainService:
             if state_r.ok:
                 live_state = state_r.data or {}
         session = self.server.session_manager.active
-        connected = self.server.session_manager.is_connected()
+        connected = self.server.is_ready()
         bridge_reported_process_id = int(session.process_id if session else 0)
         reported_process_id = bridge_reported_process_id
         process_identity: dict = {}
@@ -286,6 +286,17 @@ class StatusDomainService:
                     "processQueryError": str(ex),
                     "resolvedProcessId": 0,
                 }
+        # Process inspection awaited a worker; the Bridge may have been replaced or stopped.
+        current_session = self.server.session_manager.active
+        if current_session is not session:
+            session = current_session
+            bridge_reported_process_id = int(session.process_id if session else 0)
+            reported_process_id = bridge_reported_process_id
+            process_identity = {}
+            live_state = None
+        connected = self.server.is_ready()
+        if not connected:
+            live_state = None
         compile_state = self.server.state.compile
         unity_abs = ""
         if session and session.project_path:
@@ -310,6 +321,7 @@ class StatusDomainService:
                 "connected": connected,
                 "playModeTransition": getattr(self.server.state, "playmode_transition", {}),
                 "serverReady": self.server.is_ready(),
+                **self.server.bridge_readiness_status(),
                 "session": {
                     "sessionId": session.session_id if session else "",
                     "projectPath": session.project_path if session else "",
@@ -397,7 +409,7 @@ class StatusDomainService:
                     "serviceRegistered": True,
                     "clientToolListInjected": None,
                     "serverReady": self.server.is_ready(),
-                    "connected": self.server.session_manager.is_connected(),
+                    "connected": self.server.is_ready(),
                     "actualCallSucceeded": self._last_command_succeeded("reflection.call"),
                     "note": "Client injection is client-owned; refresh the MCP client after the server tool list changes.",
                 },
@@ -419,7 +431,7 @@ class StatusDomainService:
         data = status.data or {}
         tools = self._registry_tools_snapshot(limit=200)
         execution_capabilities: dict = {}
-        if self.server.session_manager.is_connected():
+        if self.server.is_ready():
             try:
                 execution_response = await self.execution_capabilities()
                 if execution_response.ok:
@@ -589,7 +601,7 @@ class StatusDomainService:
                 expected_maintenance_id != summary["expectedMaintenanceId"]):
             return fail(request_id, "SERVICE_RESTART_IDENTITY_CHANGED", "Project, component or maintenance identity changed; inspect status.")
         # Independent authorization is rechecked by Unity immediately before any stop/start.
-        return await self.dispatcher.call(request_id, "service.restart", {
+        return await self.dispatcher.call_maintenance_control(request_id, {
             "maintenanceId": maintenance_id, "target": target, "reason": reason,
             "expectedProjectPath": expected_project_path, "expectedServerProcessId": expected_server_process_id,
             "expectedBridgeSessionId": expected_bridge_session_id, "expectedMaintenanceId": expected_maintenance_id,
@@ -1114,18 +1126,22 @@ class StatusDomainService:
             and active_session_id == new_session_id
         )
         bridge_was_replaced = bool(new_session_id and new_session_id != old_session_id)
+        schema = int(record.get("schemaVersion") or 1)
+        required_v5 = {"old_identity", "bridge_stop", "old_exit", "ports", "new_process", "identity", "bridge_session", "readonly"}
+        passed_gates = {g.get("key") for g in (record.get("gateDiagnostics") or []) if isinstance(g, dict) and g.get("state") == "passed"}
         verified_succeeded = bool(
-            persisted_status == "succeeded"
+            schema <= 5 and persisted_status == "succeeded"
             and project_matches
             and process_matches
             and bridge_was_replaced
-            and record.get("healthVerified") is True
+            and (schema == 5 or record.get("healthVerified") is True)
             and record.get("projectIdentityVerified") is True
             and record.get("bridgeVerified") is True
-            and (int(record.get("schemaVersion") or 1) < 2 or (
-                record.get("deploymentVerified") is True
+            and (schema < 2 or (
+                (schema == 5 or record.get("deploymentVerified") is True)
                 and record.get("readOnlyVerified") is True
             ))
+            and (schema != 5 or required_v5.issubset(passed_gates))
         )
         current = bool(project_matches and process_matches)
         if not operation_id:
@@ -1148,6 +1164,8 @@ class StatusDomainService:
             "status": persisted_status,
             "phase": str(record.get("phase") or "unknown"),
             "verifiedSucceeded": verified_succeeded,
+            "schemaVersion": schema,
+            "requiredGates": sorted(required_v5) if schema == 5 else None,
             "identity": {
                 "projectPath": str(record.get("projectPath") or ""),
                 "projectPathMatches": project_matches,

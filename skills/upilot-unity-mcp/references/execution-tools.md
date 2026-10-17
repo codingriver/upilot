@@ -199,3 +199,15 @@ Callback methods accept a bounded policy:
 Spec-hash cache hits reuse only the generated CLR `Type`. Each session and emitted instance receives its own callback registration, guard counters, diagnostics ring, and cleanup lease. Prefer `createInstance=true` to obtain an instance bound to the current session, and never reuse an `instanceHandle` in another session. With `exceptionMode=isolate`, callback exceptions and limit rejections are recorded and return the declared return type's default value. With `exceptionMode=propagate`, the original callback exception type and stack semantics are preserved rather than exposing a reflection wrapper.
 
 If capabilities report `REFLECTION_EMIT_UNAVAILABLE`, do not fall back to Roslyn, CodeDom, mcs, Unity compilation, or source files. Use an existing compiled project helper instead.
+
+## Budget and invocation evidence
+
+Budget errors preserve metric, signed 64-bit actual/limit, lastCompletedSpan,
+original exception/stack, side-effects and cleanup evidence. The span identifies only
+the last completed boundary. executionDiagnostics adds dispatchWaitMs,
+targetInvokeMs, dispatchCount, targetStartedCount, targetFinishedCount.
+Wait includes dispatch overhead; target time stops at the observation boundary, including
+an already-running target. Finished count includes exceptional exits. Each context owns
+its observations, frozen when its scheduler invocation returns; late callbacks cannot
+rewrite them. invokeMs retains its original meaning and need not equal the new totals.
+Do not infer that a queued target can never run from a zero started count.

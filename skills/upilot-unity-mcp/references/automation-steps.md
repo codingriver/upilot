@@ -532,3 +532,24 @@ Run targeted contract/executor/built-in/evidence tests in Tests~/UPilotTest. Ver
 PlayMode/Domain Reload separately from synthetic Restore tests, preserve run identity,
 confirm final EditMode and list remaining active captures. Do not use external client
 projects or a full suite as the default package acceptance.
+
+## Observation warnings and bounded sampling evidence
+
+Console Capture retains the internal diagnosticSource for service observation
+Warnings. Only upilot.service.observation Warnings are diagnostic ignores, even
+under deny rules. Plain matching text, older unmarked records, business Warnings,
+Errors and Exceptions receive the normal policy; never use excludeUPilot or a global
+Warning exemption to reproduce this behavior. Evidence loss and invalid policy still fail.
+
+Failure summaries retain the first ten blocking samples and add at most ten groups
+by complete fingerprint, phase, Step instance and rule. Each group retains count,
+representative and first/last sequence; omittedBlockingGroupCount counts omitted
+groups. The full console-policy.json remains untrimmed. Report paths identify artifacts
+already written; an earlier business failure remains the primary error.
+
+A sampling Step must declare its bounded population, effective sample count, required
+phase coverage and business assertions. Incomplete/insufficient samples cannot pass.
+lastCompletedSpan is only the last completed execution boundary, never evidence that
+an entire sample or business assertion completed. On budget failure inspect partial state,
+reduce scope or use the project's sampling Step; do not automatically retry, change
+backend or raise timeouts. This contract adds no generic sampling runner.

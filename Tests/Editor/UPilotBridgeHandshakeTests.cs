@@ -52,15 +52,19 @@ namespace CodingRiver.UPilot.Tests
             SessionState.SetString(LifetimeKey, "old-lifetime");
             _bridge = (UPilotBridge)FormatterServices.GetUninitializedObject(typeof(UPilotBridge));
             _manager = (UPilotMcpServerManager)FormatterServices.GetUninitializedObject(typeof(UPilotMcpServerManager));
+            _manager.HelloServerIdentityOverride = _ => true;
             _queue = new ConcurrentQueue<Action>();
             Set(_bridge, "_controlQueue", _queue);
             Set(_bridge, "_lifecycleManager", _manager);
             Set(_bridge, "_sessionId", "owned-session");
+            Set(_bridge, "_readyHelloId", "owned-hello");
             Set(_bridge, "_started", true);
             Set(_bridge, "_isAuthenticated", false);
             Set(_bridge, "_admissionClosed", true);
             Set(_bridge, "_mainThreadQueue", new ConcurrentQueue<Action>());
-            Set(_bridge, "_compileService", FormatterServices.GetUninitializedObject(typeof(UPilotCompileService)));
+            Set(_bridge, "_compileService", new UPilotCompileService(
+                Path.Combine(Path.GetTempPath(), "UPilotCompileFixture-" + Guid.NewGuid().ToString("N") + ".json"),
+                Path.GetTempPath(), 123, 456, "isolated-producer"));
             _resetCount = 0;
             _dispatchCount = 0;
             var router = new UPilotCommandRouter();
@@ -116,6 +120,22 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(Get<long>(_bridge, "_helloConnectionEpoch"), Is.EqualTo(2));
             Assert.That(_retirementDrops.Count, Is.EqualTo(1));
             Assert.That(_retirementDrops[0], Does.Contain("connectionEpoch=1 currentConnectionEpoch=2"));
+        }
+
+        [Test]
+        public void AcceptedHelloWaitsForOsIdentityBeforeAuthentication()
+        {
+            _manager.HelloServerIdentityOverride = _ => false;
+            ExpectLifecycle("hello_received", "hello_enqueued");
+            Receive(); Pump();
+            Assert.That(Get<bool>(_bridge, "_isAuthenticated"), Is.False);
+            Assert.That(Get<object>(_bridge, "_pendingAuthenticationHello"), Is.Not.Null);
+            Assert.That(_resetCount, Is.Zero);
+            _manager.HelloServerIdentityOverride = _ => true;
+            ExpectLifecycle("service_reset_started", "service_reset_finished", "hello_applied");
+            typeof(UPilotBridge).GetMethod("ApplyPendingOwnedHello", Private).Invoke(_bridge, null);
+            Assert.That(Get<bool>(_bridge, "_isAuthenticated"), Is.True);
+            Assert.That(_resetCount, Is.EqualTo(1));
         }
 
         [Test]
@@ -188,13 +208,14 @@ namespace CodingRiver.UPilot.Tests
             var ack = new HelloAckMessage
             {
                 id = "owned-hello", type = "result", name = "session.hello", sessionId = "owned-session",
-                payload = new HelloAckPayload { accepted = true, identityContractVersion = 1,
+                payload = new HelloAckPayload { accepted = true, identityContractVersion = 1, bridgeReadyContractVersion = 1,
                     verificationLevel = "windows-pid-creation-executable-role-project", serverLifecycleId = lifetime,
-                    server_instance_id = "owned-instance" }
+                    server_instance_id = "owned-instance", server_pid = 42, configured_project_path = UPilotProjectConfig.ProjectRoot }
             };
             if (invalidAck == "missing_payload") ack.payload = null;
             else if (invalidAck == "rejected") ack.payload.accepted = false;
             else if (invalidAck == "identity_contract") ack.payload.identityContractVersion = 2;
+            else if (invalidAck == "ready_contract") ack.payload.bridgeReadyContractVersion = 2;
             else if (invalidAck == "verification_missing") ack.payload.verificationLevel = "";
             var json = JsonUtility.ToJson(ack);
             var task = (Task)typeof(UPilotBridge).GetMethod("HandleMessageJsonAsync", Private).Invoke(
@@ -241,7 +262,7 @@ namespace CodingRiver.UPilot.Tests
         [TestCase("resource.editorState")]
         [TestCase("test.status")]
         [TestCase("test.results")]
-        public void ReadAfterAcceptedHelloWaitsWithoutDispatchUntilMainThreadAuthentication(string command)
+        public void ReadAfterAcceptedHelloStillWaitsForBootstrapAfterAuthentication(string command)
         {
             Logger.MinLevel = Logger.LogLevel.Warning;
             ExpectLifecycle("hello_received", "hello_enqueued");
@@ -256,14 +277,17 @@ namespace CodingRiver.UPilot.Tests
             Pump();
             Assert.That(Get<bool>(_bridge, "_isAuthenticated"), Is.True);
             Assert.That(Get<object>(_bridge, "_pendingAuthenticationHello"), Is.Null);
+            LogAssert.Expect(LogType.Warning, new Regex("\\[UPILOT_RECONNECT_PENDING\\][\\s\\S]*cmd=" + Regex.Escape(command)));
             ReceiveCommand(command);
-            Assert.That(_dispatchCount, Is.EqualTo(1));
+            Assert.That(_dispatchCount, Is.Zero, "Authentication does not complete the initial state synchronization.");
+            Assert.That(Get<bool>(_bridge, "_admissionClosed"), Is.True);
             LogAssert.NoUnexpectedReceived();
         }
 
         [TestCase("missing_payload")]
         [TestCase("rejected")]
         [TestCase("identity_contract")]
+        [TestCase("ready_contract")]
         [TestCase("verification_missing")]
         public void InvalidHelloDoesNotClassifyAuthenticationFailureAsReconnectPending(string invalidAck)
         {
@@ -415,7 +439,7 @@ namespace CodingRiver.UPilot.Tests
             Pump();
             Assert.That(_resetCount, Is.EqualTo(resets));
             Assert.That(Get<bool>(_bridge, "_isAuthenticated"), Is.True);
-            Assert.That(Get<bool>(_bridge, "_admissionClosed"), Is.False);
+            Assert.That(Get<bool>(_bridge, "_admissionClosed"), Is.True, "The bootstrap ACK opens admission, not hello.");
             Assert.That(SessionState.GetString(LifetimeKey, ""), Is.EqualTo(incoming == "" ? previous : incoming));
             Assert.That(_blocked, Is.Empty);
         }
@@ -485,7 +509,7 @@ namespace CodingRiver.UPilot.Tests
         {
             Set(_bridge, "_helloConnectionEpoch", 2L);
             var ack = new HelloAckMessage { type = "result", name = "session.hello", sessionId = "owned-session",
-                payload = new HelloAckPayload { accepted = true, identityContractVersion = 1,
+                payload = new HelloAckPayload { accepted = true, identityContractVersion = 1, bridgeReadyContractVersion = 1,
                     verificationLevel = "verified", serverLifecycleId = "new-lifetime" } };
             var json = JsonUtility.ToJson(ack);
             var task = (Task)typeof(UPilotBridge).GetMethod("HandleReceivedMessageAsync", Private).Invoke(
@@ -503,8 +527,9 @@ namespace CodingRiver.UPilot.Tests
             var connectionShutdown = _manager.CaptureServiceShutdown();
             _manager.BeginServiceShutdown("owned-stop", "stopping");
             _manager.FinishServiceShutdown("owned-stop", "finished");
+            Set(_bridge, "_readyHelloId", "old-wire-hello");
             var ack = new HelloAckMessage { id = "old-wire-hello", type = "result", name = "session.hello", sessionId = "owned-session",
-                payload = new HelloAckPayload { accepted = true, identityContractVersion = 1,
+                payload = new HelloAckPayload { accepted = true, identityContractVersion = 1, bridgeReadyContractVersion = 1,
                     verificationLevel = "verified", serverLifecycleId = "new-lifetime" } };
             var json = JsonUtility.ToJson(ack);
             var task = (Task)typeof(UPilotBridge).GetMethod("HandleReceivedMessageAsync", Private).Invoke(
@@ -514,6 +539,33 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(_queue.IsEmpty, Is.True);
             AssertDiscardedOnce();
             Assert.That(_blocked[0], Does.Contain("reason=shutdown_generation_changed"));
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void ReceivedHelloMustMatchTheExactChallengeSentByThisCycle(bool sentChallengeMissing)
+        {
+            Set(_bridge, "_readyHelloId", sentChallengeMissing ? "" : "different-sent-hello");
+            Receive();
+            Assert.That(_queue.IsEmpty, Is.True);
+            Assert.That(Get<long>(_bridge, "_lastReceivedHelloEpoch"), Is.Zero,
+                "An unmatched result must not consume the sent challenge's duplicate receipt marker.");
+            Assert.That(Get<string>(_bridge, "_lastReceivedHelloId"), Is.Null);
+            Assert.That(Get<string>(_bridge, "_readyHelloId"), Is.EqualTo(sentChallengeMissing ? "" : "different-sent-hello"));
+            AssertDiscardedOnce();
+            Assert.That(_blocked[0], Does.Contain("reason=hello_id_mismatch"));
+        }
+
+        [Test]
+        public void QueuedHelloCannotApplyAfterItsSentChallengeChanges()
+        {
+            Receive();
+            Assert.That(_queue.Count, Is.EqualTo(1));
+            Set(_bridge, "_readyHelloId", "replacement-sent-hello");
+            Pump();
+            AssertDiscardedOnce();
+            Assert.That(_blocked[0], Does.Contain("reason=hello_id_mismatch"));
+            Assert.That(Get<string>(_bridge, "_readyHelloId"), Is.EqualTo("replacement-sent-hello"));
         }
 
         [TestCase("connection_cancelled")]
@@ -552,6 +604,7 @@ namespace CodingRiver.UPilot.Tests
             _manager.ResetActiveWorkForServiceOwner("owner", "maintenance");
             var launch = new ServerLaunchState { deadlineUtcMs = deadline };
             Set(_manager, "_launchState", launch);
+            Set(_manager, "_launchNeedsRevalidation", true);
             typeof(UPilotMcpServerManager).GetMethod("AllowServiceReplacement", Private).Invoke(
                 _manager, new object[] { "owner" });
             Receive();
@@ -565,12 +618,22 @@ namespace CodingRiver.UPilot.Tests
             launch.verified = true;
             Set(_manager, "_trackedProcess", process);
             typeof(UPilotBridge).GetMethod("ApplyPendingOwnedHello", Private).Invoke(_bridge, null);
+            Assert.That(Get<bool>(_bridge, "_isAuthenticated"), Is.False,
+                "Restoring a verified record must still wait for fresh OS identity proof.");
+            Assert.That(Get<object>(_bridge, "_pendingOwnedHello"), Is.Not.Null);
+            typeof(UPilotMcpServerManager).GetMethod("ConfirmOwnedResetLaunchIdentity", Private).Invoke(
+                _manager, new object[] { launch, _manager.CaptureServiceShutdown() });
+            typeof(UPilotBridge).GetMethod("ApplyPendingOwnedHello", Private).Invoke(_bridge, null);
             Assert.That(Get<bool>(_bridge, "_isAuthenticated"), Is.True);
             Assert.That(Get<object>(_bridge, "_pendingOwnedHello"), Is.Null);
             Assert.That(Get<object>(_bridge, "_pendingAuthenticationHello"), Is.Null);
             Assert.That(ownedResets, Is.EqualTo(1));
             Assert.That(_resetCount, Is.Zero);
             Assert.That(_manager.CaptureServiceShutdown().DeadlineUtcMs, Is.EqualTo(deadline));
+            Assert.That(Get<bool>(_manager, "_launchNeedsRevalidation"), Is.True,
+                "Hello authentication must proceed before full bootstrap readiness can complete.");
+            Assert.That(launch.readyVerified, Is.False);
+            Assert.That(launch.deadlineUtcMs, Is.EqualTo(deadline));
             Assert.That(_blocked, Is.Empty);
         }
     }

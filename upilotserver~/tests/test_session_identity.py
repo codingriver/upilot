@@ -9,6 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from bridge_readiness_helpers import mark_bridge_ready, synchronize_connection, synchronize_peer
+
 from upilot_mcp.dispatcher import CommandDispatcher
 
 from upilot_mcp.models import WsMessage
@@ -36,6 +38,7 @@ class _ClosedSocket(_Socket):
 def _payload(project: Path, pid: int = 101, created_at: int = 202) -> dict:
     return {
         "identityContractVersion": IDENTITY_CONTRACT_VERSION,
+        "bridgeReadyContractVersion": 1, "readyBudgetMs": 300000,
         "unityVersion": "6000.0",
         "projectPath": str(project),
         "platform": "windows",
@@ -74,6 +77,7 @@ def test_rejected_candidate_does_not_replace_active_session(tmp_path: Path) -> N
         active_payload.update(identityVerified=True, verificationLevel="test-verified")
         server.session_manager.on_hello("active", active_payload)
         server._ws = active_socket
+        mark_bridge_ready(server, active_socket)
         server._probe_candidate_identity = lambda _payload: {
             "accepted": False,
             "code": "AUXILIARY_EDITOR_ROLE",
@@ -104,6 +108,7 @@ def test_same_process_verified_reconnect_atomically_promotes_candidate(tmp_path:
         payload.update(identityVerified=True, verificationLevel="test-verified")
         server.session_manager.on_hello("old", payload)
         server._ws = old_socket
+        mark_bridge_ready(server, old_socket)
         message = _hello(tmp_path, session_id="new")
         server._probe_candidate_identity = lambda _payload: _accepted_probe(message)
         server._close_websocket = lambda *_args, **_kwargs: asyncio.sleep(0)
@@ -127,6 +132,7 @@ def test_different_live_process_cannot_take_over(tmp_path: Path) -> None:
         payload.update(identityVerified=True, verificationLevel="test-verified")
         server.session_manager.on_hello("old", payload)
         server._ws = old_socket
+        mark_bridge_ready(server, old_socket)
         message = _hello(tmp_path, session_id="new", pid=33, created_at=44)
         server._probe_candidate_identity = lambda _payload: _accepted_probe(message)
         server._active_process_liveness = lambda: "alive"
@@ -150,6 +156,7 @@ def test_stale_socket_message_cannot_touch_active_state(tmp_path: Path) -> None:
         payload.update(identityVerified=True, verificationLevel="test-verified")
         session = server.session_manager.on_hello("active", payload)
         server._ws = active_socket
+        mark_bridge_ready(server, active_socket)
         original_heartbeat = session.last_heartbeat_at
         message = WsMessage(
             id="hb-stale",
@@ -188,6 +195,7 @@ def test_candidate_query_timeout_does_not_replace_active_session(monkeypatch, tm
         payload.update(identityVerified=True, verificationLevel="test-verified")
         server.session_manager.on_hello("active", payload)
         server._ws = active_socket
+        mark_bridge_ready(server, active_socket)
         server._probe_candidate_identity = lambda _payload: time.sleep(0.03) or _accepted_probe(_hello(tmp_path))
         monkeypatch.setattr("upilot_mcp.server._CANDIDATE_HANDSHAKE_TIMEOUT_S", 0.001)
 
@@ -209,6 +217,7 @@ def test_unknown_old_process_liveness_blocks_takeover(tmp_path: Path) -> None:
         payload.update(identityVerified=True, verificationLevel="test-verified")
         server.session_manager.on_hello("old", payload)
         server._ws = old_socket
+        mark_bridge_ready(server, old_socket)
         candidate = _hello(tmp_path, session_id="new", pid=33, created_at=44)
         server._probe_candidate_identity = lambda _payload: _accepted_probe(candidate)
         server._active_process_liveness = lambda: "unknown"
@@ -231,6 +240,7 @@ def test_confirmed_dead_or_pid_reused_editor_can_take_over(tmp_path: Path) -> No
         payload.update(identityVerified=True, verificationLevel="test-verified")
         server.session_manager.on_hello("old", payload)
         server._ws = old_socket
+        mark_bridge_ready(server, old_socket)
         candidate_socket = _Socket()
         candidate = _hello(tmp_path, session_id="new", pid=11, created_at=44)
         server._probe_candidate_identity = lambda _payload: _accepted_probe(candidate)
@@ -284,6 +294,7 @@ def test_stale_result_cannot_complete_active_future(tmp_path: Path) -> None:
         payload.update(identityVerified=True, verificationLevel="test-verified")
         server.session_manager.on_hello("active", payload)
         server._ws = active_socket
+        mark_bridge_ready(server, active_socket)
         future = asyncio.get_running_loop().create_future()
         server._pending["cmd-1"] = future
         message = WsMessage(
@@ -312,6 +323,7 @@ def test_stale_socket_cleanup_does_not_disconnect_new_owner(tmp_path: Path) -> N
         payload.update(identityVerified=True, verificationLevel="test-verified")
         server.session_manager.on_hello("active", payload)
         server._ws = active_socket
+        mark_bridge_ready(server, active_socket)
         server.state.editor.connected = True
 
         await server._handle(stale_socket)
@@ -324,7 +336,7 @@ def test_stale_socket_cleanup_does_not_disconnect_new_owner(tmp_path: Path) -> N
 
 
 def _wire_commands(socket):
-    return [message for raw in socket.sent if (message := json.loads(raw))["type"] == "command"]
+    return [message for raw in socket.sent if (message := json.loads(raw))["type"] == "command" and message["name"] != "session.bootstrap"]
 
 
 async def _response_stage_command(server, socket):
@@ -358,6 +370,7 @@ async def _reload_for_dispatch_test(server, project, socket, next_session):
     auth = [None]
     await server._handle_message(hello, auth, candidate)
     assert auth == [next_session] and server._ws is candidate
+    await synchronize_connection(server, candidate, auth)
     assert not server._suspended and not server._domain_reloading
     return candidate
 
@@ -376,6 +389,7 @@ def test_dispatch_reload_rejects_mutation_and_late_result_cannot_complete_succes
         active.update(identityVerified=True, verificationLevel="test-verified")
         server.session_manager.on_hello("before", active)
         server._ws = socket
+        mark_bridge_ready(server, socket)
         dispatcher = CommandDispatcher(server, server.state)
         call = asyncio.create_task(dispatcher.call("original-request", name, payload, timeout_ms=2000))
         sent = await _response_stage_command(server, socket)
@@ -456,6 +470,7 @@ def test_dispatch_read_only_reload_keeps_original_wait_and_releases_pending(tmp_
         active.update(identityVerified=True, verificationLevel="test-verified")
         server.session_manager.on_hello("before", active)
         server._ws = socket
+        mark_bridge_ready(server, socket)
         dispatcher = CommandDispatcher(server, server.state)
         call = asyncio.create_task(dispatcher.call("original-request", name, payload, timeout_ms=1000))
         sent = await _response_stage_command(server, socket)
@@ -523,6 +538,7 @@ def test_send_failure_converges_original_command_record(tmp_path, failure_kind):
         active.update(identityVerified=True, verificationLevel="test-verified")
         server.session_manager.on_hello("before-send", active)
         server._ws = socket
+        mark_bridge_ready(server, socket)
         dispatcher = CommandDispatcher(server, server.state)
         original_send = server.send_command
         failure = ConnectionError("injected send failure") if failure_kind == "connection" else asyncio.CancelledError()
@@ -557,7 +573,7 @@ def test_loopback_authenticated_idle_socket_has_no_server_heartbeats(tmp_path):
     from upilot_mcp.protocol import to_wire
 
     async def scenario():
-        server = WsOrchestratorServer(port=0, heartbeat_interval_ms=50, expected_project_path=str(tmp_path))
+        server = WsOrchestratorServer(port=0, heartbeat_interval_ms=1000, expected_project_path=str(tmp_path))
         server._probe_candidate_identity = lambda payload: {
             **payload, "accepted": True, "identityVerified": True, "verificationLevel": "test-verified",
         }
@@ -583,10 +599,12 @@ def test_loopback_authenticated_idle_socket_has_no_server_heartbeats(tmp_path):
                 await peer.send(json.dumps(to_wire(_hello(tmp_path, session_id=session))))
                 ack = json.loads(await asyncio.wait_for(peer.recv(), timeout=3))
                 assert ack["payload"]["accepted"] is True
-                assert ack["payload"]["heartbeatIntervalMs"] == 50
+                assert ack["payload"]["heartbeatIntervalMs"] == 1000
+                await synchronize_peer(server, peer, ack, session=session, epoch="idle-peer-epoch")
+                heartbeat_received.clear()
                 await asyncio.wait_for(candidate_cancelled.wait(), timeout=3)
 
-                # Four former send intervals must produce no application messages.
+                # A bounded idle interval must produce no application messages.
                 with pytest.raises(asyncio.TimeoutError):
                     await asyncio.wait_for(peer.recv(), timeout=0.2)
                 pong = await server._ws.ping()
@@ -597,7 +615,7 @@ def test_loopback_authenticated_idle_socket_has_no_server_heartbeats(tmp_path):
                     id="inbound-state", type="heartbeat", name="session.heartbeat",
                     payload={
                         "stateContractVersion": 2, "producerEpoch": "idle-peer-epoch",
-                        "domainGeneration": 0, "sequence": 1, "transition": "heartbeat",
+                        "domainGeneration": 0, "sequence": 2, "transition": "heartbeat",
                         "sessionId": session, "connected": True, "authoritative": True,
                         "playModeState": "edit", "observedAt": now, "updatedAt": now,
                     },
@@ -605,7 +623,7 @@ def test_loopback_authenticated_idle_socket_has_no_server_heartbeats(tmp_path):
                 ))))
                 await asyncio.wait_for(heartbeat_received.wait(), timeout=3)
                 assert server.is_ready()
-                assert server.state.editor.authoritative and server.state.sequence == 1
+                assert server.state.editor.authoritative and server.state.sequence == 2
 
                 dispatcher = CommandDispatcher(server, server.state)
                 request = asyncio.create_task(dispatcher.call(
@@ -676,6 +694,7 @@ def test_loopback_socket_loss_never_replays_mutation(tmp_path, boundary):
             await peer.send(json.dumps(to_wire(_hello(tmp_path, session_id=session))))
             ack = await receive(peer)
             assert ack["payload"]["accepted"] is True
+            await synchronize_peer(server, peer, ack, session=session)
             return peer
 
         async def await_disconnected():
@@ -762,6 +781,7 @@ def test_send_interruption_keeps_reload_recovery_first_error(tmp_path, cancelled
         active.update(identityVerified=True, verificationLevel="test-verified")
         server.session_manager.on_hello("sending", active)
         server._ws = socket
+        mark_bridge_ready(server, socket)
         frozen = {}
         failure = asyncio.CancelledError() if cancelled else ConnectionError("old socket failed")
 
@@ -814,6 +834,7 @@ def test_verified_hello_negotiates_only_valid_heartbeat_interval(tmp_path, monke
         assert server.heartbeat_interval_ms == expected
         assert server.session_manager.heartbeat_timeout_ms == expected * 3
         assert json.loads(socket.sent[-1])["payload"]["heartbeatIntervalMs"] == expected
+        mark_bridge_ready(server, socket)
         received_at = server.session_manager.active.last_heartbeat_at
         monkeypatch.setattr("upilot_mcp.session_manager.now_ms", lambda: received_at + expected * 3)
         assert server.session_manager.is_connected()
@@ -834,6 +855,7 @@ def test_heartbeat_interval_changes_only_from_accepted_current_authoritative_sna
         server._probe_candidate_identity = lambda _payload: _accepted_probe(hello)
         auth = [None]
         await server._handle_message(hello, auth, socket)
+        mark_bridge_ready(server, socket)
 
         async def send_snapshot(sequence, interval, **changes):
             payload = {

@@ -176,6 +176,110 @@ namespace CodingRiver.UPilot.Tests
             tracker.EndOperation(context.CommandId);
         }
 
+        [Test]
+        public void WaitDelayUsesTheSameFixedMonotonicDeadline()
+        {
+            var deadline = OperationContext.CreateWaitDeadline(600000);
+            var remaining = OperationContext.RemainingWaitMilliseconds(deadline);
+            Assert.That(remaining, Is.GreaterThan(0).And.LessThanOrEqualTo(600000));
+            Assert.That(OperationContext.RemainingWaitMilliseconds(System.Diagnostics.Stopwatch.GetTimestamp() - 1), Is.Zero);
+            Assert.That(OperationContext.RemainingWaitMilliseconds(long.MaxValue), Is.EqualTo(int.MaxValue));
+        }
+
+        [TestCase(1)]
+        [TestCase(120)]
+        [TestCase(600)]
+        public void ExplicitCompileWaitHonorsItsFixedMonotonicDeadline(int timeoutSeconds)
+        {
+            var tracker = new UPilotOperationTracker();
+            var context = tracker.BeginOperation("bounded-wait-" + timeoutSeconds, "compile.wait");
+            var entry = tracker.GetEntriesCopy().Single();
+            entry.ReceivedAt = DateTime.Now.AddSeconds(-605);
+            var originalReceivedAt = entry.ReceivedAt;
+            long deadline = System.Diagnostics.Stopwatch.Frequency * timeoutSeconds;
+            context.SetWaitingUntil(deadline);
+            context.SetPhase("waiting");
+            context.SetWaitingUntil(deadline + System.Diagnostics.Stopwatch.Frequency * 600);
+            Assert.That(entry.WaitingDeadlineTick, Is.EqualTo(deadline));
+            Assert.That(entry.ReceivedAt, Is.EqualTo(originalReceivedAt));
+            Assert.That(tracker.RunWatchdog(deadline - 1), Is.Empty);
+            Assert.That(tracker.GetCriticallyStuckCommandIds(deadline - 1), Is.Empty);
+            Assert.That(tracker.RunWatchdog(deadline), Is.EqualTo(new[] { "compile.wait" }));
+            Assert.That(tracker.GetCriticallyStuckCommandIds(deadline), Is.EqualTo(new[] { context.CommandId }));
+            var steps = entry.Steps.Count;
+            Assert.That(tracker.RunWatchdog(deadline + 1), Is.Empty);
+            Assert.That(entry.Steps.Count, Is.EqualTo(steps));
+            context.Complete();
+            Assert.That(tracker.GetCriticallyStuckCommandIds(deadline + 1), Is.Empty);
+            tracker.EndOperation(context.CommandId);
+        }
+
+        [TestCase("queued")]
+        [TestCase("executing")]
+        public void WaitAllowanceDoesNotExemptQueueOrResultSending(string phase)
+        {
+            var tracker = new UPilotOperationTracker();
+            var context = tracker.BeginOperation("wait-exit-" + phase, "compile.request");
+            var entry = tracker.GetEntriesCopy().Single();
+            entry.ReceivedAt = DateTime.Now.AddSeconds(-305);
+            context.SetWaitingUntil(1000);
+            context.SetPhase(phase);
+            Assert.That(tracker.RunWatchdog(999), Is.EqualTo(new[] { "compile.request" }));
+            Assert.That(tracker.GetCriticallyStuckCommandIds(999), Is.EqualTo(new[] { context.CommandId }));
+            context.Complete();
+            tracker.EndOperation(context.CommandId);
+        }
+
+        [Test]
+        public void ThirtyOneSecondCompileRequestWaitIsNotExecutingStuck()
+        {
+            var tracker = new UPilotOperationTracker();
+            var context = tracker.BeginOperation("compile-wait-31", "compile.request");
+            var entry = tracker.GetEntriesCopy().Single();
+            entry.ReceivedAt = DateTime.Now.AddSeconds(-31);
+            context.SetWaitingUntil(120);
+            Assert.That(tracker.RunWatchdog(31), Is.Empty);
+            Assert.That(entry.Phase, Is.EqualTo("waiting"));
+            context.Complete();
+            context.SetWaitingUntil(600);
+            Assert.That(entry.Phase, Is.EqualTo("completed"));
+            Assert.That(entry.WaitingDeadlineTick, Is.EqualTo(120));
+            tracker.EndOperation(context.CommandId);
+        }
+
+        [Test]
+        public void BridgeReportsOneDetailedWarningForOneStuckOperation()
+        {
+            var tracker = new UPilotOperationTracker();
+            var bridge = IsolatedWatchdogBridge();
+            var context = tracker.BeginOperation("watchdog-one-warning", "fixture.one_watchdog_warning");
+            var entry = tracker.GetEntriesCopy().Single();
+            entry.ReceivedAt = DateTime.Now.AddSeconds(-35);
+            context.SetPhase("executing");
+            int warnings = 0;
+            string warning = null;
+            void Observe(string message, string stack, LogType type)
+            {
+                if (type == LogType.Warning && message.Contains(context.CommandName)) { warnings++; warning = message; }
+            }
+            var originalLevel = Logger.MinLevel;
+            try
+            {
+                Logger.MinLevel = Logger.LogLevel.Warning;
+                Application.logMessageReceived += Observe;
+                bridge.CheckWatchdog(tracker, 100);
+                bridge.CheckWatchdog(tracker, 103);
+                Assert.That(warnings, Is.EqualTo(1));
+                Assert.That(warning, Does.Contain(context.CommandId).And.Contain("phase=executing"));
+            }
+            finally
+            {
+                Application.logMessageReceived -= Observe;
+                Logger.MinLevel = originalLevel;
+                context.Complete(); tracker.EndOperation(context.CommandId);
+            }
+        }
+
         [Serializable]
         private sealed class WatchdogPumpWitness
         {

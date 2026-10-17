@@ -45,7 +45,7 @@ def service(project):
     instance.editor_state = AsyncMock(return_value=ok("req", {
         "ready": True, "authoritative": True, "isStale": False, "playModeState": "edit",
     }))
-    instance.dispatcher = SimpleNamespace(call=AsyncMock(return_value=ok("req", {"status": "accepted"})))
+    instance.dispatcher = SimpleNamespace(call_maintenance_control=AsyncMock(return_value=ok("req", {"status": "accepted"})))
     return instance
 
 
@@ -125,8 +125,8 @@ def test_authorized_dispatch_ignores_unrelated_write_gate(tmp_path, monkeypatch)
         "expectedBridgeSessionId": "bridge",
     }))
     assert result.ok
-    instance.dispatcher.call.assert_awaited_once()
-    assert instance.dispatcher.call.call_args.args[1] == "service.restart"
+    instance.dispatcher.call_maintenance_control.assert_awaited_once()
+    assert instance.dispatcher.call_maintenance_control.call_args.args[1]["maintenanceId"]
 
 
 @pytest.mark.parametrize("state", [
@@ -140,8 +140,8 @@ def test_hard_stop_does_not_require_ready_or_switch_modes(tmp_path, state):
     result = asyncio.run(instance.service_restart(**args(tmp_path)))
     assert result.ok
     instance.editor_state.assert_not_awaited()
-    instance.dispatcher.call.assert_awaited_once()
-    assert instance.dispatcher.call.call_args.args[1] == "service.restart"
+    instance.dispatcher.call_maintenance_control.assert_awaited_once()
+    assert instance.dispatcher.call_maintenance_control.call_args.args[1]["maintenanceId"]
 
 
 def test_duplicate_after_lost_response_is_observation_even_after_revocation(tmp_path):
@@ -152,7 +152,7 @@ def test_duplicate_after_lost_response_is_observation_even_after_revocation(tmp_
     values["maintenance_id"] = original["maintenanceId"]
     result = asyncio.run(instance.service_restart(**values))
     assert result.ok and result.data == original
-    instance.dispatcher.call.assert_not_called()
+    instance.dispatcher.call_maintenance_control.assert_not_called()
     values["reason"] = "different"
     result = asyncio.run(instance.service_restart(**values))
     assert result.error.code == "SERVICE_RESTART_REQUEST_CONFLICT"
@@ -168,7 +168,7 @@ def test_busy_and_stale_identity_do_not_start_new_attempt(tmp_path):
     assert joined.data["deadlineAtUtcMs"] == original["deadlineAtUtcMs"]
     record(tmp_path, **{**original, "status": "failed"})
     assert asyncio.run(instance.service_restart(**args(tmp_path))).error.code == "SERVICE_RESTART_IDENTITY_CHANGED"
-    instance.dispatcher.call.assert_not_called()
+    instance.dispatcher.call_maintenance_control.assert_not_called()
 
 
 def test_registry_and_public_schema_prevent_retry_and_timeout_override():

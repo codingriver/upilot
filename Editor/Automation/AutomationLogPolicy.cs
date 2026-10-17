@@ -141,8 +141,13 @@ namespace CodingRiver.UPilot.Automation
                     reason = "Level is not blocking by default.",
                 };
 
-                PreparedRule deny = denyRules.FirstOrDefault(item => Matches(item, record, context));
-                if (deny != null)
+                var serviceObservation = record.logType == "Warning" && record.diagnosticSource == Logger.ServiceObservationSource;
+                PreparedRule deny = serviceObservation ? null : denyRules.FirstOrDefault(item => Matches(item, record, context));
+                if (serviceObservation)
+                {
+                    classification.reason = "Service observation is diagnostic only.";
+                }
+                else if (deny != null)
                 {
                     deny.MatchCount++;
                     classification.disposition = "blocked";

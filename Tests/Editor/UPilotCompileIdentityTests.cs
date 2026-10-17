@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
-using System.Runtime.Serialization;
 using NUnit.Framework;
 
 namespace CodingRiver.UPilot.Tests
@@ -10,13 +9,27 @@ namespace CodingRiver.UPilot.Tests
     public sealed class UPilotCompileIdentityTests
     {
         private const BindingFlags PrivateInstance = BindingFlags.Instance | BindingFlags.NonPublic;
+        private string _directory, _path;
+
+        [SetUp]
+        public void SetUp()
+        {
+            _directory = Path.Combine(Path.GetTempPath(), "UPilotCompileIdentityTests", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(_directory);
+            _path = Path.Combine(_directory, "CompileErrors.json");
+        }
+
+        [TearDown]
+        public void TearDown()
+        {
+            if (Directory.Exists(_directory)) Directory.Delete(_directory, true);
+        }
 
         [TestCase(false)]
         [TestCase(true)]
         public void CompilationStartDoesNotInheritPriorCompletionEvidence(bool requestActive)
         {
-            // Skip the live constructor's event subscriptions and persisted-result restore.
-            var service = (UPilotCompileService)FormatterServices.GetUninitializedObject(typeof(UPilotCompileService));
+            var service = CreateIsolatedService();
             SetField(service, "_lastErrors", new List<CompileErrorItemPayload>
             {
                 new CompileErrorItemPayload { message = "old error" }
@@ -86,7 +99,7 @@ namespace CodingRiver.UPilot.Tests
             const string legacyPayload = "{\"requestId\":\"legacy-request\",\"status\":\"finished\",\"phase\":\"completed\",\"terminal\":true,\"errorsVerified\":true,\"warningCount\":4,\"errors\":[]}";
             WithPersistedCompilePayload(legacyPayload, () =>
             {
-                var service = CreateUninitializedService();
+                var service = CreateIsolatedService();
                 service.TryRestoreFromDisk();
 
                 var diagnostics = service.BuildLastCompileErrorsPayload(includeWarnings: true);
@@ -112,7 +125,7 @@ namespace CodingRiver.UPilot.Tests
 
             WithPersistedCompilePayload(UnityEngine.JsonUtility.ToJson(persisted), () =>
             {
-                var service = CreateUninitializedService();
+                var service = CreateIsolatedService();
                 service.TryRestoreFromDisk();
 
                 var diagnostics = service.BuildLastCompileErrorsPayload(includeWarnings: true);
@@ -125,34 +138,13 @@ namespace CodingRiver.UPilot.Tests
             });
         }
 
-        private static UPilotCompileService CreateUninitializedService()
-        {
-            var service = (UPilotCompileService)FormatterServices.GetUninitializedObject(typeof(UPilotCompileService));
-            SetField(service, "_lastErrors", new List<CompileErrorItemPayload>());
-            SetField(service, "_lastWarnings", new List<CompileErrorItemPayload>());
-            return service;
-        }
+        private UPilotCompileService CreateIsolatedService() =>
+            new UPilotCompileService(_path, _directory, 123, 456, "isolated-producer");
 
-        private static void WithPersistedCompilePayload(string json, Action assertion)
+        private void WithPersistedCompilePayload(string json, Action assertion)
         {
-            var path = (string)typeof(UPilotCompileService)
-                .GetField("CompileErrorsPath", BindingFlags.Static | BindingFlags.NonPublic)
-                .GetValue(null);
-            var existed = File.Exists(path);
-            var original = existed ? File.ReadAllText(path) : null;
-            try
-            {
-                Directory.CreateDirectory(Path.GetDirectoryName(path));
-                File.WriteAllText(path, json);
-                assertion();
-            }
-            finally
-            {
-                if (existed)
-                    File.WriteAllText(path, original);
-                else if (File.Exists(path))
-                    File.Delete(path);
-            }
+            File.WriteAllText(_path, json);
+            assertion();
         }
 
         private static void SetField(object instance, string name, object value) =>

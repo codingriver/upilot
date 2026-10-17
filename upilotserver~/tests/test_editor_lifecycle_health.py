@@ -4,6 +4,7 @@ import asyncio
 from types import SimpleNamespace
 import pytest
 
+from bridge_readiness_helpers import mark_bridge_ready
 from upilot_mcp.server import WsOrchestratorServer
 import upilot_mcp.server as server_module
 import upilot_mcp.session_manager as session_module
@@ -22,6 +23,7 @@ def lifecycle(tmp_path, monkeypatch):
     session = server.session_manager.on_hello("session-a", {
         "projectPath": project, "processId": 12, "processCreatedAt": 12345, "identityVerified": True,
     })
+    mark_bridge_ready(server)
     server.state.reset_editor_session("session-a", 12)
     session.last_heartbeat_at = clock[0]
     return server, clock
@@ -93,6 +95,7 @@ def test_same_process_new_session_and_domain_end_wait_only_on_fresh_terminal(lif
     server.session_manager.on_hello("session-b", dict(projectPath=old.project_path, processId=12,
         processCreatedAt=12345, identityVerified=True))
     server.session_manager.active.last_heartbeat_at = clock[0]
+    mark_bridge_ready(server)
     server.state.reset_editor_session("session-b", 12)
     assert server.editor_observation(observed_at_ms=clock[0], network_connected=False)["status"] == "waiting_lifecycle"
     end = snapshot(server, clock, sequence=2, playModeTransition=transition(server, clock, "play"))
@@ -182,6 +185,7 @@ def test_new_verified_process_does_not_inherit_confirmed_lifecycle_fault(lifecyc
     project = server.session_manager.active.project_path
     server.session_manager.on_hello("session-new", dict(projectPath=project, processId=13,
         processCreatedAt=54321, identityVerified=True))
+    mark_bridge_ready(server)
     server.state.reset_editor_session("session-new", 13)
     monkeypatch.setattr(server_module, "process_exists", lambda pid: pid == 13)
     monkeypatch.setattr(server_module, "process_creation_time", lambda pid: 54321 if pid == 13 else 0)
@@ -426,6 +430,7 @@ def test_noncompile_reload_same_domain_new_session_ends_wait(lifecycle, reload_i
     old = server.session_manager.active
     server.session_manager.on_hello("session-b", dict(projectPath=old.project_path, processId=12,
         processCreatedAt=12345, identityVerified=True))
+    mark_bridge_ready(server)
     server.state.reset_editor_session("session-b", 12)
     data = snapshot(server, clock, sequence=2, compilePhase="idle", reloadId=reload_id)
     data["transition"] = "connected_snapshot"

@@ -147,6 +147,8 @@ namespace CodingRiver.UPilot
         public long bindMs;
         public long invokeMs;
         public long encodeMs;
+        public long dispatchWaitMs, targetInvokeMs;
+        public int dispatchCount, targetStartedCount, targetFinishedCount;
         public int getterCallCount;
         public int methodCallCount;
         public string[] completedBoundaries = Array.Empty<string>();
@@ -1730,6 +1732,9 @@ namespace CodingRiver.UPilot
                 bindMs = diagnostics.BindMs,
                 invokeMs = diagnostics.InvokeMs,
                 encodeMs = diagnostics.EncodeMs,
+                dispatchWaitMs = diagnostics.DispatchWaitMs, targetInvokeMs = diagnostics.TargetInvokeMs,
+                dispatchCount = diagnostics.DispatchCount, targetStartedCount = diagnostics.TargetStartedCount,
+                targetFinishedCount = diagnostics.TargetFinishedCount,
                 getterCallCount = diagnostics.GetterCallCount,
                 methodCallCount = diagnostics.MethodCallCount,
                 completedBoundaries = diagnostics.CompletedBoundaries,
@@ -1773,7 +1778,7 @@ namespace CodingRiver.UPilot
             string nextAction = stage == "parse" ? "Fix the reported source location and call once with corrected code." :
                 stage == "bind" ? "Use explicit type names or parameterTypeNames to select one compatible signature." :
                 stage == "policy" ? "Use a dedicated semantic tool or an explicitly compiled project helper." :
-                stage == "budget" ? "Inspect partial session state; increase a bounded limit only if the target is known safe." :
+                stage == "budget" ? "Inspect partial state; narrow the data range or use a project sampling Step. Do not retry, switch backends or increase timeouts automatically." :
                 stage == "cancelled" ? "Inspect partial session state, close the session when finished, and do not retry automatically." :
                 "Inspect the exception and partial state before deciding whether a new call is safe.";
             bool sideEffects = detail.TryGetValue("sideEffectsMayHaveOccurred", out var sideEffectValue) && sideEffectValue is bool value && value;
@@ -1816,7 +1821,10 @@ namespace CodingRiver.UPilot
                 resourceDiagnosticsDroppedCount = detail.TryGetValue("resourceDiagnosticsDroppedCount", out var dropped)
                     && dropped is int droppedCount ? droppedCount : 0,
                 resource = DetailString(detail, "resource", ""),
-                limit = detail.TryGetValue("limit", out var limitValue) && limitValue is int limit ? limit : 0,
+                metric = DetailString(detail, "metric", ""),
+                actual = DetailLong(detail, "actual"),
+                limit = DetailLong(detail, "limit"),
+                lastCompletedSpan = ToSourceSpan(detail, "lastCompletedSpan"),
                 used = detail.TryGetValue("used", out var usedValue) && usedValue is int used ? used : 0,
                 requestedTypeName = DetailString(detail, "requestedTypeName", ""),
                 exceptionType = DetailString(detail, "exceptionType", ex.GetType().FullName),
@@ -1872,15 +1880,15 @@ namespace CodingRiver.UPilot
             return fallback ?? "";
         }
 
-        private static SourceSpanPayload ToSourceSpan(IDictionary<string, object> detail)
+        private static SourceSpanPayload ToSourceSpan(IDictionary<string, object> detail, string key = "sourceSpan")
         {
-            if (detail != null && detail.TryGetValue("sourceSpan", out var spanValue) && spanValue is ExecutionSourceSpan span)
+            if (detail != null && detail.TryGetValue(key, out var spanValue) && spanValue is ExecutionSourceSpan span)
                 return new SourceSpanPayload
                 {
                     start = span.start, length = span.length, end = span.end,
                     line = span.line, column = span.column, endLine = span.endLine, endColumn = span.endColumn,
                 };
-            if (detail != null && detail.TryGetValue("position", out var positionValue) && int.TryParse(Convert.ToString(positionValue, CultureInfo.InvariantCulture), out int position))
+            if (key == "sourceSpan" && detail != null && detail.TryGetValue("position", out var positionValue) && int.TryParse(Convert.ToString(positionValue, CultureInfo.InvariantCulture), out int position))
                 return new SourceSpanPayload { start = position, end = position, line = 1, column = position + 1, endLine = 1, endColumn = position + 1 };
             return null;
         }

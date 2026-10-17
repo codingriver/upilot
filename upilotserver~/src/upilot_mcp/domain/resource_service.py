@@ -252,6 +252,16 @@ class ResourceDomainService:
             return rejected
         project_root = self._active_project_root()
         if project_root is None:
+            # Registration is durable write authorization, not an Editor command.
+            # A verified startup project may queue saved changes while its Bridge upgrades.
+            configured = str(getattr(self.server, "expected_project_path", "") or "")
+            stored = str(getattr(self.server.state, "project_path", "") or "")
+            if configured and stored:
+                candidate = Path(configured).expanduser().resolve()
+                if (candidate == Path(stored).expanduser().resolve()
+                        and (candidate / "Assets").is_dir() and (candidate / "ProjectSettings").is_dir()):
+                    project_root = candidate
+        if project_root is None:
             return fail(request_id, "UNITY_NOT_CONNECTED", "No active Unity project is connected.")
         if (
             not isinstance(paths, list)

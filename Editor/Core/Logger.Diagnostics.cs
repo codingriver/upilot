@@ -10,6 +10,16 @@ namespace CodingRiver.UPilot
     public static partial class Logger
     {
         private static readonly DiagnosticBuffer Diagnostics = new(EmitDiagnostic);
+        private static readonly DiagnosticBuffer ServiceObservations = new(EmitServiceObservation);
+        internal const string ServiceObservationSource = "upilot.service.observation";
+        [ThreadStatic] private static ConsoleDiagnosticEmission _consoleDiagnostic;
+        private sealed class ConsoleDiagnosticEmission
+        {
+            internal string Message, Source;
+            internal LogType Type;
+            internal bool Captured;
+            internal int CallbackDepth;
+        }
         private static long _nextDiagnosticPoll;
 
         // Infrastructure failures use this boundary; normal event/report streams remain complete.
@@ -28,14 +38,47 @@ namespace CodingRiver.UPilot
             Diagnostics.Report(category + "|" + (fingerprint ?? message), $"[WARN ] [{category,-8}] {message}", LogType.Warning, scope);
         }
 
-        internal static void CloseDiagnostics(string scope) => Diagnostics.Flush(scope);
-        private static void FlushDiagnostics() => Diagnostics.Flush();
+        internal static void ReportServiceObservation(string category, string message, Exception exception = null,
+            string scope = "", string fingerprint = null)
+        {
+            if (IsAssetImportWorker) return;
+            var body = message + (exception == null ? "" : "\n" + exception);
+            ServiceObservations.Report(category + "|" + (fingerprint ?? message) + "|" + exception?.GetType().FullName,
+                $"[WARN ] [{category,-8}] {body}", LogType.Warning, scope);
+        }
+
+        internal static string CaptureDiagnosticSource(string message, LogType type)
+        {
+            var current = _consoleDiagnostic;
+            if (current == null || current.Captured || current.Type != type || current.Message != message ||
+                ConsoleCallbackDepth() != current.CallbackDepth + 1) return "";
+            current.Captured = true;
+            return current.Source;
+        }
+
+        // A callback may emit the exact same text before Capture sees the original event.
+        // Bind provenance to the synchronous Unity callback depth as well as the thread/scope;
+        // nested ordinary logs cannot consume the outer emission, even with stack logging disabled.
+        private static int ConsoleCallbackDepth()
+        {
+            var depth = 0;
+            foreach (var frame in new System.Diagnostics.StackTrace(false).GetFrames() ?? Array.Empty<System.Diagnostics.StackFrame>())
+            {
+                var method = frame.GetMethod();
+                if (method?.DeclaringType == typeof(Application) && method.Name == "CallLogCallback") ++depth;
+            }
+            return depth;
+        }
+
+        internal static void CloseDiagnostics(string scope) { Diagnostics.Flush(scope); ServiceObservations.Flush(scope); }
+        private static void FlushDiagnostics() { Diagnostics.Flush(); ServiceObservations.Flush(); }
         private static void PollDiagnostics()
         {
             long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             if (now < _nextDiagnosticPoll) return;
             _nextDiagnosticPoll = now + 1000;
             Diagnostics.Poll();
+            ServiceObservations.Poll();
         }
 
         private static void EmitDiagnostic(string message, LogType type, bool file)
@@ -43,6 +86,22 @@ namespace CodingRiver.UPilot
             try { if (file) AppendLine(message); }
             catch (Exception ex) { UnityEngine.Debug.LogError("[UPilot] 日志写入失败\n" + ex); }
             finally { WriteToUnityConsole(message, type); }
+        }
+
+        private static void EmitServiceObservation(string message, LogType type, bool file)
+        {
+            try { if (file) AppendLine(message); }
+            catch (Exception ex) { UnityEngine.Debug.LogError("[UPilot] 日志写入失败\n" + ex); }
+            finally
+            {
+                // Capture provenance exists only during this exact Console emission, including aggregate flushes.
+                var previous = _consoleDiagnostic;
+                var text = message; // Preserve the complete observation and original exception in Capture.
+                _consoleDiagnostic = new ConsoleDiagnosticEmission { Message = text, Type = LogType.Warning,
+                    Source = ServiceObservationSource, CallbackDepth = ConsoleCallbackDepth() };
+                try { UnityEngine.Debug.LogWarning(text); }
+                finally { _consoleDiagnostic = previous; }
+            }
         }
 
         internal static void ReportFileDiagnostic(string operation, string path, Exception exception)

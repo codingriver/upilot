@@ -2,7 +2,7 @@
 
 # UPilot Unity MCP
 
-rulesVersion: 58
+rulesVersion: 59
 upilotPackageVersion: 0.3.51
 projectPath: <UNITY_PROJECT_ROOT>
 generatedAt: (documentation profile)
@@ -48,6 +48,12 @@ Project-specific business rules outside this controlled UPilot block take preced
 2. Require `connected: true` and `serverReady: true`.
 3. By default, verify `paths.unityProjectAbsolute` matches `<UNITY_PROJECT_ROOT>` (allow equivalent slash normalization). Only when existing project business rules explicitly authorize an alternate project and the current task explicitly selects it, first establish its full absolute path and dedicated HTTP endpoint, then verify the returned path against that exact intended path before any target tool call. A matching basename is never authorization; do not broaden an acceptance allowlist or infer a target from the endpoint response.
 4. Stop and report a mismatch or unknown identity; if an alternate target has not been explicitly selected, retain the default. Never automatically switch projects to make a connection pass.
+
+## Service Readiness And Observations
+
+- Ordinary restart completes from exact authorized OS process/entry/port identity, old-process exit and released ports, authenticated matching new connection, and its verified `session.ready → session.bootstrap → session.bootstrap.ack` receipt. Observe the original operation and deadline; never replay stop/start to refresh diagnostics.
+- `/health` is diagnostic only (default 20 seconds after each completed check; preserve saved intervals). Failure, success, cached ages, version/channel/module differences and diagnostic archives do not establish or block readiness, trigger repair, or prove compilation. Health faults remain visible Console Warnings.
+- Keep actual identity conflicts, authentication rejection and protocol incompatibility as failures. Missing required evidence remains pending until the original deadline. Report ordinary service availability separately from explicit upgrade target-version and loaded-source/Unity compile acceptance. Read `references/safety.md` for maintenance and historical schema rules.
 
 ## Deployment Freshness
 

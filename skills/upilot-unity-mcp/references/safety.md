@@ -41,7 +41,7 @@
 - Call `unity_service_restart` with the original exact expected identities and a fresh maintenanceId. Both `target=bridge` and `target=server` now mean complete UPilot reset plus Server/Bridge restart. Neither restarts Unity, compiles, saves scenes, installs updates or deletes history.
 - Human-confirmed **硬停止全部任务并重启 UPilot…** uses the local Unity manager, including when MCP is disconnected; no AI grant is required for that human action. It affects every chat's current-project tasks and skips user Finally/Cleanup. Queue activity is invalidated first; reports are best effort and cannot block reset.
 - Automatic escalation requires the effective service-maintenance grant AND the separate default-off **软停止失败后自动硬停止全部任务并重启 UPilot** setting. Eligible failures are valid-target cooperative-stop failure, exception, cleanup timeout or unsupported stop, not business failure with completed cleanup, missing tasks or validation/permission errors. Multiple failures merge into one reset. A failed hard stop never recursively restarts.
-- The accepted maintenance deadline defaults to 120 seconds, configurable from 30 to 600 seconds in the UI. It covers every phase and cannot be renewed by polling, settings changes or duplicate requests. Transient health probes stay inside that budget; health failure alone is not a port conflict. Do not replay side effects.
+- The accepted maintenance deadline defaults to 120 seconds, configurable from 30 to 600 seconds in the UI. It covers every phase and cannot be renewed by polling, settings changes or duplicate requests. Completion uses exact authorized process/entry/port evidence, old-process exit, the authenticated new connection and its matching bootstrap receipt. Health and cached observations are outside this decision; they cannot trigger another stop/start, repair, or installation. Do not replay side effects.
 - Accepted is not completion. Observe the original maintenance identity after reconnect; report queue reset and service restart separately. Timeout/failure leaves the old queue invalidated, not recoverable, and does not auto-retry or kill Unity. A new PID is not proof that edited source was loaded.
 - All service startups establish empty active state; retained logs/reports are not recovery input. Ordinary reconnect or normal compile/PlayMode Domain Reload is not a service restart and does not extend existing deadlines.
 - Restarting Server cannot interrupt arbitrary synchronous Unity main-thread code. Physical engine/external busy state must remain visible even when UPilot queues are empty. A fully hung Unity editor may not process its button; this workflow does not add automatic Unity termination.
@@ -76,3 +76,15 @@
 - Choose the `unity_reflection_call` request shape before execution: structured `typeName` + `methodName`, or one bounded `expression`. Never fall back between the two engines after a real call because the first attempt may already have side effects. Add a stable compiled helper for repeated or multi-step logic.
 - `csharp_eval`, `reflection_emit_type`, and `execution_session` require write access and are non-idempotent. Budget failure and runtime exceptions do not roll back side effects. Never retry automatically.
 - Close every persistent execution session in success and failure paths. Treat handles from an earlier Domain Reload as expired; never substitute a similarly named object.
+
+## Restart evidence compatibility
+
+New restart records use schema 5; healthVerified and deploymentVerified are not
+completion gates. Preserve schema 1–4 historical gate order and terminal outcomes.
+Only credential-complete schema 4 in-flight records may migrate after verifying the
+original operation/owner/generation, project, deadline, launch specification and
+PID/creation identities. Migration retains action receipts and deadline, discards
+readiness evidence and observes the current bootstrap without stop/start replay.
+Missing/conflicting credentials end recovery-required; unknown future schemas remain
+read-only and unverified. Server and Bridge must implement the paired readiness
+contract; incompatibility has no Health fallback or automatic reinstall.

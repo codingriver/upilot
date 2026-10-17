@@ -1,6 +1,6 @@
 # Workflows
 
-## Health
+## Connection And Editor Readiness
 
 1. Call `unity_mcp_status`.
 2. Verify `connected`, `serverReady`, and the project path.
@@ -263,3 +263,15 @@ dependencies is a reported prerequisite, not permission to install them automati
   those workflows. This guard is not a sandbox for arbitrary reflection or user code.
 - Use task-local read-only probes for this routing validation; do not start a full test
   suite merely to check a second endpoint.
+
+## Service observations
+
+Health success and failure are independent diagnostics. The single project observer
+defaults to 20 seconds after the previous completion (range 1–600); existing saved
+values remain unchanged. Windows read existing snapshots and never start another check.
+Health warnings, including HTTP errors, timeout, malformed JSON and observed identity
+differences, are visible in Unity Console despite logging toggles. They never change
+authoritative failure/readiness state or authorize recovery. Version/channel/default
+entry/module and cached pump/heartbeat/queue observations likewise do not block an
+ordinary restart. Actual authorized entry, process identity, authentication and protocol
+checks remain required. Explicit upgrades still verify their requested target version.

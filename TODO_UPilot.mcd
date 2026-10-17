@@ -569,7 +569,8 @@ P0/P1 集中验收续记（2026-10-09）：V01 共享生产 pump/watchdog 与命
 - 本轮补充效率证据：只读解释器逐路径循环306次调用后在30秒预算中止（EXECUTION_BUDGET_EXCEEDED，actual=30075ms，commandId=`cmd-3ccd4041-4614-49d4-bfc5-52960dd48e6d`）；单次结构化批量API成功。该现象不证明Unity API本身超时，保持现有预算与权限边界，不通过扩大预算替代批量能力。
 - 本轮证据目录：`C:\Users\coding\AppData\Local\Temp\xclient-survivor-team-cs0246-20261009\`，重点为asset-dependencies-summary.json、asset-dependencies-typed-literals-current.json及失败回执；通用条目状态仍为P2候选待诊断/评估，未实施，双向引用沿用本ID。
 
-
+
+
 - 2026-10-13 续证（SceneTool 脚本反向引用清单）：当前 xclient Ready/EditMode 下，正确参数 evidenceMode=object、direction=reverse、referenceQuery={kind:guid,value:eced099b245933e4b8cae3afbe11ceb0}、scope=[Assets/]、maxNodes=5000、timeBudgetMs=1000 仍返回 GetInt 主线程错误；原 commandId=cmd-40ff506d-e230-43f9-9ff2-536a82921135，sideEffectsMayHaveOccurred=false。失败查询未重放。降级源码/GUID 静态扫描 37,290 个候选文件，确认 17 个直接 m_Script 资源均在 SceneTool/EditorRes，反向 Prefab/Scene 资源图无新增边；另用单次 AssetDatabase.GetDependencies(string[], bool) 读取 381 个动画/Controller/Playable 候选的 1,402 项递归依赖，SceneTool 命中 0。该证据覆盖当前候选集，不宣称所有二进制插件或动态生成引用均已排除；不扩展权限或执行预算。
 
 ## 2026-10-09 V01开发补记（既有父项进度，非新增项；未验收、未上线核验）
@@ -1445,3 +1446,69 @@ V04最新复验原Task task-83b34019-815b-4fa5-8f0f-09f065916c9f、runGuid 4cf4c
 - 观察/影响：调整 Step 管理窗口时，批次 wb-19431040-ca81-4277-a185-42bceaa98baf 在 Domain Reload 后变为 aborted，error=会话未认证，correlationVerified/errorsVerified=false，terminalSnapshot=null；相同 compileRequestId=req-746bcc3c-d577-491d-89bc-4da68f5689e6 的 live compile.errors 返回 completed、errorsVerified=true、0E/0W，校验时间 1792152788421 晚于批次创建时间 1792152770937。无法按原批次规则确认完整编译验收。
 - 建议：检查自动批次观察器在正常 Domain Reload 与重新认证期间如何处理暂时性认证错误，保留原批次身份、固定截止时间及后续真实终态；明确区分暂时不可用与终态失败，不自动重编译或伪造关联成功。
 - 证据/状态：规范项目 Tests~/UPilotTest，Unity PID 38044，编译操作 a5290899e2044d2e9afdee398a6b66da。仅登记已观察的不一致，根因未确认；本次不修改认证或编译框架。
+- 2026-10-16 业务侧补充复现：H:/trunk3 的正式 Step Operation op-7b8bbe68-0a5b-4ead-91a4-a4585a8e2769 在进入 PlayMode 后，首次 wait 因“会话未认证”成为 aborted/INTERNAL_ERROR；原 start 留存的 runId=c8e4f8dcfda34bf6989ac7f7d3b28c1c 随后经只读 StateJson 确认12步及各自清理全部成功、业务报告因范围外4条 GPC Error 为 Failed/STEP_CONSOLE_POLICY_FAILED。最终日志原值恢复、Capture停止、EditMode、完整新鲜队列为空；原 Operation 仍为 aborted，未重发 Start。13项原运行产物字节数/SHA256核验一致，证据 H:/trunk3/Logs/UPilot/Reports/Steps/c8e4f8dcfda34bf6989ac7f7d3b28c1c/summary.json。
+- 改进/验收补充：同一观察问题需覆盖 Step Operation 的 PlayMode/Domain Reload 重新认证窗口，保留首次返回的 operationId/runId 和固定期限，以原身份区分暂时查询失败、真正终态及清理未知；原任务已终态后不恢复或重写其结果。定向验证 Start 一次、认证窗口查询失败、Unity原run仍执行并清理、终态产物可按原run读取，不以最近目录猜测身份或自动重跑。此轮仅记录复现，未修复 UPilot 框架，状态仍为待诊断。
+
+## UPilot-20261016-PackageUpdateRecoveryReentry / P1：更新恢复重入后停留“获取状态中”（已修复，定向验收通过，未发布）
+
+- 观察/影响：H:/trunk3 从 0.3.50 更新到 0.3.51 后，2026-10-16 21:19:32（Asia/Shanghai）自动启动新服务；21:19:35 同一域的更新恢复再次调用 StartServer，21:19:37 hello 切换服务生命周期时取消恢复校验。界面持续“获取状态中”，直到用户 21:23:29 停止、21:23:37 再启动，21:23:41 完成身份验证与 editor.state 只读往返。
+- 日志证据：H:/trunk3/Logs/UPilot/upilot-2026-10-16.log:2682–2710、2751–2774；mcp-server-2026-10-16.log:1674–1693。第一次服务已监听并为精确项目建立会话；recovery_validation_completed 为 stopped/discovery/attempts=0，紧接 recovery_superseded reason=service_reset，不能将其描述为启动验证成功、下载失败或发现超时。附件调用栈分别来自 WaitForEditorReady 与 RestoreReleaseOrResetSourceState。
+- 代码原因：已安装 PackageCache io.github.codingriver.upilot@1590c4f36d 的 UPilotPackageUpdateLifecycle.TryRestoreAfterUpdateCore 对异步 ContinueManagedServerUpdateAfterPackage 缺少进行中排他，更新标记到 await 后才清理；StartServer 在进程已发起而身份尚未验证时可再次进入 ExistingServiceRecovery，后者清除原 launch observer/state。新 hello 的 ResetActiveWork 随即取消这次 recovery，未接续验证；verified attachment 缺失使周期健康观察无法恢复，生命周期收尾清空缓存后界面落入 CheckingStatus。
+- 成功语义缺口：RestartAndConfirmManagedServerAsync 仅等待服务版本达到目标就报告更新并启动完成，未等待身份、Bridge 与只读往返完成，不能证明窗口已就绪。
+- 建议：按原更新/启动身份合并重复恢复入口，保留正在验证的新 launch；生命周期切换取消旧 recovery 时明确接续新服务验证或给出有限终态；更新完成等待真实启动验证，保留失败上下文，不能以版本响应或 phase=None 冒充就绪，也不能放宽项目/进程身份校验或自动重放启动。
+- 定向验收建议：覆盖 delayCall 与 update 双入口重入、hello 在 discovery 中到达、取消后观察恢复、版本匹配但身份/只读验证失败，以及用户停止覆盖更新恢复。先在规范 Tests~/UPilotTest 验证；现场日志诊断不等同回归通过。
+- 修复：TryRestoreAfterUpdateCore 在任何异步恢复前消费更新标记，保留原 RecoveryWait 身份/截止时间；StartServer 合并同项目/端口仍在验证的新 launch，保留原观察器。更新完成改为 WaitForVerifiedStartupAsync，等待原启动或恢复操作的进程身份、Bridge 握手、实际只读验证和已提交状态缓存，版本号单独匹配不能成功；仅接受同恢复操作的严格停止凭据，不延长期限、不重放启动。
+- 终态/诊断：生命周期 reset 中断活动 recovery 时保留 stopped+service_reset 原因，显示“服务恢复未完成”并输出一次带恢复身份、项目、端口和期限的红色错误；正常用户停止仍是普通取消。旧更新 continuation 以 OperationId 隔离，失败后不自动再次 Restart。
+- 定向验收：规范 D:/upilot/Tests~/UPilotTest，最终关联批次 wb-65b8162a-21f2-4555-89fc-5d7b4e2075db，编译 req-ac1cd4e2-84ba-4127-8ced-0fc4cdd422d3 / 18a22dc6aa5841f2922c79aca985959b，correlationVerified/errorsVerified=true，verifiedAt=1792159273432 晚于创建1792159260856，0错误/0警告。官方验收 task-fbec6d50-729a-4aa2-805e-523c755e3fa6，run 58f200f4-4226-4f21-aa78-ee06fc8ece33，选定66例全部通过、0失败/跳过，acceptancePassed/cleanupVerified/testIdentityVerified/sourceUnchanged/importInputsUnchanged 均 true；源码摘要8d3f8d3bd4de202b23fa2da83f5c1c18bcca31ac01bbcd5b2a7d2d454a1b72db。
+- 报告：Tests~/UPilotTest/Logs/UPilot/Reports/Acceptance/1792159304998_req-7155029b-dfae-4138-a00c-af47cb0b6be5/summary.json，779737字节，实际文件SHA256=16ddeca71ace664b7469452f32142ac4ccc1096c35cd583c932cbd6a988a03bf。Console rangeCoverage=complete，phaseCoverage=partial（console_cursor_clear_or_reload_not_detectable），不宣称分阶段日志完整。
+- 历史失败保留：初始3个批次因服务重启中断，aborted/service_restarted，未伪报关联编译成功。首次66例验收 task-9cd4c1ef-6ade-457c-8575-dd50ca0ff3ba / run 8d7beccb-9e1d-440d-86a8-9d6422cd4afc 为61通过/5失败：3项遗漏对正常recovery_superseded Log的明确预期，已修正且保留严格红日志/重复输出断言；2项被后台WMIC HelperTimedOut红日志打断。首轮同时观察到4个Python测试输入变动，sourceUnchanged=false；原失败报告保留于1792159095194_req-977849cb-feba-4340-b536-23547e955ef6/summary.json，不计通过。
+- 交付边界：完成仓库源码修复和上述定向Unity测试，未做完整套件或实际下载/UPM升级端到端复现；未改H:/trunk3的PackageCache、安装本次修复、发布版本或手动重启其服务。并行AI的Python及生成集成文件变更保留，不纳入本次修复范围。
+
+## UPilot-20261016-WmicBackgroundTestInterference / P2：后台进程查询超时干扰定向测试（待诊断）
+
+- 观察/影响：规范UPilotTest在2026-10-16 21:58:36（Asia/Shanghai）后台RefreshStatusAsync -> ProbeMcpProcessOwnership -> ProbeProcessCommandLine报告provider=wmic、HelperTimedOut/process_exit、targetPid=81268、helperPid=91488、elapsedMs=1006；相同根因聚合日志再次输出，两条红日志分别打断独立的启动等待测试。测试前Console已有相同后台错误，不能据此归因于本次更新恢复修复或测试业务断言。
+- 证据：run 8d7beccb-9e1d-440d-86a8-9d6422cd4afc 的project/foreign_receipt两个叶子结果和官方Console调用栈；后续run 58f200f4-4226-4f21-aa78-ee06fc8ece33原66例全部通过，未屏蔽错误或放宽断言。
+- 建议/状态：独立复核WMIC辅助进程超时及现有回退证据，区分进程发现故障和测试业务失败；改进隔离诊断归属且保留真实红错误/堆栈，不以全局ignore日志换取通过。本次只登记，不更改进程发现、测试门禁或后台健康配置。
+
+## UPilot-20261016-BridgeReadyLifecycleIsolation / P1：初始化、编译、重连与停止期间的普通请求隔离（已集成，阶段验收未完成）
+
+- 观察/影响：UPilotTest Console 出现后台 WMIC 查询超时、ThreadAbort 及生命周期切换中的 Health/Stats 探测失败；上一条 WmicBackgroundTestInterference 已记录两个测试被真实后台红日志打断。不能把附件中的所有 eval 负向测试异常都归为产品缺陷，也不能据端口监听、Health 响应或 hello 认证单独认定服务已就绪。
+- 源码核查：普通状态观察缺少覆盖初始化、当前 Bridge 同步和停止起点的统一准入/迟到提交检查；后台进程归属查询复用同步 WMIC 的短等待；旧连接排队工作和结果需要贯穿派发、主线程执行及发送锁的来源约束。hello ACK 还必须匹配本次实际发送的确切 ID。以上与重复日志、测试污染及恢复期间状态误判相关，不以日志本身证明每次故障都由同一原因导致。
+- 修复：Ready 改为 hello → 主线程恢复初始化 → session.ready → 单次 bootstrap 权威状态/编译证据持久化 → 精确 ACK。收据绑定当前项目、Unity PID/创建时间、socket epoch、session、Server 生命周期/实例与原挑战；断开、Reset、Reload、停止立即撤销。Manager 保留严格 OS/端口/部署身份核验，复用当前 bootstrap 收据并原子提交验证成功与缓存，不再增加依赖普通准入的自探测循环。
+- replacement 身份：新增 `_shutdownLaunchIdentityConfirmed`，仅在当前 shutdown owner/generation、launch 与启动 generation 匹配且原期限有效时，经本轮实时 OS 归属核验置位；新 owner/launch 及 shutdown 结束清除，历史持久化 verified 不足以复用。它允许 replacement hello 复用原 reset 收据，解除 hello 等待最终 Ready 的循环依赖；`_launchNeedsRevalidation` 仍待当前 bootstrap 收据最终提交，不提前报告 Ready、不续期或重新启动。
+- 门禁：普通 Health/Stats 从初次恢复、生命周期与 Bridge 同步三方准入，发送、返回和提交复核；Starting/Stopping 关闭，Verifying 仅原 owner 内部 Health 探测。普通命令在未同步时等待，编译期间仅保留既有窄范围观察；维护只允许具有独立授权和精确当前身份的 service.restart 控制包，不扩大 bypass。
+- 显式 Health：`mcp_stdio_server.py` 的 `/health?probe=bridge` 发送/回包共用固定 5 秒，绑定原 orchestrator、当前 session 与 bootstrap 收据，返回前重核 Ready、generation 和来源。停止、同 session 换代、orchestrator 替换/移除或缺失 generation 不返回旧 Ready/收据；Timeout、ConnectionError、OSError 输出 Error 及原堆栈，CancelledError 传播且所有路径清理原 pending。
+- 显式 Repair：新 preflight 修复普通 GetFreshStatus 未 Ready 时返回旧终态失败、在新 restart 前抛错的问题；固定当前两端口，均空闲只表示本轮未发现监听，占用则复用内部 Health 与精确 OS 归属，Unknown/Foreign/缺 PID 拒绝，后续停止仍有精确 OS 归属门禁。保留 deadline/cancel/generation 和端点漂移检查，不提交普通 cache、不清旧失败或预算。
+- 时间/取消：普通 HTTP 2 秒、netstat 2 秒及调度周期分别保留含义；后台归属整轮最多 8 秒、其中 WMIC 最多 5 秒，直接同步 WMIC 仍最多 1 秒；bootstrap 最多 7 秒。全部子步骤收紧到原父期限，Ready episode 只可缩短，服务父预算默认 120 秒/最高 600 秒不按重连或每阶段续期。取消和 ThreadAbort 保持正常中断，真实查询/清理/持久化失败保留红日志与原堆栈。
+- 预算失败日志：`InitializationBudgetExpiredException` 经 `Logger.ReportFailure` 保留红色 Error、原异常/堆栈与 endpoint、session、epoch、剩余预算、原单调截止及原 Ready 恢复 UTC 截止；0 明示不可用。按 endpoint/原恢复 UTC 截止在既有 10 秒窗口跨重连 session 聚合，首次立即输出并保留次数和首末时间，不同 episode 分开；只读期限查询不续期。仅精确当前 bootstrap ACK 的同步回调刷新待输出计数，TCP 连接成功不关闭聚合。新增 Console 关闭仍红、同 episode 聚合及不同 episode 分离回归，尚未取得修复后的 Unity 通过证据。
+- 定向回归阶段证据：Python 原相关 suite 加新增回归 **399 passed、2 条既有 websockets 弃用警告、29.10 秒**，`git diff --check` 通过；新增 suspended 固定 grace 与 lease 关闭 socket 用例实际 **4 failed → 4 passed**。hello 到 bootstrap ACK 之间保留原 suspended 查询和原期限，失败候选不提前终止恢复；成功后仅按原只读 allowlist 恢复查询，副作用命令不重放。lease 过期关闭旧 socket，必须新连接重新 bootstrap，不能由普通 heartbeat 复活。结果日志：`C:\Users\coding\AppData\Local\Temp\upilot-python-lifecycle-20261016\regression.log`。
+- 显式 Health 定向证据：`test_server_restart_diagnostics.py` 与 `test_bridge_readiness.py` 共 **64 passed、2 条既有 websockets 弃用警告、3.04 秒**，与前述 399 项分开记录，不相加。新增 8 种情景覆盖发送阻塞、停止、同 session 换代、缺失 generation、成功、取消，以及 orchestrator 替换/移除；初轮 5 failed、追加日志断言 3 failed、移除情景 1 failed 均在对应修复后转绿。最终日志：`C:\Users\coding\AppData\Local\Temp\upilot-python-lifecycle-20261016\health-probe-regression-final.log`。当前运行 Server 仍为旧加载来源，此结果不构成现场部署或端到端恢复验证。
+- Unity 阶段证据：首轮定向 **441 项，415 passed、26 failed，resultAuthoritative=true、cleanupSucceeded=true**；26 项失败分别为序列化计数 1 项、真实连接旧夹具 7 项、旧反射参数 18 项，修复已合入，失败历史保留，修复后仍待复验。UPilotBridgeReadinessTests 只验证无真实 socket 的内存/身份判断；UPilotBridgeSendTests 另含自有 loopback/真实 ClientWebSocket 用例，不替代规范项目当前部署证据，也不能把部分通过写成整轮通过。
+- 关联编译与中断：先前原批 `wb-74dc1768…` 已 verified/passed，correlationVerified/errorsVerified=true；只证明该批当时输入。后续 `wb-e9c2dc64-b54b-41a4-a94a-0892ac37ab35` 在 compiler_finished/0 错误后进入 domain_reload，连接未恢复，原 600 秒耗尽后为 timed_out/outcome=unknown、correlationVerified=false，未通过验收，没有续期或重放。随后实际写入的两个修复批次 `wb-d17a8030-b131-46db-bbe4-c0fec9d8551e`（owned replacement 身份/Ready 解耦）及 `wb-8b2ad980-9c47-4969-be04-c9d85b7f916e`（期限耗尽红日志/按恢复期限聚合）登记时 deferred/disconnected，截至 **2026-10-16 14:59 UTC** 的观察仍断连；随后原批 wb-d17a8030 已确认原 600 秒到期，timed_out/outcome=unknown、correlationVerified/errorsVerified=false，未续期或重放。wb-8b2ad980 随后的原批观察也确认原 600 秒到期，timed_out/outcome=unknown、correlationVerified/errorsVerified=false，未续期或重放，两批均未通过验收。最新源码关联编译与定向复验仍未完成；此次文档更新没有新增规范项目运行时通过证据。更早两批 service_restarted 的结果仍为 unknown；旧维护 `b9a2…` failed/authentication_failed 保留，不因实际 restart 改写通过。
+- 新增 Repair 批次：`wb-566b0904-47d1-4a1b-b055-c65d8de45782`，`writeBatchCreatedAt=1792163478926`，保存后立即登记 `UPilotQuickStart.cs`、`UPilotMcpServerManager.cs` 与 `UPilotStartupDiagnosticsTests.cs`。登记结果为 `deferred/disconnected`，保留原 600 秒期限；新增 11 个定向情景目前仅落源码、未执行；静态审查完成，Unity 关联编译与定向测试未完成。最新原批观察为 `deferred`、`terminal=false`、`outcome=unknown`、`correlationVerified=false`、`errorsVerified=false`，`ageMs=101734`（2026-10-16 15:13:00 UTC），未续期或重放。该批没有已验证编译或测试通过证据，不能改写此前失败批次。
+- 当前状态：实现已集成，**整体未完成验收**。最终只读快照为 **2026-10-16 15:13:00 UTC**（`timestamp=1792163580638`）：规范 `D:/upilot/Tests~/UPilotTest` 仍 `connected=false`、`serverReady=false`，Editor 状态 stale/non-authoritative；Server PID 仍为 103936，加载来源仍为 different。Server 当前 PID103936 已知 `_handle_message` loaded source 与磁盘源码 different，包含上述修复的 Python 源码冻结后，须在后续已授权维护窗口刷新并重新核验实际加载来源、精确项目与当前 bootstrap 收据；accepted、实际 restart、新 PID 或版本匹配均不等于验收通过。仍需规范 Tests~/UPilotTest 最新原批关联编译和夹具修复后窄范围 EditMode 复验；其他修复的 66/66 或 9/9 历史结果不覆盖本次代码。不发布、不修改外部 H:/trunk3 的 PackageCache，不触发完整 EditMode 套件。
+- 说明：[Bridge Ready 与服务生命周期隔离](Documentation~/BridgeReadyLifecycleContract-20261016.md) 记录 Ready 契约、门禁矩阵、完整相关时间预算及未验证覆盖；[周期与超时](Documentation~/TimingAndTimeouts.md) 增加入口，保留 2026-10-14 历史验收记录。
+
+
+## 2026-10-16 服务观察隔离、重启证据与预算报告
+- 问题：辅助 Health/部署/缓存观察曾使已恢复服务继续等待或触发再次修复；预算协议丢失 long 数值，Step 阻断样本重复淹没首因。
+- 范围：Manager/QuickStart/维护/遗留恢复、hello/bootstrap、Console Capture/Step 策略、执行协议及报告。
+- 改进：当前连接身份与 Health 快照隔离，默认 20 秒且保留保存值；schema 5 与 MCP 必要门配套；仅内部服务观察 Warning 豁免；long 预算证据、冻结调用时间、完整策略文件与十组阻断摘要。
+- 证据：最后一次七文件 Python 定向合并验证 258 passed、2 条已有依赖弃用 Warning（15.07 秒，JUnit 位于规范项目 Logs/UPilot/ServiceObservationValidation/python-targeted.xml）；前两批 Unity 关联编译通过，后续编译失败/Domain Reload 断连，最新修改的 Unity 验收未完成。维护尝试 a195720e 返回 SERVICE_RESTART_IDENTITY_CHANGED，未重发；可见自动修复失败窗口可能阻挡恢复，因果未确认。
+- 状态：开发中。恢复规范项目连接后完成原批次观察、错误读取及定向验收，不重放历史重启；详见 Documentation~/ServiceObservationSimplification-20261016.md。
+
+
+## 2026-10-17 服务观察方案定向验收补充
+
+- 状态：关联编译、分批定向 EditMode、Python 和一次现场普通服务重启已验证；不覆盖全套回归、实际包升级和 H 项目业务采样。
+- 首轮 221 项为 216 passed / 5 failed，已定位两处夹具输入（deny 只匹配 Error；启动等待缺少 ACK Identity）。修正输入并增加 3 个 Health/普通版本辅助观察用例后，仅复验受影响两组 **41/41 通过**；原失败报告保留，其他 183 项沿用首轮通过证据，不把多轮伪装为一次整轮通过。产品身份/日志门禁未放宽。
+- 最新原批 `wb-1edfef56-eea4-4f26-912d-c156e89d2093` verified/passed，correlationVerified/errorsVerified=true，结构化错误 0；复验 task `task-8a2ae035-06d9-46ed-acb8-7e668cabe0a6`、run `96f8e235-a3f0-461a-984a-61d12a221d34`，acceptancePassed/cleanupVerified/testIdentityVerified/sourceUnchanged=true。Python 七文件 **258 passed / 2 依赖弃用警告**。
+- 现场维护 `3224f6a3-3ff3-45f7-8adb-a196acc40f4b`、schema 5 restart `restart-60429cd42b284bd6b6062b34539458c9` 均 succeeded，7892ms；Server 19084→28124、Unity 3680 不变；Health/部署标记 false 不阻断，必要身份/旧退出/端口/新会话/只读回执通过。后续观察同一进程/会话稳定，无重复 stop/start。
+- 证据：`Tests~/UPilotTest/Log/P0P1/service-observation-20261017/acceptance-summary.json`；完整说明 `Documentation~/ServiceObservationSimplification-20261016.md`。Console 阶段覆盖 partial；Server 仅选定入口加载源码 equivalent，非全模块部署证明。
+
+## UPilot-20261017-ReloadHelloAdmissionDelay / P2：重载后 hello 到就绪延迟（待定位）
+
+- 观察：上面的夹具编译从登记到 verified 约 200.6 秒；11:11:08（Asia/Shanghai）收到新会话 hello ACK，数次 MCP 状态停留 BridgeBootstrapPending，11:13:48 恢复。Unity PID3680 和 Server PID19084 未变化；只读 hang 检查无模态窗口、主线程响应未知，最终原批完成。
+- 影响：正常 C# 保存后较长断连，验收客户端的已连接预检仅返回 not_sent 摘要，容易误判需要重发编译/重启。
+- 建议：先复现并记录主线程 hello 排队/处理、恢复发现和 bootstrap 各阶段开始/结束及原 owner/deadline；观察接口保留断连时的完整只读身份与原批状态，明确缺失证据，不增加就绪门或自动修复/重放。仅凭本次日志不推断死锁、Health 故障或焦点影响。
+- 证据/状态：`reload-observation.json`、`reload-hang.json`、`fixture-batch-terminal.json`；原批最终通过。本次未修改生命周期实现或增加主动探测，后续独立定位。

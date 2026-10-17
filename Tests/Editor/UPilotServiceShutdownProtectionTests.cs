@@ -156,17 +156,30 @@ namespace CodingRiver.UPilot.Tests
             launch.instanceId = "verified-current-instance";
             launch.verified = true;
             Set(manager, "_trackedProcess", process);
+            Set(manager, "_launchNeedsRevalidation", true);
+            Assert.That(manager.IsOwnedResetVerificationPending(current), Is.True,
+                "Persisted identity alone must not authorize a replacement hello.");
+            Assert.That(manager.CanReuseOwnedReset(current, "server-lifetime", "verified-current-instance", out _), Is.False);
+            typeof(Manager).GetMethod("ConfirmOwnedResetLaunchIdentity", PrivateInstance).Invoke(
+                manager, new object[] { launch, current });
             Assert.That(manager.IsOwnedResetVerificationPending(current), Is.False);
             Assert.That(manager.CanReuseOwnedReset(current, "server-lifetime", "other-instance", out _), Is.False);
             Assert.That(manager.CanReuseOwnedReset(current, "server-lifetime", "", out _), Is.False);
             Assert.That(manager.CanReuseOwnedReset(current, "server-lifetime", "verified-current-instance", out var owner), Is.True);
             Assert.That(owner, Is.EqualTo("owner"));
             Assert.That(receipt.Error, Is.EqualTo("partial_cleanup_failure"));
-            Set(manager, "_launchNeedsRevalidation", true);
-            Assert.That(manager.IsOwnedResetVerificationPending(current), Is.True);
+            Assert.That(typeof(Manager).GetField("_launchNeedsRevalidation", PrivateInstance).GetValue(manager), Is.True);
+            Assert.That(launch.readyVerified, Is.False);
+            Assert.That(manager.CaptureServiceShutdown().DeadlineUtcMs, Is.EqualTo(deadline));
+            launch.servicePid++;
             Assert.That(manager.CanReuseOwnedReset(current, "server-lifetime", "verified-current-instance", out _), Is.False);
-            Set(manager, "_launchNeedsRevalidation", false);
-            Assert.That(manager.IsOwnedResetVerificationPending(current), Is.False);
+            launch.servicePid--;
+            launch.serviceCreatedAt++;
+            Assert.That(manager.CanReuseOwnedReset(current, "server-lifetime", "verified-current-instance", out _), Is.False);
+            launch.serviceCreatedAt--;
+            Set(manager, "_trackedProcess", null);
+            Assert.That(manager.CanReuseOwnedReset(current, "server-lifetime", "verified-current-instance", out _), Is.False);
+            Set(manager, "_trackedProcess", process);
             Assert.That(manager.CanReuseOwnedReset(current, "server-lifetime", "verified-current-instance", out _), Is.True);
             launch.terminal = true;
             Assert.That(manager.CanReuseOwnedReset(current, "server-lifetime", "verified-current-instance", out _), Is.False);

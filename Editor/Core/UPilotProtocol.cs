@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // UPilot Editor — https://github.com/codingriver/upilot
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -26,6 +26,8 @@ namespace CodingRiver.UPilot
     public class HelloPayload
     {
         public int identityContractVersion;
+        public int bridgeReadyContractVersion;
+        public int readyBudgetMs;
         public int heartbeatIntervalMs;
         public string unityVersion;
         public string projectPath;
@@ -47,6 +49,7 @@ namespace CodingRiver.UPilot
     [Serializable]
     public class HeartbeatPayload
     {
+        public CompileEvidencePayload compileEvidence;
         public int heartbeatIntervalMs;
         public PlayModeTransitionRecord playModeTransition;
         public int stateContractVersion;
@@ -114,6 +117,8 @@ namespace CodingRiver.UPilot
     {
         public bool accepted;
         public int identityContractVersion;
+        public int bridgeReadyContractVersion;
+        public int readyBudgetMs;
         public string verificationLevel;
         public string rejectionCode;
         public string rejectionReason;
@@ -126,6 +131,11 @@ namespace CodingRiver.UPilot
         public string serverLifecycleId;
         // Existing version_payload field, used to correlate the ACK with verified launch evidence.
         public string server_instance_id;
+        public int server_pid;
+        public string configured_project_path;
+        public string server_version, protocol_version, build_channel, build_commit;
+        public long server_started_at_ms;
+        public string server_entry_path, server_module_root, server_install_source;
     }
 
     [Serializable]
@@ -270,7 +280,10 @@ namespace CodingRiver.UPilot
             Array.Empty<CodingRiver.UPilot.Execution.ExecutionResourceDiagnostic>();
         public int resourceDiagnosticsDroppedCount;
         public string resource;
-        public int limit;
+        public long limit;
+        public string metric;
+        public long actual;
+        public SourceSpanPayload lastCompletedSpan;
         public int used;
         public string requestedTypeName;
         public TestListResultPayload selection;
@@ -368,6 +381,7 @@ namespace CodingRiver.UPilot
     [Serializable]
     public class CompileErrorsPayload
     {
+        public CompileEvidencePayload compileEvidence;
         public string requestId;
         public string compileOperationId;
         public string writeBatchId;
@@ -709,6 +723,7 @@ namespace CodingRiver.UPilot
     [Serializable]
     public class EditorStatePayload
     {
+        public CompileEvidencePayload compileEvidence;
         public bool connected;
         public bool authoritative;
         public bool isStale;

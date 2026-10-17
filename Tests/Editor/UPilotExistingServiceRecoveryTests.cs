@@ -218,7 +218,10 @@ namespace CodingRiver.UPilot.Tests
             Set("_existingServiceRecovery", record);
             Set("_existingServiceRecoveryCancellation", cancellation);
             Set("_startInProgress", true);
+            ExpectInterruptedRecoveryError(record);
             _manager.CancelExistingServiceRecoveryForReset("");
+            _manager.CancelExistingServiceRecoveryForReset("");
+            LogAssert.NoUnexpectedReceived();
 
             Assert.That(record.status, Is.EqualTo("stopped"));
             Assert.That(cancellation.IsCancellationRequested, Is.True);
@@ -236,6 +239,52 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(Get<bool>("_startInProgress"), Is.True, "The superseded finally must not clear the next owner.");
             Assert.That(record.replacementStarted, Is.False);
             Assert.That(_stopDispatches + _terminations, Is.Zero);
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void InterruptedRecoveryIsVisibleButNormalUserStopRemainsCancellation(bool userStop)
+        {
+            using var cancellation = new CancellationTokenSource();
+            var record = new UPilotMcpServerManager.ExistingServiceRecoveryRecord {
+                id = "interrupted-" + Guid.NewGuid().ToString("N"), status = "verifying", error = "",
+                deadline = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 30000,
+                spec = new ServerLaunchSpec { httpPort = _manager.HttpPort, wsPort = _manager.WsPort },
+                projectPath = UPilotProjectConfig.ProjectRoot,
+            };
+            Set("_existingServiceRecovery", record);
+            Set("_existingServiceRecoveryCancellation", cancellation);
+            Set("_startInProgress", true);
+            if (userStop) Call("CancelExistingServiceRecoveryForStop", "user-stop");
+            else
+            {
+                ExpectInterruptedRecoveryError(record);
+                _manager.CancelExistingServiceRecoveryForReset("");
+            }
+            LogAssert.NoUnexpectedReceived();
+
+            Assert.That(record.status, Is.EqualTo("stopped"));
+            Assert.That(cancellation.IsCancellationRequested, Is.True);
+            Assert.That(_manager.CanAutomaticallyStartServer, Is.False);
+            Assert.That(_manager.CanAutomaticallyRepairDeployment, Is.False);
+            Assert.That(_stopDispatches + _terminations, Is.Zero);
+            if (userStop)
+            {
+                Assert.That(_manager.ExistingServiceRecoveryFailure, Is.Empty);
+                Assert.That(_manager.ExistingServiceRecoveryFailureId, Is.Empty);
+                Assert.That(record.error, Is.Empty, "A normal user stop must not become a recovery failure.");
+                Assert.That(UPilotQuickStart.EvaluateExistingServiceRecoveryFailure(_manager, default, default), Is.Null);
+            }
+            else
+            {
+                Assert.That(_manager.ExistingServiceRecoveryFailure, Is.Not.Empty,
+                    "A reset-interrupted startup must expose a terminal reason instead of remaining in an unknown UI state.");
+                Assert.That(_manager.ExistingServiceRecoveryFailureId, Is.EqualTo(record.id));
+                Assert.That(record.error, Is.Not.Empty);
+                Assert.That(UPilotQuickStart.EvaluateExistingServiceRecoveryFailure(_manager, default, default)?.State,
+                    Is.EqualTo(UPilotMainState.NeedsRepair));
+                Assert.That(UPilotQuickStart.CanObserveFailedExistingServiceRecovery(_manager), Is.True);
+            }
         }
 
         [TestCase("verifying", true)]
@@ -257,6 +306,7 @@ namespace CodingRiver.UPilot.Tests
             Set("_pendingLaunchSpec", pending);
             Set("_startInProgress", true);
             _manager.CancelExistingServiceRecoveryForReset(preserveOwner ? record.id : "");
+            LogAssert.NoUnexpectedReceived();
             Assert.That(record.status, Is.EqualTo(phase));
             Assert.That(record.error, Is.EqualTo("historical evidence"));
             Assert.That(record.replacementPid, Is.EqualTo(42));
@@ -591,6 +641,17 @@ namespace CodingRiver.UPilot.Tests
             Assert.That(Get<int>("_startAttemptGeneration"), Is.EqualTo(13));
             Assert.That(Get<long>("_restartGeneration"), Is.EqualTo(17));
             Assert.That(SessionState.GetString(LaunchKey, _missing), Is.EqualTo(_session[LaunchKey]));
+        }
+
+        private static void ExpectInterruptedRecoveryError(UPilotMcpServerManager.ExistingServiceRecoveryRecord record)
+        {
+            var lifecycleDetail = $"recoveryId={record.id} stopId={record.stopObservationId} " +
+                $"reason=service_reset deadlineUtcMs={record.deadline}";
+            LogAssert.Expect(LogType.Log, new Regex(@"^\[UPilot\]\[Lifecycle\][^\r\n]* event=recovery_superseded\n" +
+                Regex.Escape(lifecycleDetail) + "$"));
+            var context = $"服务恢复验证被生命周期重置中断；recoveryId={record.id}；project={record.projectPath}；" +
+                $"HTTP={record.spec.httpPort}；WS={record.spec.wsPort}；deadlineUtcMs={record.deadline}；reason=service_reset。";
+            LogAssert.Expect(LogType.Error, new Regex(Regex.Escape(context)));
         }
 
         private static FieldInfo DeploymentField(string name) => typeof(UPilotDeploymentDiagnostics).GetField(name, StaticFields);

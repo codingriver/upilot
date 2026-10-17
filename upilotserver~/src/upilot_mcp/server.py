@@ -6,6 +6,8 @@ import logging
 import os
 import sqlite3
 import time
+import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -33,10 +35,30 @@ logger = logging.getLogger("upilot.server")
 wire_logger = logging.getLogger("upilot.wire")
 
 IDENTITY_CONTRACT_VERSION = 1
+BRIDGE_READY_CONTRACT_VERSION = 1
 _CANDIDATE_HANDSHAKE_TIMEOUT_S = 10.0
 _MAX_BRIDGE_MESSAGE_BYTES = 4 * 1024 * 1024
 _EDITOR_PUMP_STALE_MS = 5000
 _EDITOR_STALL_LOG_INTERVAL_MS = 10000
+
+
+@dataclass
+class _BridgeConnection:
+    websocket: Any
+    session: Any
+    hello_id: str
+    lifecycle_id: str
+    instance_id: str
+    deadline: float
+    accepted_at: int = field(default_factory=now_ms)
+    generation: str = field(default_factory=lambda: uuid.uuid4().hex)
+    bootstrap_id: str = ""
+    bootstrap_deadline: float = 0.0
+    nonce: str = ""
+    phase: str = "waiting_bridge_ready"
+    receipt: dict[str, Any] | None = None
+    timeout_task: asyncio.Task | None = None
+    resume_queries: bool = False
 
 
 def _short_session_id(session_id: str | None) -> str:
@@ -57,7 +79,7 @@ class WsOrchestratorServer(WsTransport):
     """WebSocket server with unified disconnect handling.
 
     - Domain reloads suspend pending futures; only allowlisted read-only queries
-      may resume after ``session.hello``, within their original observation budget.
+      may resume after bootstrap acknowledgement, within their original observation budget.
     - Ordinary disconnects fail pending commands. Replaying an arbitrary command
       after a socket timeout can duplicate writes or revive a timed-out request.
     - **domain_reload.starting**: optional extra grace (``UPILOT_DOMAIN_RELOAD_BONUS_S``).
@@ -83,9 +105,9 @@ class WsOrchestratorServer(WsTransport):
             self.state.configure_project(self.expected_project_path)
         self._ws: WebSocketServerProtocol | None = None
         self._pending: dict[str, asyncio.Future] = {}
+        self._pending_generation: dict[str, str] = {}
         self._suspended: dict[str, asyncio.Future] = {}
         self._domain_reloading = False
-        self._reconnected_after_domain_reload = False
         self._compile_idle_event = asyncio.Event()
         self._compile_idle_event.set()
         self._server = None
@@ -100,6 +122,15 @@ class WsOrchestratorServer(WsTransport):
         self._grace_deadline_monotonic: float | None = None
         self._active_ws_connections: set[WebSocketServerProtocol] = set()
         self._promotion_lock = asyncio.Lock()
+        self._send_lock = asyncio.Lock()
+        self._maintenance_pending: dict[str, str] = {}
+        self._connection: _BridgeConnection | None = None
+        self._producer_process: tuple[int, int] | None = None
+        self._bound_producer_epoch = ""
+        self._retired_producer_epochs: set[str] = set()
+        self._reload_grace_extended = False
+        self._grace_disconnect_started = False
+        self.state.live_update_allowed = self.is_ready
         self._latest_session_rejection: dict[str, Any] = {}
         self._last_bridge_connected_at_ms = 0
         self._last_bridge_authenticated_at_ms = 0
@@ -314,6 +345,8 @@ class WsOrchestratorServer(WsTransport):
 
     def stop(self) -> None:
         self._shutting_down = True
+        self.session_manager.close_gate("stopping")
+        self._invalidate_connection("stopping")
         self._stop_write_batch_deadlines()
         self._stop_event.set()
 
@@ -325,6 +358,10 @@ class WsOrchestratorServer(WsTransport):
 
     def _schedule_reconnect_grace(self) -> None:
         """Start or replace grace timer until suspended commands are failed."""
+        if self._grace_disconnect_started:
+            return
+        self._grace_disconnect_started = True
+        previous_deadline = self._grace_deadline_monotonic
         self._cancel_reconnect_grace()
         grace_s = env_float("UPILOT_DISCONNECT_GRACE_S", 3600.0)
         if grace_s <= 0:
@@ -334,11 +371,14 @@ class WsOrchestratorServer(WsTransport):
             )
             return
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + grace_s
+        deadline = max(previous_deadline or 0.0, loop.time() + grace_s)
         self._grace_deadline_monotonic = deadline
         self._reconnect_grace_task = asyncio.create_task(self._reconnect_grace_at_deadline(deadline, grace_s))
 
     def _extend_grace_for_domain_reload(self) -> None:
+        if self._reload_grace_extended:
+            return
+        self._reload_grace_extended = True
         bonus = env_float("UPILOT_DOMAIN_RELOAD_BONUS_S", 600.0)
         if bonus <= 0:
             return
@@ -346,8 +386,8 @@ class WsOrchestratorServer(WsTransport):
         now = loop.time()
         prev = self._grace_deadline_monotonic
         new_deadline = max(prev if prev is not None else now, now + bonus)
-        self._grace_deadline_monotonic = new_deadline
         self._cancel_reconnect_grace()
+        self._grace_deadline_monotonic = new_deadline
         self._reconnect_grace_task = asyncio.create_task(
             self._reconnect_grace_at_deadline(new_deadline, bonus),
         )
@@ -405,6 +445,8 @@ class WsOrchestratorServer(WsTransport):
                 fut.set_result(err)
         self._pending.clear()
         self._suspended.clear()
+        self._pending_generation.clear()
+        self._maintenance_pending.clear()
 
     def _suspend_or_fail_pending_on_disconnect(self, sid_log: str) -> None:
         """Only a declared domain reload may replay in-flight commands."""
@@ -472,6 +514,8 @@ class WsOrchestratorServer(WsTransport):
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_s if timeout_s > 0 else None
         while True:
+            if self._shutting_down:
+                return False
             if self.is_ready():
                 return True
             if deadline is not None and loop.time() >= deadline:
@@ -479,7 +523,294 @@ class WsOrchestratorServer(WsTransport):
             await asyncio.sleep(min(0.2, (deadline - loop.time()) if deadline else 0.2))
 
     def is_ready(self) -> bool:
-        return self._ws is not None and self.session_manager.is_connected()
+        connection = self._connection
+        if (self._shutting_down or connection is None
+                or connection.phase != "ready" or connection.receipt is None
+                or connection.websocket is not self._ws
+                or connection.session is not self.session_manager.active):
+            return False
+        if self.session_manager.is_ready():
+            return True
+        if self.session_manager.phase == "lease_expired":
+            self._invalidate_connection("lease_expired")
+            logger.error("Bridge heartbeat lease expired session=%s; reconnect and bootstrap required",
+                         connection.session.session_id)
+            self._force_disconnect_websocket(connection.websocket, reason="Bridge heartbeat lease expired")
+        return False
+
+    def bridge_readiness_status(self) -> dict[str, Any]:
+        connection = self._connection
+        ready = self.is_ready()
+        phase = connection.phase if connection else "disconnected"
+        if connection and phase == "ready" and not ready:
+            phase = self.session_manager.phase
+        return {
+            "bridgeReadyContractVersion": BRIDGE_READY_CONTRACT_VERSION,
+            "bridgeReady": ready,
+            "connectionPhase": "stopping" if self._shutting_down else (
+                phase),
+            "bootstrapReceipt": dict(connection.receipt) if connection and connection.receipt else None,
+        }
+
+    def _connection_current(self, connection: _BridgeConnection) -> bool:
+        return bool(not self._shutting_down and self._connection is connection
+                    and self._ws is connection.websocket
+                    and self.session_manager.active is connection.session
+                    and connection.session.authenticated and connection.session.connected)
+
+    def result_connection_current(self, result: dict[str, Any]) -> bool:
+        token = result.get("_connectionGeneration")
+        return bool(token and self._connection and self._connection_current(self._connection)
+                    and self._connection.generation == token
+                    and (self.is_ready() or result.get("_maintenanceControl") is True))
+
+    def _invalidate_connection(self, phase: str) -> None:
+        connection = self._connection
+        if connection:
+            connection.phase = phase
+            try:
+                current_task = asyncio.current_task()
+            except RuntimeError:
+                current_task = None
+            if connection.timeout_task and connection.timeout_task is not current_task:
+                connection.timeout_task.cancel()
+        self.session_manager.close_gate(phase)
+
+    async def _readiness_timeout(self, connection: _BridgeConnection) -> None:
+        deadline = connection.bootstrap_deadline or connection.deadline
+        await asyncio.sleep(max(0.0, deadline - time.monotonic()))
+        if self._connection_current(connection) and connection.phase != "ready":
+            self._invalidate_connection("bootstrap_timed_out")
+            logger.error("Bridge readiness deadline expired session=%s helloId=%s phase=%s",
+                         connection.session.session_id, connection.hello_id, connection.phase)
+            await self._close_websocket(connection.websocket, reason="Bridge readiness deadline expired")
+
+    def _bootstrap_identity(self, connection: _BridgeConnection) -> dict[str, Any]:
+        return {"helloId": connection.hello_id, "serverLifecycleId": connection.lifecycle_id,
+                "serverInstanceId": connection.instance_id}
+
+    async def _begin_bootstrap(self, connection: _BridgeConnection, payload: dict[str, Any]) -> None:
+        if not self._connection_current(connection) or connection.phase != "waiting_bridge_ready":
+            return
+        if (type(payload.get("bridgeReadyContractVersion")) is not int
+                or payload["bridgeReadyContractVersion"] != BRIDGE_READY_CONTRACT_VERSION
+                or any(payload.get(key) != value for key, value in self._bootstrap_identity(connection).items())):
+            return
+        if time.monotonic() >= connection.deadline:
+            return
+        connection.phase = "bootstrapping"
+        connection.bootstrap_deadline = min(connection.deadline, time.monotonic() + 7.0)
+        if connection.timeout_task:
+            connection.timeout_task.cancel()
+        connection.timeout_task = asyncio.create_task(self._readiness_timeout(connection))
+        self.session_manager.phase = connection.phase
+        connection.bootstrap_id = "bootstrap-" + uuid.uuid4().hex
+        connection.nonce = uuid.uuid4().hex
+        envelope = {
+            "id": connection.bootstrap_id, "type": "command", "name": "session.bootstrap",
+            "payload": {**self._bootstrap_identity(connection), "nonce": connection.nonce,
+                        "bridgeReadyContractVersion": BRIDGE_READY_CONTRACT_VERSION},
+            "timestamp": now_ms(), "sessionId": connection.session.session_id,
+            "protocolVersion": PROTOCOL_VERSION,
+        }
+        async with self._send_lock:
+            if self._connection_current(connection) and time.monotonic() < connection.bootstrap_deadline:
+                await connection.websocket.send(json.dumps(envelope, ensure_ascii=False))
+
+    def _validate_bootstrap(self, connection: _BridgeConnection, payload: dict[str, Any]) -> bool:
+        if (type(payload.get("bridgeReadyContractVersion")) is not int
+                or payload["bridgeReadyContractVersion"] != BRIDGE_READY_CONTRACT_VERSION
+                or payload.get("nonce") != connection.nonce
+                or any(payload.get(key) != value for key, value in self._bootstrap_identity(connection).items())):
+            return False
+        snapshot, diagnostics = payload.get("state"), payload.get("compileEvidence")
+        if not isinstance(snapshot, dict) or not isinstance(diagnostics, dict):
+            return False
+        if (snapshot.get("stateContractVersion") != 2
+                or snapshot.get("sessionId") != connection.session.session_id
+                or snapshot.get("processId") != connection.session.process_id
+                or snapshot.get("processCreatedAt") != connection.session.process_created_at
+                or snapshot.get("connected") is not True or snapshot.get("authoritative") is not True
+                or snapshot.get("isStale") is not False
+                or not isinstance(snapshot.get("projectId"), str) or not snapshot["projectId"]
+                or not isinstance(snapshot.get("producerEpoch"), str) or not snapshot["producerEpoch"]
+                or not isinstance(snapshot.get("snapshotId"), str) or not snapshot["snapshotId"]
+                or type(snapshot.get("sequence")) is not int or snapshot["sequence"] <= 0
+                or type(snapshot.get("domainGeneration")) is not int or snapshot["domainGeneration"] < 0
+                or type(snapshot.get("observedAt")) is not int or snapshot["observedAt"] <= 0
+                or snapshot["observedAt"] < connection.accepted_at
+                or type(snapshot.get("lastMainThreadPumpAt")) is not int or snapshot["lastMainThreadPumpAt"] <= 0):
+            return False
+        process = (connection.session.process_id, connection.session.process_created_at)
+        epoch = snapshot["producerEpoch"]
+        if epoch in self._retired_producer_epochs:
+            return False
+        if self._producer_process == process and self._bound_producer_epoch and epoch != self._bound_producer_epoch:
+            return False
+        if self.state.project_id and self.state.project_id != snapshot["projectId"]:
+            return False
+        if epoch == self.state.producer_epoch and (snapshot["domainGeneration"], snapshot["sequence"]) <= (self.state.domain_generation, self.state.sequence):
+            return False
+        identities = {"compileRequestId": "requestId", "compileOperationId": "compileOperationId",
+                      "writeBatchId": "writeBatchId", "writeBatchCreatedAt": "writeBatchCreatedAt",
+                      "compileOrigin": "compileOrigin", "compilePhase": "phase",
+                      "terminal": "terminal", "verificationPending": "verificationPending",
+                      "errorsVerified": "errorsVerified", "lastCompileRequestedAt": "lastCompileRequestedAt",
+                      "lastCompileStartedAt": "lastCompileStartedAt", "lastCompilerFinishedAt": "lastCompilerFinishedAt",
+                      "lastCompileVerifiedAt": "lastCompileVerifiedAt", "lastTerminalCompileAt": "lastTerminalCompileAt",
+                      "errorCount": "total", "warningCount": "warningCount"}
+        if any(key not in snapshot or other not in diagnostics or snapshot[key] != diagnostics[other]
+               for key, other in identities.items()):
+            return False
+        if any(type(snapshot.get(key)) is not bool for key in ("terminal", "verificationPending", "errorsVerified", "isCompiling", "isUpdating")):
+            return False
+        if any(type(snapshot.get(key)) is not int or snapshot[key] < 0 for key in (
+                "lastCompileRequestedAt", "lastCompileStartedAt", "lastCompilerFinishedAt",
+                "lastCompileVerifiedAt", "lastTerminalCompileAt", "writeBatchCreatedAt", "errorCount", "warningCount")):
+            return False
+        if (not isinstance(diagnostics.get("errors"), list)
+                or type(diagnostics.get("total")) is not int or diagnostics["total"] < 0
+                or diagnostics["total"] != len(diagnostics["errors"])
+                or any(not isinstance(item, dict) for item in diagnostics["errors"])
+                or type(diagnostics.get("warningCount")) is not int or diagnostics["warningCount"] < 0):
+            return False
+        if diagnostics.get("errorsVerified") is True and (
+                diagnostics.get("terminal") is not True or diagnostics.get("verificationPending") is not False
+                or diagnostics.get("phase") not in {"completed", "failed"}
+                or not diagnostics.get("compileOperationId")
+                or type(diagnostics.get("lastCompileVerifiedAt")) is not int
+                or diagnostics["lastCompileVerifiedAt"] <= 0):
+            return False
+        evidence = snapshot.get("compileEvidence")
+        if evidence != diagnostics.get("compileEvidence"):
+            return False
+        if evidence is None:
+            return diagnostics.get("errorsVerified") is not True
+        if not isinstance(evidence, dict):
+            return False
+        if (type(evidence.get("version")) is not int or evidence["version"] != 1
+                or not paths_equal(str(evidence.get("projectPath") or ""), self.expected_project_path)
+                or evidence.get("processId") != connection.session.process_id
+                or evidence.get("processCreatedAt") != connection.session.process_created_at
+                or evidence.get("producerEpoch") != epoch
+                or evidence.get("compileOperationId") != snapshot["compileOperationId"]
+                or type(evidence.get("revision")) is not int or evidence["revision"] <= 0
+                or type(evidence.get("persistenceVerified")) is not bool):
+            return False
+        milestones = evidence.get("milestones")
+        if not isinstance(milestones, list) or not 1 <= len(milestones) <= 6:
+            return False
+        stages = set()
+        revisions = set()
+        terminal = None
+        for milestone in milestones:
+            if not isinstance(milestone, dict):
+                return False
+            stage = milestone.get("stage")
+            if (stage not in {"queued", "compiling", "compiler_finished", "domain_reload", "verifying", "terminal"}
+                    or stage in stages or type(milestone.get("revision")) is not int
+                    or not 0 < milestone["revision"] <= evidence["revision"]
+                    or milestone["revision"] in revisions
+                    or type(milestone.get("observedAt")) is not int or milestone["observedAt"] <= 0
+                    or type(milestone.get("terminal")) is not bool
+                    or type(milestone.get("errorsVerified")) is not bool
+                    or type(milestone.get("errorCount")) is not int or milestone["errorCount"] < 0):
+                return False
+            stages.add(stage)
+            revisions.add(milestone["revision"])
+            if stage == "terminal":
+                terminal = milestone
+        if max(revisions) != evidence["revision"]:
+            return False
+        current_evidence = self.state.compile.compile_evidence
+        if (isinstance(current_evidence, dict) and current_evidence.get("producerEpoch") == epoch
+                and current_evidence.get("compileOperationId") == evidence["compileOperationId"]):
+            if evidence["revision"] < int(current_evidence.get("revision") or 0):
+                return False
+            if evidence["revision"] == current_evidence.get("revision") and evidence != current_evidence:
+                return False
+        if diagnostics["errorsVerified"] and (
+                evidence["persistenceVerified"] is not True or not terminal
+                or terminal.get("terminal") is not True or terminal.get("errorsVerified") is not True
+                or terminal.get("phase") != snapshot["compilePhase"]
+                or terminal.get("errorCount") != snapshot["errorCount"]
+                or terminal["observedAt"] != snapshot["lastCompileVerifiedAt"]):
+            return False
+        return True
+
+    async def _complete_bootstrap(self, connection: _BridgeConnection, message) -> None:
+        if (not self._connection_current(connection) or connection.phase != "bootstrapping"
+                or message.id != connection.bootstrap_id
+                or time.monotonic() >= min(connection.deadline, connection.bootstrap_deadline)):
+            return
+        if message.type == "error":
+            self._invalidate_connection("bootstrap_failed")
+            logger.error("Bridge bootstrap failed session=%s helloId=%s code=%s",
+                         connection.session.session_id, connection.hello_id, message.payload.get("code", "unknown"))
+            await self._close_websocket(connection.websocket, reason="Bridge bootstrap failed")
+            return
+        try:
+            valid = self._validate_bootstrap(connection, message.payload)
+        except (ValueError, TypeError, KeyError):
+            valid = False
+        if not valid:
+            self._invalidate_connection("bootstrap_rejected")
+            logger.error("Rejected Bridge bootstrap identity or evidence session=%s helloId=%s",
+                         connection.session.session_id, connection.hello_id)
+            await self._close_websocket(connection.websocket, reason="Bridge bootstrap evidence rejected")
+            return
+        snapshot = message.payload["state"]
+        process = (connection.session.process_id, connection.session.process_created_at)
+        epoch = snapshot["producerEpoch"]
+        previous_bound = self.state.active_producer_epoch
+        self.state.active_producer_epoch = epoch
+        if self._producer_process is not None and self._producer_process != process:
+            self.state.compile = CompileSnapshot()
+        try:
+            committed = self.state.commit_bridge_bootstrap(snapshot, message.payload["compileEvidence"])
+        except (OSError, sqlite3.Error, ValueError, TypeError):
+            logger.exception("Bridge bootstrap state commit failed session=%s", connection.session.session_id)
+            committed = False
+        if not committed:
+            self.state.active_producer_epoch = previous_bound
+            self._invalidate_connection("bootstrap_persistence_failed")
+            logger.error("Bridge bootstrap was not durably committed session=%s", connection.session.session_id)
+            await self._close_websocket(connection.websocket, reason="Bridge bootstrap commit failed")
+            return
+        receipt = {"bridgeReadyContractVersion": BRIDGE_READY_CONTRACT_VERSION,
+                   "bootstrapId": connection.bootstrap_id, "nonce": connection.nonce,
+                   **self._bootstrap_identity(connection),
+                   **{key: snapshot[key] for key in ("snapshotId", "producerEpoch", "domainGeneration", "sequence")}}
+        ack = {"id": connection.bootstrap_id, "type": "event", "name": "session.bootstrap.ack",
+               "payload": receipt, "timestamp": now_ms(), "sessionId": connection.session.session_id,
+               "protocolVersion": PROTOCOL_VERSION}
+        async with self._send_lock:
+            if not self._connection_current(connection) or time.monotonic() >= min(connection.deadline, connection.bootstrap_deadline):
+                return
+            await connection.websocket.send(json.dumps(ack, ensure_ascii=False))
+            if not self._connection_current(connection) or time.monotonic() >= min(connection.deadline, connection.bootstrap_deadline):
+                return
+            if not self.session_manager.mark_ready(connection.session):
+                return
+            connection.receipt = receipt
+            connection.phase = "ready"
+            if connection.timeout_task:
+                connection.timeout_task.cancel()
+            if self._bound_producer_epoch and self._bound_producer_epoch != epoch:
+                self._retired_producer_epochs.add(self._bound_producer_epoch)
+            self._bound_producer_epoch, self._producer_process = epoch, process
+        if connection.resume_queries:
+            self._pending.update(self._suspended)
+            self._suspended.clear()
+        self._domain_reloading = False
+        self._cancel_reconnect_grace()
+        self._reload_grace_extended = False
+        self._grace_disconnect_started = False
+        self._observe_editor_lifecycle(snapshot)
+        self._notify_editor_execution_state()
+        self._note_compile_busy(self.state.compile.phase in {"queued", "compiling", "compiler_finished", "domain_reload", "verifying"})
+        if connection.resume_queries:
+            await self._resend_pending_commands()
 
     def editor_observation(
         self,
@@ -845,9 +1176,13 @@ class WsOrchestratorServer(WsTransport):
         loop = asyncio.get_running_loop()
         fut = loop.create_future()
         self._pending[command_id] = fut
+        if self._connection:
+            self._pending_generation[command_id] = self._connection.generation
         return fut
 
     def unregister_pending(self, command_id: str) -> None:
+        self._pending_generation.pop(command_id, None)
+        self._maintenance_pending.pop(command_id, None)
         future = self._pending.pop(command_id, None)
         if future is None:
             future = self._suspended.pop(command_id, None)
@@ -855,10 +1190,17 @@ class WsOrchestratorServer(WsTransport):
             future.cancel()
 
     async def send_command(self, command_id: str, name: str, payload: dict[str, Any]) -> None:
+        async with self._send_lock:
+            await self._send_command_locked(command_id, name, payload)
+
+    async def _send_command_locked(self, command_id: str, name: str, payload: dict[str, Any], *, maintenance: bool = False) -> None:
         websocket = self._ws
         active = self.session_manager.active
-        if websocket is None or active is None:
-            return
+        if websocket is None or active is None or self._shutting_down:
+            raise ConnectionError("Bridge transport is unavailable")
+        if not self.is_ready() and not (maintenance and self.maintenance_control_allowed(payload)):
+            raise ConnectionError("UPILOT_RECONNECT_PENDING: Bridge bootstrap is incomplete")
+        self._pending_generation[command_id] = self._connection.generation
         session_id = active.session_id
         if name == "upilot_flow.results":
             logger.debug("[%s] >>> %s  cmd=%s", session_id[:12], name, command_id[:16])
@@ -889,6 +1231,38 @@ class WsOrchestratorServer(WsTransport):
                 # does not prove delivery, Unity dispatch or business execution.
                 record.send_attempts += 1
         await websocket.send(raw)
+
+    def maintenance_control_allowed(self, payload: dict[str, Any]) -> bool:
+        """Exact authenticated maintenance control; never a general business bypass."""
+        from .service_maintenance import read_summary
+        connection = self._connection
+        if not connection or not self._connection_current(connection):
+            return False
+        try:
+            maintenance_id = str(payload.get("maintenanceId") or "")
+            if str(uuid.UUID(maintenance_id)) != maintenance_id.lower():
+                return False
+            summary = read_summary(Path(self.expected_project_path), connection.session)
+            return bool(summary["effectiveApproved"] and not summary["unavailableReason"]
+                        and payload.get("target") in {"bridge", "server"}
+                        and isinstance(payload.get("reason"), str) and 0 < len(payload["reason"].strip()) <= 512
+                        and paths_equal(str(payload.get("expectedProjectPath") or ""), self.expected_project_path)
+                        and payload.get("expectedServerProcessId") == os.getpid()
+                        and payload.get("expectedBridgeSessionId") == connection.session.session_id
+                        and payload.get("expectedMaintenanceId", "") == summary["expectedMaintenanceId"])
+        except (OSError, ValueError, TypeError):
+            return False
+
+    async def send_maintenance_control(self, command_id: str, payload: dict[str, Any]) -> None:
+        async with self._send_lock:
+            if not self.maintenance_control_allowed(payload):
+                raise ConnectionError("Service maintenance owner or authorization changed")
+            connection = self._connection
+            self._maintenance_pending[command_id] = connection.generation
+            control_payload = {**payload, **self._bootstrap_identity(connection),
+                               "bridgeReadyContractVersion": BRIDGE_READY_CONTRACT_VERSION,
+                               "controlKind": "service.maintenance"}
+            await self._send_command_locked(command_id, "service.restart", control_payload, maintenance=True)
 
     @staticmethod
     def _reload_query_can_replay(name: str, payload: dict[str, Any]) -> bool:
@@ -1026,7 +1400,10 @@ class WsOrchestratorServer(WsTransport):
             message_type=ack["type"],
             name=ack["name"],
         )
-        await websocket.send(raw)
+        async with self._send_lock:
+            if self._shutting_down:
+                return
+            await websocket.send(raw)
 
     def _probe_candidate_identity(self, payload: dict[str, Any]) -> dict[str, Any]:
         contract_version = int(payload.get("identityContractVersion") or 0)
@@ -1126,6 +1503,16 @@ class WsOrchestratorServer(WsTransport):
         return "alive" if observed // 10 == active.process_created_at // 10 else "dead"
 
     async def _admit_candidate(self, websocket: WebSocketServerProtocol, message) -> tuple[bool, dict[str, Any]]:
+        if self._shutting_down:
+            return False, {"accepted": False, "code": "SERVER_STOPPING", "reason": "Server is stopping."}
+        if (type(message.payload.get("bridgeReadyContractVersion")) is not int
+                or message.payload["bridgeReadyContractVersion"] != BRIDGE_READY_CONTRACT_VERSION):
+            return False, {"accepted": False, "code": "BRIDGE_READY_CONTRACT_MISMATCH",
+                           "reason": "Server and Bridge readiness contracts must be upgraded together."}
+        ready_budget = message.payload.get("readyBudgetMs")
+        if type(ready_budget) is not int or not 1000 <= ready_budget <= 600000:
+            return False, {"accepted": False, "code": "BRIDGE_READY_BUDGET_INVALID",
+                           "reason": "readyBudgetMs must be an integer between 1000 and 600000."}
         try:
             probe = await asyncio.wait_for(
                 asyncio.to_thread(self._probe_candidate_identity, dict(message.payload)),
@@ -1144,6 +1531,8 @@ class WsOrchestratorServer(WsTransport):
             str(message.payload.get("projectPath") or ""),
         )
         async with self._promotion_lock:
+            if self._shutting_down:
+                return False, {"accepted": False, "code": "SERVER_STOPPING", "reason": "Server is stopping."}
             active = self.session_manager.active
             if active is not None and active.process_id > 0:
                 active_identity = (active.process_id, active.process_created_at, active.project_path)
@@ -1164,10 +1553,19 @@ class WsOrchestratorServer(WsTransport):
                             "activeProcessLiveness": liveness,
                         }
             previous = self._ws
+            if previous is not None and previous is not websocket and not self._domain_reloading:
+                self._fail_all_pending_and_suspended("CONNECTION_LOST", "Bridge connection was replaced; commands are never replayed.")
+            self._invalidate_connection("superseded")
             self._ws = websocket
             message.payload["verificationLevel"] = str(probe.get("verificationLevel") or "")
             message.payload["identityVerified"] = bool(probe.get("identityVerified"))
-            self.session_manager.on_hello(message.session_id, message.payload)
+            session = self.session_manager.on_hello(message.session_id, message.payload)
+            self._connection = _BridgeConnection(
+                websocket, session, message.id, self.state.lifecycle_id,
+                str(version_payload().get("server_instance_id") or ""),
+                time.monotonic() + ready_budget / 1000,
+            )
+            self._connection.timeout_task = asyncio.create_task(self._readiness_timeout(self._connection))
             self._last_bridge_authenticated_at_ms = now_ms()
             if previous is not None and previous is not websocket:
                 asyncio.create_task(self._close_websocket(previous, reason="replaced by verified reconnect"))
@@ -1241,6 +1639,7 @@ class WsOrchestratorServer(WsTransport):
             self._last_bridge_close_code = str(close_code) if close_code is not None else ""
             self._last_bridge_close_reason = str(getattr(websocket, "close_reason", "") or "")[:256]
             self._ws = None
+            self._invalidate_connection("disconnected")
             self.session_manager.disconnect(auth_session_id)
             self.editor_observation(network_connected=False)
             if self.state.compile.status in ("queued", "accepted", "compiling", "verifying"):
@@ -1299,6 +1698,7 @@ class WsOrchestratorServer(WsTransport):
                 await self._send_candidate_ack(candidate, message, {
                     "accepted": False,
                     "identityContractVersion": IDENTITY_CONTRACT_VERSION,
+                    "bridgeReadyContractVersion": BRIDGE_READY_CONTRACT_VERSION,
                     "verificationLevel": "rejected",
                     "rejectionCode": rejection["code"],
                     "rejectionReason": rejection["reason"],
@@ -1327,6 +1727,7 @@ class WsOrchestratorServer(WsTransport):
                 await self._send_candidate_ack(candidate, message, {
                     "accepted": False,
                     "identityContractVersion": IDENTITY_CONTRACT_VERSION,
+                    "bridgeReadyContractVersion": BRIDGE_READY_CONTRACT_VERSION,
                     "verificationLevel": "rejected",
                     "rejectionCode": code,
                     "rejectionReason": reason,
@@ -1334,20 +1735,16 @@ class WsOrchestratorServer(WsTransport):
                 await self._close_websocket(candidate, reason=f"identity rejected: {code}")
                 return
             self._apply_heartbeat_interval(message.payload)
-            self._cancel_reconnect_grace()
             preserve_compile_snapshot = self._domain_reloading
             if preserve_compile_snapshot:
-                logger.info("Unity reconnected during domain reload after identity verification")
-                self._reconnected_after_domain_reload = True
-                self._domain_reloading = False
+                logger.info("Unity reconnected during domain reload; waiting for verified bootstrap")
+                self._suspend_or_fail_pending_on_disconnect(message.session_id)
             raw_project_for_state = str(message.payload.get("projectPath", "") or "").strip()
             if raw_project_for_state:
                 try:
                     self.state.configure_project(raw_project_for_state)
                 except (OSError, sqlite3.Error) as ex:
                     logger.warning("Could not configure persistent Editor state: %s", ex)
-            preserve_compile_snapshot = self._reconnected_after_domain_reload
-            self._reconnected_after_domain_reload = False
             previous_process_id = self.state.editor.process_id
             incoming_process_id = int(message.payload.get("processId") or 0)
             if self._suspended:
@@ -1357,12 +1754,10 @@ class WsOrchestratorServer(WsTransport):
                     or previous_process_id == incoming_process_id
                 ):
                     logger.info(
-                        "[%s] Restoring %d suspended commands after domain reload",
+                        "[%s] Keeping %d commands suspended until bootstrap acknowledgement",
                         message.session_id[:12],
                         len(self._suspended),
                     )
-                    self._pending.update(self._suspended)
-                    self._suspended.clear()
                 else:
                     logger.warning(
                         "[%s] Unity process changed without a domain-reload contract; failing %d suspended commands",
@@ -1373,6 +1768,8 @@ class WsOrchestratorServer(WsTransport):
                         "EDITOR_RESTARTED",
                         "Unity 进程已重启，未完成命令不会自动重放",
                     )
+                    self._domain_reloading = False
+                    preserve_compile_snapshot = False
             elif self._pending:
                 logger.info(
                     "[%s] session.hello with %d in-flight pending — latest connection wins; no arbitrary replay",
@@ -1421,6 +1818,8 @@ class WsOrchestratorServer(WsTransport):
             hello_payload: dict[str, Any] = {
                 "accepted": True,
                 "identityContractVersion": IDENTITY_CONTRACT_VERSION,
+                "bridgeReadyContractVersion": BRIDGE_READY_CONTRACT_VERSION,
+                "readyBudgetMs": message.payload["readyBudgetMs"],
                 "verificationLevel": str(identity.get("verificationLevel") or ""),
                 "heartbeatIntervalMs": self.heartbeat_interval_ms,
                 "mcpHost": self.host,
@@ -1428,13 +1827,16 @@ class WsOrchestratorServer(WsTransport):
                 "unityProjectPath": unity_project_path,
                 "mcpWorkingDirectory": mcp_cwd,
                 "serverLifecycleId": self.state.lifecycle_id,
+                "server_pid": os.getpid(),
+                "configured_project_path": self.expected_project_path,
             }
             hello_payload.update(version_payload())
             if self.mcp_label:
                 hello_payload["mcpLabel"] = self.mcp_label
+            connection = self._connection
+            if connection:
+                connection.resume_queries = preserve_compile_snapshot
             await self._send_candidate_ack(candidate, message, hello_payload)
-            if preserve_compile_snapshot:
-                await self._resend_pending_commands()
             return
 
         if websocket is not None:
@@ -1449,6 +1851,22 @@ class WsOrchestratorServer(WsTransport):
             ):
                 logger.debug("Ignoring message from unauthenticated or stale socket: %s", message.name)
                 return
+        if self._shutting_down:
+            return
+        connection = self._connection
+        if websocket is not None and connection is not None:
+            if message.type == "event" and message.name == "session.ready":
+                await self._begin_bootstrap(connection, message.payload)
+                return
+            if message.name == "session.bootstrap" and message.type in {"result", "error"}:
+                await self._complete_bootstrap(connection, message)
+                return
+        maintenance_result = bool(connection and message.type in {"result", "error"}
+                                  and message.name == "service.restart"
+                                  and self._maintenance_pending.get(message.id) == connection.generation
+                                  and self._connection_current(connection))
+        if websocket is not None and not self.is_ready() and not maintenance_result:
+            return
         if message.session_id:
             self.session_manager.touch(message.session_id)
 
@@ -1475,9 +1893,18 @@ class WsOrchestratorServer(WsTransport):
             return
 
         if message.type in ("result", "error"):
+            if connection and self._pending_generation.get(message.id) != connection.generation:
+                return
             fut = self._pending.pop(message.id, None)
+            self._pending_generation.pop(message.id, None)
             if fut and not fut.done():
-                fut.set_result(to_wire(message))
+                result = to_wire(message)
+                if connection:
+                    result["_connectionGeneration"] = connection.generation
+                    if maintenance_result:
+                        result["_maintenanceControl"] = True
+                fut.set_result(result)
+            self._maintenance_pending.pop(message.id, None)
             if message.name == "upilot_flow.results":
                 logger.debug(
                     "[%s] <<< %s  type=%s  cmd=%s",
