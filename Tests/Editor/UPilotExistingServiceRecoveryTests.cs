@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Runtime.Serialization;
 using System.Text.RegularExpressions;
@@ -70,6 +71,7 @@ namespace CodingRiver.UPilot.Tests
         [TearDown]
         public async Task RestoreState()
         {
+            Call("BeforeExistingServiceRecoveryReload");
             try
             {
                 try
@@ -376,7 +378,11 @@ namespace CodingRiver.UPilot.Tests
                 Set("_launchState", new ServerLaunchState { launcherPid = 42, deadlineUtcMs = current.deadline });
                 Call("AllowServiceReplacement", current.id);
             };
-            Call("ResumeExistingServiceRecovery");
+            var callback = ScheduleRecoveryOnUpdate(ref record);
+            Assert.That(RecoveryCallback(false), Is.Null, "Restoring must not depend on delayCall.");
+            callback.DynamicInvoke();
+            Assert.That(RecoveryCallback(true), Is.Null, "The first update must unsubscribe before recovery starts.");
+            callback.DynamicInvoke(); // A captured late callback must not replay completed work.
             Assert.That(replacements, Is.EqualTo(1));
             Assert.That(resetAttempts + _stopDispatches + _terminations, Is.Zero);
             Assert.That(_manager.CaptureServiceShutdown().DeadlineUtcMs, Is.EqualTo(record.deadline));
@@ -402,7 +408,9 @@ namespace CodingRiver.UPilot.Tests
             _manager.ServiceWorkResetOverride = _ => { ++resetAttempts; return ""; };
             _manager.ExistingServiceReplacementStartOverride = _ => ++replacements;
             LogAssert.Expect(LogType.Error, new Regex("遗留服务恢复结束；recoveryId=" + Regex.Escape(record.id)));
-            Call("ResumeExistingServiceRecovery");
+            var callback = ScheduleRecoveryOnUpdate(ref record);
+            callback.DynamicInvoke();
+            callback.DynamicInvoke();
             Assert.That(record.status, Is.EqualTo("failed"));
             Assert.That(record.error, Does.Contain("reset_receipt_unknown"));
             Assert.That(resetAttempts + replacements + _stopDispatches + _terminations, Is.Zero);
@@ -577,6 +585,50 @@ namespace CodingRiver.UPilot.Tests
                 launcherCreatedAt = record.replacementLauncherCreatedAt, deadlineUtcMs = record.deadline };
             return record;
         }
+
+        [TestCase("stop")]
+        [TestCase("reset")]
+        [TestCase("reload")]
+        public void CancelPendingRecoveryUnsubscribesUpdateAndIgnoresCapturedCallback(string cancellation)
+        {
+            var record = CreateCleanupReceiptRecord(out _);
+            var callback = ScheduleRecoveryOnUpdate(ref record);
+            var saved = JsonUtility.ToJson(record);
+            if (cancellation == "stop") Call("CancelExistingServiceRecoveryForStop", "user-stop");
+            else if (cancellation == "reset")
+            {
+                ExpectInterruptedRecoveryError(record);
+                _manager.CancelExistingServiceRecoveryForReset("other-owner");
+            }
+            else Call("BeforeExistingServiceRecoveryReload");
+            var afterCancellation = JsonUtility.ToJson(record);
+
+            Assert.That(RecoveryCallback(true), Is.Null);
+            callback.DynamicInvoke();
+            Assert.That(JsonUtility.ToJson(record), Is.EqualTo(afterCancellation));
+            if (cancellation == "reload") Assert.That(afterCancellation, Is.EqualTo(saved));
+            Assert.That(Get<CancellationTokenSource>("_existingServiceRecoveryCancellation"), Is.Null);
+            Assert.That(_stopDispatches + _terminations, Is.Zero);
+            Assert.That(record.replacementStarted, Is.False);
+            LogAssert.NoUnexpectedReceived();
+        }
+
+        private Delegate ScheduleRecoveryOnUpdate(ref UPilotMcpServerManager.ExistingServiceRecoveryRecord record)
+        {
+            SessionState.SetString(RecoveryKey, JsonUtility.ToJson(record));
+            Call("RestoreExistingServiceRecovery");
+            Call("RestoreExistingServiceRecovery"); // Repeated restoration must register only one update.
+            record = Get<UPilotMcpServerManager.ExistingServiceRecoveryRecord>("_existingServiceRecovery");
+            var callback = RecoveryCallback(true);
+            Assert.That(callback, Is.Not.Null);
+            Assert.That(EditorApplication.update.GetInvocationList().Count(d =>
+                ReferenceEquals(d.Target, _manager) && d.Method.Name == "ResumeExistingServiceRecovery"), Is.EqualTo(1));
+            return callback;
+        }
+
+        private Delegate RecoveryCallback(bool update) =>
+            ((update ? EditorApplication.update : EditorApplication.delayCall)?.GetInvocationList() ?? Array.Empty<Delegate>())
+                .FirstOrDefault(d => ReferenceEquals(d.Target, _manager) && d.Method.Name == "ResumeExistingServiceRecovery");
 
         private UPilotMcpServerManager.ExistingServiceRecoveryRecord CreateCleanupReceiptRecord(out ServiceStopObservationRecord stop)
         {

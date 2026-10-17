@@ -1506,9 +1506,20 @@ V04最新复验原Task task-83b34019-815b-4fa5-8f0f-09f065916c9f、runGuid 4cf4c
 - 现场维护 `3224f6a3-3ff3-45f7-8adb-a196acc40f4b`、schema 5 restart `restart-60429cd42b284bd6b6062b34539458c9` 均 succeeded，7892ms；Server 19084→28124、Unity 3680 不变；Health/部署标记 false 不阻断，必要身份/旧退出/端口/新会话/只读回执通过。后续观察同一进程/会话稳定，无重复 stop/start。
 - 证据：`Tests~/UPilotTest/Log/P0P1/service-observation-20261017/acceptance-summary.json`；完整说明 `Documentation~/ServiceObservationSimplification-20261016.md`。Console 阶段覆盖 partial；Server 仅选定入口加载源码 equivalent，非全模块部署证明。
 
-## UPilot-20261017-ReloadHelloAdmissionDelay / P2：重载后 hello 到就绪延迟（待定位）
+## UPilot-20261017-ReloadHelloAdmissionDelay / P2：重载后 hello 到就绪延迟（最小调度修复已验证，原焦点原因未证实）
 
 - 观察：上面的夹具编译从登记到 verified 约 200.6 秒；11:11:08（Asia/Shanghai）收到新会话 hello ACK，数次 MCP 状态停留 BridgeBootstrapPending，11:13:48 恢复。Unity PID3680 和 Server PID19084 未变化；只读 hang 检查无模态窗口、主线程响应未知，最终原批完成。
 - 影响：正常 C# 保存后较长断连，验收客户端的已连接预检仅返回 not_sent 摘要，容易误判需要重发编译/重启。
 - 建议：先复现并记录主线程 hello 排队/处理、恢复发现和 bootstrap 各阶段开始/结束及原 owner/deadline；观察接口保留断连时的完整只读身份与原批状态，明确缺失证据，不增加就绪门或自动修复/重放。仅凭本次日志不推断死锁、Health 故障或焦点影响。
 - 证据/状态：`reload-observation.json`、`reload-hang.json`、`fixture-batch-terminal.json`；原批最终通过。本次未修改生命周期实现或增加主动探测，后续独立定位。
+
+- 2026-10-17 只读分析补充：精确同一 hello 的 `hello_enqueued` 为 11:11:08.412，`hello_applied` 为 11:13:48.266，`queueDelayMs=159886`；恢复 discovery 实际到 11:13:47.184 才开始，扫描1029ms、调度0ms、续接37ms，整轮1366ms。主要延迟在恢复验证开始之前，而不是进程扫描、bootstrap 往返或 Health HTTP。
+- 已确认代码薄弱点：`UPilotMcpServerManager.Recovery.cs:556` 对 verifying/cleaning/reused 的恢复只注册 `EditorApplication.delayCall += ResumeExistingServiceRecovery`；外层 EnsureInitialServiceRecovery 虽然已有 update/延迟双入口，但没有消除内层对 delayCall 的依赖。`ApplyHello` 需先通过 `CanAuthenticateServerHello`，候选 OS 身份由这个恢复流程填入，形成调度上的前后依赖。最符合日志的解释是恢复回调迟迟未推进；尚未复现 delayCall 当时具体为什么迟到，不能断言焦点/Inspector/主线程死锁。
+- 诊断纠正：`queueDelayMs` 从 hello 收到计到最终应用，期间可能已多次尝试并等待身份；没有单独的首次出队时间。因此之前“主线程未处理后续握手”表述过强。`BridgeBootstrapPending` 只证明当前 bootstrap 未完成，不证明主线程未执行。默认全局 Editor 日志无法归属这次精确项目，未纳入因果证据。
+- 最小处理建议：复用已有 Editor update 驱动及同一个恢复入口，首次接管时一次性注销备选回调/消费 pending 标记，继续原 operation、owner 和有效期限；取消与重载同步注销，迟到回调不得再次恢复或 stop/start。不要新增恢复管理器、Health门禁或自动重启。补充“delayCall不触发而update仍运行”“双入口到达只执行一次”“迟到回调不重放”定向回归。
+- 窄诊断建议：仅记录恢复安排/首次执行与 hello首次出队/等待OS身份的阶段变化，区分回调等待与实际验证耗时；重复聚合，成功不逐帧输出。等待阶段可给可见Warning，必要证据仍未取得时保持pending，原总期限耗尽仍明确失败。本次仅分析与记录，未修改产品代码、触发新编译或重启。
+
+- 2026-10-17 最小修复交付：恢复入口由 delayCall 改为一次性 EditorApplication.update；一个内存 pending 标记在入口先消费，重复注册去重，停止/重置/Reload 清理订阅及标记。复用原恢复执行器、身份及期限，不增加配置、计时器、主动探测、焦点切换或自动重启；允许主线程后台更新延迟。本轮不实施上面的扩展阶段诊断建议。
+- 定向验证：最终原批 `wb-d7054cdb-4746-46b1-bd82-9a8ba561f50e` verified/passed，correlationVerified/errorsVerified=true，compileOperationId=`eddf31f3f3b2406c8ecfcc86a1171eb3`，结构化编译错误 0。EditMode 精确 5 项全部通过、0 skipped；包含仅 update 驱动恢复、重复/迟到回调不重放、停止/重置/Reload 清理。task=`task-24e3a5ed-10dd-4814-976e-73bab09fa4d4`，run=`515284a6-dbbe-4b66-b3b6-8d371eac9e26`，acceptancePassed/cleanupVerified/testIdentityVerified/sourceUnchanged=true。
+- 证据：`Tests~/UPilotTest/Log/P0P1/recovery-update-20261017/`；验收报告 `Logs/UPilot/Reports/Acceptance/1792208285281_req-33805bbc-33ef-4a1d-b873-0362f7fb9131/summary.json`（528084 bytes，SHA256 `3276c3846f7f5495bda7a113155f708d5f8b81e3d6f22d40e712a82e37938503`）。首次测试选择因缺参数化完整名称在 runner 启动前拒绝；按发现结果修正为 5 个精确名称后通过，原记录保留。
+- 范围：此次关联编译后的 Domain Reload 自动恢复连接，Server PID28124、Unity PID3680 保持不变。未执行全套回归，未强制切换焦点进行对照实验，不能据此确认原约160秒等待的焦点因果；主线程停止更新时仍可能延迟。

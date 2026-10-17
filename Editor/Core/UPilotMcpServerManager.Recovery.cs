@@ -45,6 +45,7 @@ namespace CodingRiver.UPilot
         internal Action<ExistingServiceRecoveryRecord> ExistingServiceShutdownOverride;
         private ExistingServiceRecoveryRecord _existingServiceRecovery;
         private CancellationTokenSource _existingServiceRecoveryCancellation;
+        private bool _existingServiceRecoveryResumePending;
         private ServerStopTarget _recoveredServiceTarget;
         // Borrowed only during the existing discovery round; no ownership transfer or new observer.
         private ServerStopTarget _helloCandidateTarget;
@@ -553,7 +554,12 @@ namespace CodingRiver.UPilot
                 }
                 if (record.spec == null) return;
                 if (record.status == "verifying" || record.status == "cleaning" || record.status == "reused")
-                    EditorApplication.delayCall += ResumeExistingServiceRecovery;
+                {
+                    // Recovery must not wait for an Inspector-driven delayCall after Reload.
+                    _existingServiceRecoveryResumePending = true;
+                    EditorApplication.update -= ResumeExistingServiceRecovery;
+                    EditorApplication.update += ResumeExistingServiceRecovery;
+                }
             }
             catch (Exception ex) { Logger.ReportFailure("SERVER", "恢复遗留服务观察记录失败；没有重放停止或启动。", ex, terminal: true); }
         }
@@ -636,6 +642,9 @@ namespace CodingRiver.UPilot
 
         private async void ResumeExistingServiceRecovery()
         {
+            EditorApplication.update -= ResumeExistingServiceRecovery;
+            if (!_existingServiceRecoveryResumePending) return;
+            _existingServiceRecoveryResumePending = false;
             var record = _existingServiceRecovery;
             if (record == null || _existingServiceRecoveryCancellation != null || UPilotQuickStart.IsExplicitlyStopped) return;
             var cancellation = new CancellationTokenSource();
@@ -719,7 +728,8 @@ namespace CodingRiver.UPilot
         private void CancelExistingServiceRecoveryForStop(string requestId)
         {
             if (requestId == _existingServiceRecovery?.id) return;
-            EditorApplication.delayCall -= ResumeExistingServiceRecovery;
+            _existingServiceRecoveryResumePending = false;
+            EditorApplication.update -= ResumeExistingServiceRecovery;
             _existingServiceRecoveryCancellation?.Cancel();
             _existingServiceRecoveryCancellation = null;
             if (_existingServiceRecovery != null && (_existingServiceRecovery.status == "verifying" ||
@@ -738,7 +748,8 @@ namespace CodingRiver.UPilot
             var record = _existingServiceRecovery;
             if (record == null || (!string.IsNullOrEmpty(preservedOwnerId) && record.id == preservedOwnerId) ||
                 (record.status != "verifying" && record.status != "cleaning")) return;
-            EditorApplication.delayCall -= ResumeExistingServiceRecovery;
+            _existingServiceRecoveryResumePending = false;
+            EditorApplication.update -= ResumeExistingServiceRecovery;
             var cancellation = _existingServiceRecoveryCancellation;
             _existingServiceRecoveryCancellation = null;
             record.status = "stopped";
@@ -758,7 +769,8 @@ namespace CodingRiver.UPilot
         private void BeforeExistingServiceRecoveryReload()
         {
             ClearRestoredRestartStopObservation();
-            EditorApplication.delayCall -= ResumeExistingServiceRecovery;
+            _existingServiceRecoveryResumePending = false;
+            EditorApplication.update -= ResumeExistingServiceRecovery;
             _existingServiceRecoveryCancellation?.Cancel();
             _existingServiceRecoveryCancellation = null;
             ReleaseRecoveredServiceAttachment();
