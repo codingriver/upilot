@@ -144,6 +144,12 @@ namespace CodingRiver.UPilot.Automation
         public bool cancelRequested;
         // Zero preserves the ordinary lifecycle for existing stored runs.
         public long immediateStopRequestedAtUtcMs;
+        // Empty outcomes and a zero marker keep historical records unknown, never implicitly verified.
+        public long finallyFailureAtUtcMs;
+        public long finallyCleanupDeadlineUtcMs;
+        public string cleanupOutcome = "";
+        public string[] unresolvedResources = Array.Empty<string>();
+        public string reportOutcome = "";
         public long compilationStartedAtUtcMs;
         public string compilationPhase = "";
         public string compilationInstanceId = "";

@@ -77,6 +77,25 @@ namespace CodingRiver.UPilot.Automation
             return fence;
         }
         internal void ClearCompilationFence(AutomationStepRun run) => SessionState.EraseString(CompilationFenceKey(run));
+        private string FinallyFailureFenceKey(AutomationStepRun run) =>
+            "UPilot.Step.FinallyFailure." + HashText(Path.GetFullPath(_path) + "\n" + run.runId);
+        internal void FenceFinallyFailure(AutomationStepRun run) =>
+            SessionState.SetString(FinallyFailureFenceKey(run), JsonUtility.ToJson(run));
+        internal AutomationStepRun FinallyFailureFence(AutomationStepRun run)
+        {
+            string json = SessionState.GetString(FinallyFailureFenceKey(run), "");
+            if (string.IsNullOrEmpty(json)) return null;
+            var fence = JsonUtility.FromJson<AutomationStepRun>(json);
+            if (fence == null || fence.runId != run.runId || fence.operationId != run.operationId
+                || fence.planHash != run.planHash || fence.serviceLifecycleId != run.serviceLifecycleId
+                || fence.editorIdentity != EditorIdentity || fence.editorIdentity != run.editorIdentity
+                || !fence.terminal || (fence.status != "Failed" && fence.status != "TimedOut")
+                || fence.finallyFailureAtUtcMs <= 0 || fence.finallyCleanupDeadlineUtcMs <= 0
+                || string.IsNullOrEmpty(fence.cleanupOutcome) || string.IsNullOrEmpty(fence.reportOutcome))
+                throw new InvalidDataException("STEP_FINALLY_FAILURE_FENCE_INVALID");
+            return fence;
+        }
+        internal void ClearFinallyFailureFence(AutomationStepRun run) => SessionState.EraseString(FinallyFailureFenceKey(run));
         private static void CheckDispositionPath(string path)
         {
             // A junction/symlink must not redirect the execution fence or its backup.
@@ -159,6 +178,9 @@ namespace CodingRiver.UPilot.Automation
             var disposed = Disposed(run.operationId);
             if (disposed != null && (run.status != "Released" || run.disposition?.requestId != disposed.disposition.requestId))
                 throw new InvalidOperationException("STEP_RUN_RELEASED");
+            // Resource helpers persist Stop/Cancel/Gizmos intent through this same entry.
+            // The reload fence must never overwrite their newer disk intent with an older snapshot.
+            if (run.terminal && run.finallyFailureAtUtcMs > 0) FenceFinallyFailure(run);
             SaveJson(_path, JsonUtility.ToJson(run, true));
         }
         internal static void SaveJson(string path, string json)

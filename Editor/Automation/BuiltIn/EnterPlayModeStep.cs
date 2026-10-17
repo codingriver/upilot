@@ -3,7 +3,7 @@ using UnityEditor.SceneManagement;
 
 namespace CodingRiver.UPilot.Automation
 {
-    [AutomationStep("upilot.enter_play_mode", Description = "Enter PlayMode, optionally opening a saved scene first.", ArgumentsExample = "Assets/Scenes/Launch.unity")]
+    [AutomationStep("upilot.enter_play_mode", Description = "Enter PlayMode, optionally opening a saved scene first.", ArgumentsExample = "Assets/Scenes/Launch.unity", TimeoutSeconds = 180)]
     public sealed class EnterPlayModeStep : AutomationStepBase
     {
         public override string Validate(string runId, string instanceId, string contextJson, string arguments) =>

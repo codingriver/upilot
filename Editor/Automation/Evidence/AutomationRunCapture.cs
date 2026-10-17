@@ -71,14 +71,17 @@ namespace CodingRiver.UPilot.Automation
             return result.session;
         }
         internal bool StopAndVerify(long now, out ConsoleCaptureManifest manifest,
-            out AutomationReportArtifact[] artifacts, Action<AutomationReportArtifact[]> register = null)
+            out AutomationReportArtifact[] artifacts, Action<AutomationReportArtifact[]> register = null,
+            Func<bool> withinDeadline = null)
         {
             manifest = null; artifacts = Array.Empty<AutomationReportArtifact>();
             if (!_ownership.stopIntent)
             {
                 Observe();
+                if (withinDeadline != null && !withinDeadline()) return false;
                 _ownership.stopIntent = true; _ownership.stopRequestedAt = now;
                 Save();
+                if (withinDeadline != null && !withinDeadline()) return false;
                 // A lost response never authorizes a second Stop. Subsequent ticks only inspect files.
                 try { UPilotConsoleCaptureApi.Stop(SessionId, _ownership.ownerToken); }
                 catch { /* Confirm the persisted identity below, without repeating Stop. */ }

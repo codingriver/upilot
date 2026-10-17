@@ -37,7 +37,7 @@ namespace CodingRiver.UPilot.Automation
         }
         public AutomationStepRun State => _run == null ? null : AutomationStepJson.Copy(_run);
         internal string OperationId => _run?.operationId ?? "";
-        public bool Busy => _ticking || (_run != null && (!_run.terminal || ReleasingImmediateStopResources));
+        public bool Busy => _ticking || (_run != null && (!_run.terminal || ReleasingTerminalResources));
         public AutomationStepValidation Validate(AutomationStepPlan plan) => AutomationStepPlanValidator.Validate(plan, _registry);
 
         public AutomationStepRun Start(AutomationStepPlan plan, string operationId, string captureSessionId = "")
@@ -109,7 +109,19 @@ namespace CodingRiver.UPilot.Automation
                 // An Editor-session fence precedes disk persistence and every business restoration path.
                 var compilationFence = _store.CompilationFence(_run);
                 if (compilationFence != null) _run = compilationFence;
+                var finallyFailureFence = _store.FinallyFailureFence(_run);
+                if (finallyFailureFence != null) _run = finallyFailureFence;
                 RestoreExecutionLog();
+                if (ReleasingFinallyFailureResources)
+                {
+                    // Resume only the frozen framework-resource attempt and its original deadline.
+                    if (_run.editorIdentity != AutomationStepRunStore.EditorIdentity)
+                    {
+                        RecordImmediateStopResourceError("STEP_EDITOR_RESTARTED", "Finally-failure resource ownership is unverified after Editor restart.");
+                        CompleteFinallyFailureRelease();
+                    }
+                    return;
+                }
                 if (ReleasingImmediateStopResources)
                 {
                     // Same-lifetime reload resumes framework release only, never Step callbacks.
@@ -174,15 +186,22 @@ namespace CodingRiver.UPilot.Automation
                 if (_run.cursor >= _run.steps.Count) return;
                 var record = Current;
                 if (record.stage == "Pending" || record.stage == "Completed" || record.stage == "ResourceCleaning") return;
-                _step = _registry.Create(Item.stepId);
+                try { _step = _registry.Create(Item.stepId); }
+                catch (Exception ex)
+                {
+                    if (Item.phase != "Finally") throw;
+                    FreezeFinallyFailure(AutomationStepStatus.Failed, RecordError("STEP_CONSTRUCTION_FAILED", ex.GetBaseException().Message, ex.ToString(), deferLog: true));
+                    return;
+                }
                 if (_run.terminal) return;
                 string restored, restoreCode = "";
+                AutomationStepError restoreError = null;
                 try { restored = AutomationStepJsonCodec.Restore(Invoke(_step.Restore), out restoreCode); }
                 catch (Exception ex)
                 {
                     if (_run.terminal) return;
                     restoreCode = ex is FormatException ? "STEP_RESTORE_INVALID" : "STEP_RESTORE_EXCEPTION";
-                    RecordError(restoreCode, ex.Message, ex.ToString());
+                    restoreError = RecordError(restoreCode, ex.Message, ex.ToString(), deferLog: Item.phase == "Finally");
                     restored = "Unsupported";
                 }
                 if (_run.terminal) return;
@@ -190,7 +209,8 @@ namespace CodingRiver.UPilot.Automation
                 {
                     if (string.IsNullOrEmpty(restoreCode)) restoreCode = "STEP_RESTORE_UNSUPPORTED";
                     _run.recoveryBlockedReason = restoreCode;
-                    record.error = RecordError(restoreCode, "Step cannot prove recovery. Execute was not replayed.");
+                    record.error = restoreError ?? RecordError(restoreCode, "Step cannot prove recovery. Execute was not replayed.", deferLog: Item.phase == "Finally");
+                    if (Item.phase == "Finally") { FreezeFinallyFailure(AutomationStepStatus.Failed, record.error); return; }
                     if (restored == "Failed") ReadError(record.error);
                     if (_run.terminal) return;
                     _run.recoveryRequired = true; _run.cleanupPending = true;
@@ -204,7 +224,7 @@ namespace CodingRiver.UPilot.Automation
             finally
             {
                 _ticking = false;
-                if (_run?.terminal == true && !ReleasingImmediateStopResources) FinishExecutionLog();
+                if (_run?.terminal == true && !ReleasingTerminalResources) FinishExecutionLog();
             }
         }
 
@@ -220,6 +240,13 @@ namespace CodingRiver.UPilot.Automation
         internal void Tick()
         {
             if (_ticking || _run == null) return;
+            if (ReleasingFinallyFailureResources)
+            {
+                _ticking = true;
+                try { TickFinallyFailureRelease(); }
+                finally { _ticking = false; }
+                return;
+            }
             if (ReleasingImmediateStopResources)
             {
                 _ticking = true;
@@ -257,7 +284,9 @@ namespace CodingRiver.UPilot.Automation
                         TraceStepFinished(_run.cursor, record.finishedAtUtcMs, "未执行"); Advance(); return;
                     }
                     try { _step = _registry.Create(Item.stepId); }
-                    catch (Exception ex) { if (_run.terminal) return; RecordError("STEP_CONSTRUCTION_FAILED", ex.GetBaseException().Message, ex.ToString()); record.outcome = AutomationStepStatus.Failed; record.stage = "Completed"; record.cleanupState = "NotRequired";
+                    catch (Exception ex) { if (_run.terminal) return; var error = RecordError("STEP_CONSTRUCTION_FAILED", ex.GetBaseException().Message, ex.ToString(), deferLog: Item.phase == "Finally");
+                        if (Item.phase == "Finally") { FreezeFinallyFailure(AutomationStepStatus.Failed, error); return; }
+                        record.outcome = AutomationStepStatus.Failed; record.stage = "Completed"; record.cleanupState = "NotRequired";
                         TraceStep("step.construction_failed", "步骤构造失败", () => ErrorFields(_run.error));
                         TraceStepFinished(_run.cursor, _clock(), "Failed（未执行）"); Advance(); return; }
                     if (_run.terminal) return;
@@ -326,7 +355,7 @@ namespace CodingRiver.UPilot.Automation
             finally
             {
                 _ticking = false;
-                if (_run?.terminal == true && !ReleasingImmediateStopResources) FinishExecutionLog();
+                if (_run?.terminal == true && !ReleasingTerminalResources) FinishExecutionLog();
             }
         }
         private int CallbackIndex => _run.cursor;
@@ -465,13 +494,13 @@ namespace CodingRiver.UPilot.Automation
         private void FailCurrent(AutomationStepStatus status, string code, string message, string diagnostic = "", bool readError = false)
         {
             if (_run == null || _run.terminal) return;
-            if (status == AutomationStepStatus.TimedOut) TraceStep("step.timed_out", "步骤执行超时", () => "错误码=" + AutomationStepExecutionLog.Quote(code));
-            if (status == AutomationStepStatus.TimedOut && Item.phase == "Finally")
+            if (status == AutomationStepStatus.TimedOut && Item.phase != "Finally") TraceStep("step.timed_out", "步骤执行超时", () => "错误码=" + AutomationStepExecutionLog.Quote(code));
+            if (Item.phase == "Finally" && status != AutomationStepStatus.Canceled)
             {
-                Current.outcome = status;
-                TraceExecutionFinished(_clock());
-                Finish("TimedOut", code, message);
-                return; // No second cleanup pass or remaining Finally steps.
+                var snapshot = _run.snapshots.FirstOrDefault(s => s.instanceId == Item.instanceId && s.status == "Failed" && s.errorCode == code);
+                if (snapshot != null) { message = snapshot.message; diagnostic = snapshot.diagnostic; }
+                FreezeFinallyFailure(status, RecordError(code, message, diagnostic, deferLog: true));
+                return;
             }
             Current.outcome = status;
             Current.error = RecordError(code, message, diagnostic, deferLog: readError);
@@ -487,7 +516,8 @@ namespace CodingRiver.UPilot.Automation
                 catch (Exception ex)
                 {
                     if (_run.terminal) return;
-                    RecordError("STEP_CANCEL_EXCEPTION", ex.GetBaseException().Message, ex.ToString());
+                    var error = RecordError("STEP_CANCEL_EXCEPTION", ex.GetBaseException().Message, ex.ToString(), deferLog: Item.phase == "Finally");
+                    if (Item.phase == "Finally") { FreezeFinallyFailure(AutomationStepStatus.Failed, error); return; }
                     // Cleanup can still authoritatively establish release.
                 }
             }
@@ -501,16 +531,27 @@ namespace CodingRiver.UPilot.Automation
                 if (_run.terminal) return;
                 frozen.message = error.message; frozen.diagnostic = error.diagnostic;
             }
-            catch (Exception ex) { if (_run.terminal) return; RecordError(ex is FormatException ? "STEP_ERROR_INVALID" : "STEP_ERROR_EXCEPTION", ex.Message, ex.ToString()); }
+            catch (Exception ex)
+            {
+                if (_run.terminal) return;
+                var error = RecordError(ex is FormatException ? "STEP_ERROR_INVALID" : "STEP_ERROR_EXCEPTION", ex.Message, ex.ToString(), deferLog: Item.phase == "Finally");
+                if (Item.phase == "Finally") { FreezeFinallyFailure(AutomationStepStatus.Failed, error); return; }
+            }
             ReportStepError(frozen);
             if (!_run.terminal) Save();
         }
         private void CleanupFailed(string code, string message, bool readError = false, string diagnostic = "")
         {
             if (_run == null || _run.terminal) return;
-            Current.cleanupState = code == "STEP_CLEANUP_EXCEPTION" || code == "STEP_CLEANUP_RESULT_INVALID"
-                ? "Uncertain" : "Unresolved";
-            var error = RecordError(string.IsNullOrWhiteSpace(code) ? "STEP_CLEANUP_FAILED" : code, message, diagnostic, deferLog: readError);
+            if (!(Item.phase == "Finally" && Current.stage == "ResourceCleaning" && Current.cleanupState == "Verified"))
+                Current.cleanupState = code == "STEP_CLEANUP_EXCEPTION" || code == "STEP_CLEANUP_RESULT_INVALID"
+                    ? "Uncertain" : "Unresolved";
+            var error = RecordError(string.IsNullOrWhiteSpace(code) ? "STEP_CLEANUP_FAILED" : code, message, diagnostic, deferLog: readError || Item.phase == "Finally");
+            if (Item.phase == "Finally")
+            {
+                FreezeFinallyFailure(code == "STEP_CLEANUP_TIMEOUT" ? AutomationStepStatus.TimedOut : AutomationStepStatus.Failed, error);
+                return;
+            }
             Save();
             if (readError) ReadError(error);
             if (_run.terminal) return;
@@ -520,7 +561,6 @@ namespace CodingRiver.UPilot.Automation
             if (code == "STEP_CLEANUP_TIMEOUT")
             {
                 Current.outcome = AutomationStepStatus.TimedOut;
-                if (Item.phase == "Finally") { Finish("TimedOut", code, message); return; }
             }
             // This step exhausted its one cleanup attempt. Do not wait on its resources again.
             Current.stage = "Completed"; Current.finishedAtUtcMs = _clock();
@@ -530,8 +570,31 @@ namespace CodingRiver.UPilot.Automation
         private void CompleteCurrent()
         {
             if (_run == null || _run.terminal) return;
-            bool snapshotsComplete = Snapshots.CompleteItem(Item.instanceId);
+            bool snapshotsComplete;
+            try
+            {
+                // A failed Finally resource observation must freeze even when persisting it fails.
+                var snapshots = Item.phase == "Finally" ? new AutomationSnapshotEvidence(_run, () => _store.Save(_run), _clock) : Snapshots;
+                snapshotsComplete = snapshots.CompleteItem(Item.instanceId, stopOnFailure: Item.phase == "Finally");
+            }
+            catch (Exception ex)
+            {
+                if (Item.phase != "Finally") throw;
+                FreezeFinallyFailure(AutomationStepStatus.Failed, RecordError("STEP_SNAPSHOT_OBSERVATION_FAILED", ex.Message, ex.ToString(), deferLog: true));
+                return;
+            }
             if (_run.terminal) return;
+            // A failed Finally snapshot freezes immediately, even while another snapshot is running.
+            if (Item.phase == "Finally")
+            {
+                var failed = _run.snapshots.FirstOrDefault(s => s.instanceId == Item.instanceId && s.status == "Failed");
+                if (failed != null)
+                {
+                    FreezeFinallyFailure(AutomationStepStatus.Failed, RecordError(
+                        string.IsNullOrEmpty(failed.errorCode) ? "STEP_SNAPSHOT_FAILED" : failed.errorCode, failed.message, failed.diagnostic, deferLog: true));
+                    return;
+                }
+            }
             if (!snapshotsComplete)
             {
                 if (Current.stage != "ResourceCleaning") TraceStep("step.resources_started", "步骤框架资源收尾开始");
@@ -541,7 +604,7 @@ namespace CodingRiver.UPilot.Automation
             {
                 if (snapshot.status == "Failed")
                 {
-                    var error = RecordError(snapshot.errorCode, snapshot.message);
+                    var error = RecordError(snapshot.errorCode, snapshot.message, snapshot.diagnostic);
                     if (string.IsNullOrEmpty(Current.error?.code)) Current.error = error;
                     Current.outcome = AutomationStepStatus.Failed;
                 }

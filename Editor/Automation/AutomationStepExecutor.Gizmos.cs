@@ -137,9 +137,10 @@ namespace CodingRiver.UPilot.Automation
             _store.Save(_run);
         }
 
-        private void FinalizeGizmos()
+        private void FinalizeGizmos(Func<bool> withinDeadline = null)
         {
             if (!ManagesGizmos) return;
+            if (withinDeadline != null && !withinDeadline()) return;
             if (_run.gizmosState?.finalCloseAttempted == true)
             {
                 if (!_run.gizmosState.finalCloseVerified && !_run.gizmosState.observations.Any(o => o.phase == "finalize"))
@@ -153,8 +154,8 @@ namespace CodingRiver.UPilot.Automation
             _run.gizmosState ??= new AutomationGizmosState();
             _run.gizmosState.finalCloseAttempted = true;
             _store.Save(_run);
-            ApplyGizmosGroup("finalize", false, true, true);
-            _run.gizmosState.finalCloseVerified = !_run.gizmosState.observations.Any(o => o.phase == "finalize" && o.status == "Warning");
+            bool complete = ApplyGizmosGroup("finalize", false, true, true, withinDeadline: withinDeadline);
+            _run.gizmosState.finalCloseVerified = complete && !_run.gizmosState.observations.Any(o => o.phase == "finalize" && o.status == "Warning");
             _store.Save(_run);
         }
 
@@ -174,14 +175,17 @@ namespace CodingRiver.UPilot.Automation
             }
         }
 
-        private void ApplyGizmosGroup(string phase, bool desired, bool scene, bool game, string[] onlyIds = null)
+        private bool ApplyGizmosGroup(string phase, bool desired, bool scene, bool game, string[] onlyIds = null, Func<bool> withinDeadline = null)
         {
+            if (withinDeadline != null && !withinDeadline()) return false;
             foreach (var window in FindGizmosWindows(phase, desired, scene, game))
-                if (onlyIds == null || onlyIds.Contains(window.id)) ApplyGizmosWindow(phase, window, desired);
+                if ((onlyIds == null || onlyIds.Contains(window.id)) && !ApplyGizmosWindow(phase, window, desired, withinDeadline)) return false;
+            return true;
         }
 
-        private void ApplyGizmosWindow(string phase, AutomationGizmosWindow window, bool desired)
+        private bool ApplyGizmosWindow(string phase, AutomationGizmosWindow window, bool desired, Func<bool> withinDeadline = null)
         {
+            if (withinDeadline != null && !withinDeadline()) return false;
             var observation = new AutomationGizmosObservation
             { phase = phase, windowId = window.id, view = window.view, desired = desired };
             string stage = "READ";
@@ -191,6 +195,13 @@ namespace CodingRiver.UPilot.Automation
                 observation.actualKnown = true;
                 if (observation.actual != desired)
                 {
+                    if (withinDeadline != null && !withinDeadline())
+                    {
+                        observation.status = "Warning"; observation.code = "GIZMOS_RELEASE_DEADLINE";
+                        observation.message = "The original cleanup deadline expired before the Gizmos setter; no setter was dispatched.";
+                        RecordGizmos(observation);
+                        return false;
+                    }
                     stage = "SET";
                     observation.actualKnown = false;
                     _gizmosAccess.Set(window, desired);
@@ -209,6 +220,7 @@ namespace CodingRiver.UPilot.Automation
                 observation.message = ex.ToString();
             }
             RecordGizmos(observation);
+            return true;
         }
 
         private void AddGizmosWarning(string phase, string windowId, string view, bool desired, string code, string message) =>

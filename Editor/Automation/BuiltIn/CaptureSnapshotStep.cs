@@ -1,7 +1,7 @@
 using System;
 namespace CodingRiver.UPilot.Automation
 {
-    [AutomationStep("upilot.capture_snapshot", Description = "Capture and verify run-owned visual evidence.", TimeoutSeconds = 10)]
+    [AutomationStep("upilot.capture_snapshot", Description = "Capture and verify run-owned visual evidence.", TimeoutSeconds = 20)]
     public sealed class CaptureSnapshotStep : AutomationStepBase
     {
         public override string Validate(string runId, string instanceId, string contextJson, string arguments)

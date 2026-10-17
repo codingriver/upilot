@@ -345,6 +345,17 @@ not Passed, and the run has at least SucceededWithWarnings.
 Validation aggregates registration, missing ID, contract, parameter and plan errors.
 It does not create Capture, enter PlayMode or call Execute. Validate checks syntax and
 static constraints, not whether a future login panel or runtime object already exists.
+Runtime admission is a separate read-only check before Operation-owned Capture, and is
+rechecked by Unity before creating the Run, report or Gizmos effects. It requires fresh
+authoritative Editor state, no compilation/updating/mode transition and an idle executor.
+Stable PlayMode and paused PlayMode remain valid for compatible plans; admission never
+changes mode or unpauses. An EditMode requirement needs an explicit preceding
+`upilot.enter_edit_mode`; otherwise admission rejects before execution. Prefix inference
+only crosses `console_capture_start` and `wait_seconds`, recognizes `open_scene`,
+scene-bearing `enter_play_mode` and explicit mode Steps, and stops at custom/Snapshot
+Steps. Finally items do not determine startup mode. Deterministic start rejection reports
+`started=false` with code, currentMode and instanceId; uncertain transport is not proof
+that nothing started and must not cause Start replay.
 Operation timeout must cover the summed step/cleanup budgets plus the evidence margin;
 do not shorten it to a single tool wait window.
 
@@ -386,8 +397,11 @@ the running Bridge. This policy never opens/closes/resizes a window or changes l
 
 - These lifecycle contracts apply to authorized public runs, existing same-lifetime work and isolated executor fixtures; live capability discovery determines whether new admission is available.
 - Execute is called at most once per Step. Normal completion, failure, cancel and timeout share one finalization path. Cancel is sent at most once; Poll/Cleanup reuse the original deadline.
-- Normal cleanup timeout skips remaining Normal and enters Finally once. Finally failure without timeout records the error and advances. Any Finally execution or cleanup timeout immediately finalizes timed_out, skips the remaining Finally steps and performs no additional cleanup/report wait.
-- ResourceCleaning consumes cleanupTimeoutSeconds, not a separate unbounded phase. Existing timeoutSeconds and cleanupTimeoutSeconds are the only per-Step budgets. Evidence, Capture stop and report finalization otherwise share 60 seconds total.
+- Normal failure/cleanup timeout skips remaining Normal and enters Finally once. The first hard failure or timeout in the current Finally immediately freezes business execution and explicitly marks remaining Finally Skipped. Construction/Execute/Poll failure, invalid results, disallowed Skip, Cleanup failure/timeout and required Snapshot failure all trigger this rule. Warnings, allowed Skip and normal cancellation do not; a real exception while processing cancellation still does. Preserve the first error and add later failures as secondaryErrors; any timed-out item retains the run's TimedOut priority.
+- Freeze the current item's outcome/error/stage/finishedAtUtcMs and preserve cleanup already performed. After freezing, no business Execute/Poll/GetError/Cancel/Cleanup/Restore callback runs. Unstarted skipped items keep startedAtUtcMs=0 and identify the terminating item. Synchronous callbacks already executing cannot be forcibly interrupted; late results cannot replace the frozen result.
+- ResourceCleaning consumes cleanupTimeoutSeconds, not a separate unbounded phase. Finally failure may release only run-owned Capture/Snapshot/Gizmos within the current item's one cleanup budget: use the existing cleanupStartedAt deadline, or allocate it once from the failure time if cleanup has not begun. Persist stop/cancel intent before dispatch, observe the original identity, never repeat dispatch or renew the deadline, and dispatch no new resource changes after expiry.
+- Finally termination exposes businessTerminal immediately. cleanupPending means framework release is still running; cleanupOutcome is Pending/Verified/Unverified/NotRequired. Terminal unresolvedResources remain diagnostic and do not reopen cleanup. Business restoration records are separate and must not be inferred successful from verified framework release. Old missing fields remain unknown.
+- After bounded release, commit one failure report from frozen results, with first/secondary errors, skipped Finally, cleanup evidence, unresolved resources and actual artifacts. reportOutcome is Pending/Written/Failed. Do not enter the ordinary 60-second Console collection/policy wait or invent validated evidence. Report errors retain exception stacks in the red Console and never reopen execution. Operation observes the final identity-matched cleanup/artifact snapshot and preserves its original business error and cleanup deadline. Normal evidence, Capture stop and report finalization otherwise share 60 seconds total.
 - Terminal results are immutable. Necessary cleanup failure cannot be reported as success. Unknown outcomes become aborted, not recovery blockers. No recovery observers, administrative release or abandon are prerequisites to vacating the active slot.
 - Duplicate stop returns ending while the sole cleanup is in progress, otherwise not_found, normally with changed=false. It never restarts cleanup or renews a deadline.
 - Service hard stop invalidates old callbacks and clears activity without executing user Finally/Cleanup. Startup never loads historical runs into the active queue. Ordinary reconnect/Domain Reload may continue only same-lifetime work within its original deadline; never Execute again.
@@ -395,14 +409,19 @@ the running Bridge. This policy never opens/closes/resizes a window or changes l
 
 ## Built-in Steps
 
-| ID | String argument | Behavior |
-| --- | --- | --- |
-| upilot.open_scene | Existing Assets/.../*.unity | EditMode only; open and confirm scene |
-| upilot.enter_play_mode | Empty or scene path | Optional scene first, then await actual PlayMode and domain recovery |
-| upilot.enter_edit_mode | Empty or scene path | Await actual exit, optionally open return scene afterward |
-| upilot.wait_seconds | Nonnegative finite invariant-culture seconds | Nonblocking deadline-based wait |
-| upilot.console_capture_start | Empty | First Normal item, once per run; transfer Capture to executor |
-| upilot.capture_snapshot | Empty or Snapshot options JSON string | Trusted Snapshot, bounded observation/cancel and original file verification |
+| ID | String argument | Behavior | Default execution timeout |
+| --- | --- | --- | --- |
+| upilot.open_scene | Existing Assets/.../*.unity | EditMode only; open and confirm scene | 120 seconds |
+| upilot.enter_play_mode | Empty or scene path | Optional scene first, then await actual PlayMode and domain recovery | 180 seconds |
+| upilot.enter_edit_mode | Empty or scene path | Await actual exit, optionally open return scene afterward | 180 seconds |
+| upilot.wait_seconds | Nonnegative finite invariant-culture seconds | Nonblocking deadline-based wait | 30 seconds |
+| upilot.console_capture_start | Empty | First Normal item, once per run; transfer Capture to executor | 20 seconds |
+| upilot.capture_snapshot | Empty or Snapshot options JSON string | Trusted Snapshot, bounded observation/cancel and original file verification | 20 seconds |
+
+Explicit item timeoutSeconds overrides these defaults. Generic Attribute timeout remains
+30 seconds, pollIntervalSeconds remains 0.1 and cleanupTimeoutSeconds remains 10.
+Frozen/in-flight deadlines do not change when defaults change. Snapshot's internal
+three-second wait and two-second cancellation grace are separate and unchanged.
 
 Specifying a PlayMode scene requires starting in EditMode. Do not implicitly restart
 an existing PlayMode session or overwrite a conflicting playModeStartScene.

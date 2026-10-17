@@ -38,7 +38,7 @@ namespace CodingRiver.UPilot.Automation
 
         private void RestoreExecutionLog()
         {
-            _textLogFinished = _run.terminal && !ReleasingImmediateStopResources;
+            _textLogFinished = _run.terminal && !ReleasingTerminalResources;
             _loggedStepFinishes.Clear();
             foreach (var step in _run.steps) if (step.stage == "Completed") _loggedStepFinishes.Add(step.instanceId);
             if (!_textLogFinished) Trace("run.restoring", "恢复原任务观察", () => "阶段=" + _run.stage);
@@ -108,7 +108,7 @@ namespace CodingRiver.UPilot.Automation
 
         internal void TraceInterruption(string eventType, string label)
         {
-            if (_run != null && !_textLogFinished && (!_run.terminal || ReleasingImmediateStopResources)) Trace(eventType, label);
+            if (_run != null && !_textLogFinished && (!_run.terminal || ReleasingTerminalResources)) Trace(eventType, label);
         }
 
         internal void FinishExecutionLog(string releaseDetail = "")

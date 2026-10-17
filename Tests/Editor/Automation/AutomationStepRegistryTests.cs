@@ -114,7 +114,13 @@ namespace CodingRiver.UPilot.Tests.Automation
             var result = AutomationStepJsonCodec.Validation(UPilotAutomationStepService.ValidateJson(plan));
             Assert.That(result.ok, Is.False);
             Assert.That(result.diagnostics.Any(x => x.code == "GENERIC_ORCHESTRATION_DISABLED"), Is.False);
-            Assert.Throws<InvalidOperationException>(() => UPilotAutomationStepService.StartJson("never-start", "", plan));
+            UnityEngine.TestTools.LogAssert.Expect(UnityEngine.LogType.Error,
+                new System.Text.RegularExpressions.Regex("STEP_PLAN_INVALID"));
+            var rejected = UnityEngine.JsonUtility.FromJson<UPilotAutomationStepService.StateResult>(
+                UPilotAutomationStepService.StartJson("never-start", "", plan));
+            Assert.That(rejected.ok, Is.False);
+            Assert.That(rejected.started, Is.False);
+            Assert.That(rejected.code, Is.EqualTo("STEP_PLAN_INVALID"));
             Assert.That(StoredRun(), Is.EqualTo(before));
             Assert.That(SuspensionProbe.Executed, Is.EqualTo(executed));
         }
@@ -142,8 +148,10 @@ namespace CodingRiver.UPilot.Tests.Automation
             // Isolated framework unit test, not a second business Step runner.
             var executorField = typeof(UPilotAutomationStepService).GetField("s_executor", BindingFlags.Static | BindingFlags.NonPublic);
             var registryField = typeof(UPilotAutomationStepService).GetField("s_registry", BindingFlags.Static | BindingFlags.NonPublic);
+            var admissionField = typeof(UPilotAutomationStepService).GetField("s_readAdmission", BindingFlags.Static | BindingFlags.NonPublic);
             var originalExecutor = (AutomationStepExecutor)executorField.GetValue(null);
             var originalRegistry = registryField.GetValue(null);
+            var originalAdmission = admissionField.GetValue(null);
             Assert.That(originalExecutor?.Busy ?? false, Is.False, "Do not replace an active official run.");
             var registry = Registry(Entry<SuspensionProbe>("upilot.test.suspension_probe"));
             var directory = Path.Combine("Library/UPilot/step-facade-tests", Guid.NewGuid().ToString("N"));
@@ -155,13 +163,24 @@ namespace CodingRiver.UPilot.Tests.Automation
             {
                 executorField.SetValue(null, executor);
                 registryField.SetValue(null, registry);
+                admissionField.SetValue(null, new Func<UPilotAutomationStepService.AdmissionObservation>(() => new()
+                {
+                    currentMode = "edit",
+                    context = new EditorContextPayload { connected = true, authoritative = true,
+                        playModeState = "edit", compilePhase = "completed" },
+                    executor = UPilotAutomationStepService.GetCurrentSnapshot(),
+                }));
                 Assert.That(AutomationStepJsonCodec.Validation(UPilotAutomationStepService.ValidateJson(plan)).ok, Is.True);
                 Assert.That(executor.State, Is.Null);
                 Assert.That(UPilotAutomationStepService.StartJson(operationId, "", plan), Does.Contain(operationId));
                 var runId = executor.State.runId;
                 Assert.That(executor.Busy, Is.True);
-                var busy = Assert.Throws<InvalidOperationException>(() => UPilotAutomationStepService.StartPlan("second", "", plan));
-                Assert.That(busy.Message, Is.EqualTo("STEP_EXECUTOR_BUSY"));
+                UnityEngine.TestTools.LogAssert.Expect(UnityEngine.LogType.Error,
+                    new System.Text.RegularExpressions.Regex("STEP_EXECUTOR_BUSY"));
+                var busy = UPilotAutomationStepService.StartPlan("second", "", plan);
+                Assert.That(busy.ok, Is.False);
+                Assert.That(busy.started, Is.False);
+                Assert.That(busy.code, Is.EqualTo("STEP_EXECUTOR_BUSY"));
                 Assert.That(executor.State.runId, Is.EqualTo(runId));
                 // Unit-test the existing executor, not manual Step callbacks.
                 for (int i = 0; i < 30 && !executor.State.terminal; i++) executor.Tick();
@@ -182,6 +201,7 @@ namespace CodingRiver.UPilot.Tests.Automation
             {
                 executorField.SetValue(null, originalExecutor);
                 registryField.SetValue(null, originalRegistry);
+                admissionField.SetValue(null, originalAdmission);
             }
         }
 

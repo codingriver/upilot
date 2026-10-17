@@ -1,6 +1,6 @@
 ﻿namespace CodingRiver.UPilot.Automation
 {
-    [AutomationStep("upilot.open_scene", Description = "Open a saved scene in EditMode.", ArgumentsExample = "Assets/Scenes/Launch.unity")]
+    [AutomationStep("upilot.open_scene", Description = "Open a saved scene in EditMode.", ArgumentsExample = "Assets/Scenes/Launch.unity", TimeoutSeconds = 120)]
     public sealed class OpenSceneStep : AutomationStepBase
     {
         public override string Validate(string runId, string instanceId, string contextJson, string arguments) =>

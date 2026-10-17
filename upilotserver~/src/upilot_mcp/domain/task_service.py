@@ -232,9 +232,32 @@ def _is_success_status(status: str, mapping: dict | None) -> bool:
     return key in (_DEFAULT_OPERATION_SUCCESS | success)
 
 
-def _operation_cleanup_pending(payload: dict | None) -> bool:
+def _official_step_cleanup_outcome(state: dict | None, payload: dict | None) -> str:
+    """Accept the bounded cleanup contract only from the original official Step run."""
+    if not isinstance(state, dict) or not isinstance(payload, dict):
+        return ""
+    job = state.get("jobSpec") or {}
+    call = state.get("resolvedStatusCall") or job.get("statusCall") or {}
+    run_id = (state.get("startData") or {}).get("runId")
+    if (not isinstance(job.get("stepPlan"), dict) or call.get("kind") != "bridge"
+            or call.get("route") != "automation.steps.state" or not run_id
+            or payload.get("runId") != run_id or payload.get("operationId") != state.get("operationId")
+            or payload.get("terminal") is not True or payload.get("businessTerminal") is not True):
+        return ""
+    outcome = payload.get("cleanupOutcome")
+    return outcome if isinstance(outcome, str) and outcome in {"Pending", "Verified", "Unverified", "NotRequired"} else ""
+
+
+def _operation_cleanup_pending(payload: dict | None, state: dict | None = None) -> bool:
     """Return True while the project reports resources that still need cleanup."""
     if not isinstance(payload, dict):
+        return False
+    outcome = _official_step_cleanup_outcome(state, payload)
+    if outcome == "Pending":
+        return True
+    if outcome and payload.get("cleanupPending") is False:
+        # Unresolved resources remain evidence of failure after the bounded attempt
+        # ends; they are not authorization to reopen cleanup or renew its deadline.
         return False
     if bool(payload.get("cleanupPending")):
         return True
@@ -255,6 +278,11 @@ def _operation_cleanup_state_is_explicit(payload: dict | None) -> bool:
         key in payload
         for key in ("cleanupPending", "cleanupStatus", "cleanupSucceeded", "activeLeaseCount", "unresolvedResources")
     )
+
+
+def _step_start_rejected(payload: dict | None) -> bool:
+    return (isinstance(payload, dict) and payload.get("ok") is False and payload.get("started") is False
+            and isinstance(payload.get("code"), str) and bool(payload["code"].strip()))
 
 
 def _sha256_file(path: Path) -> str:
@@ -453,8 +481,9 @@ class TaskDomainService:
         state.update(recoveryObservationFailures=0, nextRecoveryObservationAt=0,
                      lastObservationError="", recoveryObservationUnsupportedReason="")
         if state.get("businessTerminal"):
-            state["businessCleanupPending"] = not payload["terminal"] or _operation_cleanup_pending(payload)
+            state["businessCleanupPending"] = not payload["terminal"] or _operation_cleanup_pending(payload, state)
             state["cleanupBusinessEvidence"] = payload
+            self._retain_step_cleanup_evidence(state, payload)
             # This sample is already validated; do not invoke status twice.
             await self._operation_stop_console_capture(state, observe_business=False)
             return
@@ -476,7 +505,7 @@ class TaskDomainService:
             state["status"] = ("Succeeded" if _is_success_status(status, mapping) else
                                "Canceled" if status in {"canceled", "cancelled", "aborted"} else
                                "Timeout" if status in {"timeout", "timedout"} else "Failed")
-            state["businessCleanupPending"] = _operation_cleanup_pending(payload)
+            state["businessCleanupPending"] = _operation_cleanup_pending(payload, state)
             state["endedAt"] = now_ms()
             self._mark_repeat_failure(state)
             await self._operation_stop_console_capture(state)
@@ -945,6 +974,21 @@ class TaskDomainService:
             detail = validation.error.detail if validation.error else {}
             return fail(request_id, "INVALID_JOB_SPEC", "jobSpec validation failed.", detail)
         job_spec = dict((validation.data or {}).get("normalizedJobSpec") or job_spec or {})
+        # Runtime admission is separate from static Validate and precedes both
+        # Operation-owned Capture and the executor's own side-effect boundary.
+        try:
+            admission = await self.dispatcher.call(request_id, "automation.steps.admission", {
+                "planJson": json.dumps(job_spec["stepPlan"], ensure_ascii=False, allow_nan=False),
+            })
+        except Exception as exc:
+            return fail(request_id, "STEP_ADMISSION_UNKNOWN", str(exc), {"started": False})
+        admission_data = admission.data if isinstance(admission.data, dict) else {}
+        if admission.ok and _step_start_rejected(admission_data):
+            return fail(request_id, admission_data["code"], admission_data.get("message") or "Step admission rejected.", admission_data)
+        if not admission.ok or admission_data.get("ok") is not True:
+            return fail(request_id, "STEP_ADMISSION_UNKNOWN", "Step admission could not be established; execution was not started.", {
+                "started": False, "admission": self._tool_response_summary(admission),
+            })
         if "stepPlan" in job_spec:
             # Materialize only after validation. JSON text is opaque to placeholder expansion.
             job_spec["startCall"] = {"kind": "bridge", "route": "automation.steps.start", "payload": {
@@ -1078,6 +1122,18 @@ class TaskDomainService:
             return fail(request_id, "OPERATION_START_UNKNOWN", state["error"], self._public_operation_state(state))
 
         payload, payload_error, payload_diagnostic = self._operation_adapt_payload(start_result, start_call, job_spec)
+        if not payload_error and _step_start_rejected(payload):
+            # Admission was rechecked by Start after Capture. This response proves
+            # there is no business run to cancel or observe; release only our Capture.
+            state.update(startRejected=True, startRejection=payload, status="Failed", phase="StartRejected",
+                         error=payload["code"], detail=payload.get("message") or "", failureSignature=payload["code"],
+                         businessCleanupPending=False, endedAt=now_ms())
+            await self._operation_stop_console_capture(state, observe_business=False)
+            self._finalize_operation_timing(state)
+            if not self._save_operation(state):
+                return fail(request_id, "OPERATION_PERSIST_FAILED", state.get("persistenceError", "Archive failed"), self._public_operation_state(state))
+            self._resume_operation_observer(state)
+            return fail(request_id, payload["code"], payload.get("message") or "Step admission rejected.", self._public_operation_state(state))
         if payload_error:
             state["parseDiagnostic"] = payload_diagnostic
             state["status"] = "RecoveryRequired"
@@ -1106,7 +1162,7 @@ class TaskDomainService:
             return fail(request_id, "OPERATION_PERSIST_FAILED", state["error"], self._public_operation_state(state))
         mapping = job_spec.get("terminalStatusMapping")
         if _is_terminal_status(str(state["status"]), mapping):
-            state["businessCleanupPending"] = _operation_cleanup_pending(payload)
+            state["businessCleanupPending"] = _operation_cleanup_pending(payload, state)
             if _is_success_status(str(state["status"]), mapping):
                 state["status"] = "Succeeded"
             elif str(state["status"]).strip().lower() in {"canceled", "cancelled", "aborted"}:
@@ -1118,6 +1174,7 @@ class TaskDomainService:
             state["endedAt"] = now_ms()
             self._mark_repeat_failure(state)
             await self._operation_stop_console_capture(state)
+            state.pop("_deferredArtifactCollection", None)
             await self.operation_collect_artifacts(operation_id)
         else:
             state["status"] = "Running"
@@ -1143,7 +1200,7 @@ class TaskDomainService:
         if not state.get("endedAt") and (state.get("status") == "RecoveryRequired" or state.get("recoveryObservationOnly")):
             await self._observe_operation_recovery(state)
             return ok(request_id, self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state))
-        if not state.get("startEstablished"):
+        if not state.get("startEstablished") and not state.get("businessTerminal"):
             return ok(request_id, self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state))
         if state.get("endedAt"):
             mapping = state.get("jobSpec", {}).get("terminalStatusMapping")
@@ -1268,7 +1325,7 @@ class TaskDomainService:
                         and not _is_terminal_status(str(state["status"]), mapping)):
                     state.update(status="Failed", phase="UnexpectedPlayModeExit", error="PlayMode exited without a correlated operation request.",
                                  failureSignature="OperationUnexpectedPlayModeExit")
-        cleanup_pending = _operation_cleanup_pending(payload)
+        cleanup_pending = _operation_cleanup_pending(payload, state)
         state["cleanupPending"] = cleanup_pending
         if _is_terminal_status(str(state["status"]), mapping):
             state["businessCleanupPending"] = cleanup_pending
@@ -1364,9 +1421,26 @@ class TaskDomainService:
 
             await self._operation_read_console_capture(state)
             if state.get("endedAt"):
-                await self.operation_collect_artifacts(operation_id)
+                final_step = state.get("lastStatusData") or {}
+                final_step_collection_scheduled = (
+                    _official_step_cleanup_outcome(state, final_step) in {"Verified", "Unverified", "NotRequired"}
+                    and final_step.get("cleanupPending") is False and state.get("_stepFinalArtifactsObserved")
+                )
+                # New Step runs schedule the final snapshot once at its source:
+                # Start or the status decorator. Wait must not collect it again,
+                # including after a failed automatic collection. Explicit collect
+                # remains available, and legacy records retain their original path.
+                if not final_step_collection_scheduled:
+                    await self.operation_collect_artifacts(operation_id)
                 self._finalize_operation_timing(state)
                 payload = self._public_operation_state(state, detail_level, max_tail_chars, include_raw_state)
+                if final_step_collection_scheduled and isinstance(status_result.data, dict):
+                    # The status decorator may have failed to persist its automatic
+                    # collection. Preserve that result without retrying the read or
+                    # replacing the original business terminal result.
+                    for name in ("collectionPersisted", "artifactPersistenceError", "artifactCollectionSequence"):
+                        if name in status_result.data:
+                            payload[name] = status_result.data[name]
                 payload["changes"] = changes
                 return ok(request_id, payload) if status_result.ok else status_result
 
@@ -1459,7 +1533,7 @@ class TaskDomainService:
             return ok(request_id, {"operationId": operation_id, "status": "not_found", "changed": False})
         if state.get("cancelRequested"):
             return ok(request_id, {"operationId": operation_id, "status": "ending", "changed": False})
-        if not state.get("startEstablished"):
+        if not state.get("startEstablished") and not state.get("businessTerminal"):
             state.update(status="aborted", phase="aborted", terminal=True, endedAt=now_ms(),
                          cleanupPending=False, cleanupSucceeded=False,
                          error="Original start identity is unavailable; execution was interrupted.")
@@ -1495,7 +1569,7 @@ class TaskDomainService:
         state["cancelAccepted"] = bool(result.ok)
         cancel_payload, cancel_payload_error, cancel_payload_diagnostic = self._operation_adapt_payload(result, cancel_call, state["jobSpec"])
         cleanup_state_explicit = _operation_cleanup_state_is_explicit(cancel_payload)
-        cleanup_pending = _operation_cleanup_pending(cancel_payload) if cleanup_state_explicit else bool(result.ok)
+        cleanup_pending = _operation_cleanup_pending(cancel_payload, state) if cleanup_state_explicit else bool(result.ok)
         state["cleanupPending"] = cleanup_pending
         cancel_status = _normalize_status(cancel_payload.get("status")) if cancel_payload and "status" in cancel_payload else ""
         cancel_terminal = (
@@ -1994,7 +2068,31 @@ class TaskDomainService:
             pass
         if isinstance(payload.get("artifacts"), dict):
             state["artifactHints"] = payload["artifacts"]
+        self._retain_step_cleanup_evidence(state, payload)
         self._merge_operation_milestones(state, payload)
+
+    @staticmethod
+    def _retain_step_cleanup_evidence(state: dict, payload: dict) -> None:
+        outcome = _official_step_cleanup_outcome(state, payload)
+        if not outcome:
+            return
+        state["cleanupOutcome"] = outcome
+        state["businessCleanupSucceeded"] = (
+            outcome in {"Verified", "NotRequired"} and payload.get("cleanupSucceeded") is True)
+        unresolved = payload.get("unresolvedResources")
+        state["businessUnresolvedResources"] = copy.deepcopy(unresolved) if isinstance(unresolved, list) else []
+        report_outcome = payload.get("reportOutcome")
+        if isinstance(report_outcome, str) and report_outcome in {"Pending", "Written", "Failed"}:
+            state["reportOutcome"] = report_outcome
+        # Keep the final report declarations without replacing the already latched
+        # business failure with a later cleanup result.
+        state["lastStatusData"] = copy.deepcopy(payload)
+        if isinstance(payload.get("artifacts"), dict):
+            state["artifactHints"] = copy.deepcopy(payload["artifacts"])
+        if (outcome != "Pending" and payload.get("cleanupPending") is False
+                and not state.get("_stepFinalArtifactsObserved")):
+            state["_stepFinalArtifactsObserved"] = True
+            state["_deferredArtifactCollection"] = True
 
     @staticmethod
     def _merge_operation_milestones(state: dict, payload: dict) -> None:
@@ -2120,25 +2218,30 @@ class TaskDomainService:
             )
         state["endedAt"] = 0
         state["status"], state["phase"] = "CleaningUp", "Cleanup"
-        if observe_business and state.get("businessCleanupPending") and not first_cleanup:
+        if (observe_business and state.get("businessCleanupPending") and not first_cleanup
+                and now_ms() < state["cleanupDeadlineAt"]):
             try:
                 call = state.get("resolvedStatusCall") or self._resolve_operation_call(state["jobSpec"]["statusCall"], state)
                 result = await asyncio.wait_for(
-                    self._operation_invoke(call, state["operationId"]), timeout=5)
+                    self._operation_invoke(call, state["operationId"]),
+                    timeout=max(0, min(5, (state["cleanupDeadlineAt"] - now_ms()) / 1000)))
                 if state.get("terminal"):
                     return
                 payload, error, diagnostic = self._operation_adapt_payload(result, call, state["jobSpec"])
                 if error:
                     state["parseDiagnostic"] = diagnostic
                 if result.ok and not error and not self._operation_identity_mismatch(state, payload) and _operation_cleanup_state_is_explicit(payload):
-                    state["businessCleanupPending"] = _operation_cleanup_pending(payload)
+                    state["businessCleanupPending"] = _operation_cleanup_pending(payload, state)
                     state["cleanupBusinessEvidence"] = payload
+                    self._retain_step_cleanup_evidence(state, payload)
             except Exception as exc:
                 state["cleanupBusinessError"] = str(exc)
         capture = state.get("consoleCapture") or {}
-        if not capture.get("stopped") or not capture.get("artifactsVerified"):
+        if ((not capture.get("stopped") or not capture.get("artifactsVerified"))
+                and now_ms() < state["cleanupDeadlineAt"]):
             try:
-                await asyncio.wait_for(self._stop_owned_operation_capture(state), timeout=5)
+                await asyncio.wait_for(self._stop_owned_operation_capture(state),
+                                       timeout=max(0, min(5, (state["cleanupDeadlineAt"] - now_ms()) / 1000)))
             except Exception as exc:
                 capture["stopError"] = str(exc)
             if state.get("terminal") or state.get("phase") == "persistence_failed":
@@ -2149,12 +2252,14 @@ class TaskDomainService:
         state["cleanupTerminal"] = resources_done
         if resources_done:
             state.setdefault("cleanupEndedAt", now_ms())
-        require_edit = state["jobSpec"].get("cleanup", {}).get("requireEditMode", False)
+        require_edit = (state["jobSpec"].get("cleanup", {}).get("requireEditMode", False)
+                        and not state.get("startRejected"))
         editor_done = not require_edit
         state["editorVerification"] = "not_requested" if not require_edit else "pending"
-        if require_edit:
+        if require_edit and now_ms() < state["cleanupDeadlineAt"]:
             try:
-                observed = await asyncio.wait_for(self.mcp_status(force_fresh=True, include_capabilities=False), timeout=5)
+                observed = await asyncio.wait_for(self.mcp_status(force_fresh=True, include_capabilities=False),
+                                                 timeout=max(0, min(5, (state["cleanupDeadlineAt"] - now_ms()) / 1000)))
                 if state.get("terminal"):
                     return
                 editor = (observed.data or {}).get("executionState", {})
@@ -2181,9 +2286,17 @@ class TaskDomainService:
             (["consoleCapture:" + str(capture.get("sessionId"))] if not capture_done else [])
             + (["businessCleanup"] if state.get("businessCleanupPending") else [])
             + (["authoritativeEditMode"] if not editor_done else [])
+            + state.get("businessUnresolvedResources", [])
         )
+        if "businessCleanupSucceeded" in state:
+            state["cleanupSucceeded"] = (resources_done and editor_done
+                                         and state["businessCleanupSucceeded"] is True
+                                         and not state["unresolvedResources"])
         if not state["cleanupPending"]:
             state.update(state["businessResult"])
+            if state.get("businessCleanupSucceeded") is False and _is_success_status(str(state.get("status") or ""), state["jobSpec"].get("terminalStatusMapping")):
+                state.update(status="Failed", phase="CleanupUnverified", error="Step cleanup was not verified.",
+                             failureSignature="STEP_CLEANUP_UNVERIFIED")
             if state.get("cleanupFailureSignature") and _is_success_status(str(state.get("status") or ""), state["jobSpec"].get("terminalStatusMapping")):
                 state.update(status="Failed", phase="CleanupTimeout", error=state["cleanupError"],
                              failureSignature=state["cleanupFailureSignature"])
@@ -2422,11 +2535,16 @@ class TaskDomainService:
             "parseDiagnostic": state.get("parseDiagnostic"),
             "repeatFailure": state.get("repeatFailure", False),
             "startAttemptCount": state.get("startAttemptCount", 0),
+            "startRejected": state.get("startRejected", False),
+            "startRejection": state.get("startRejection", {}),
             "cancelRequested": state.get("cancelRequested", False),
             "cancelAccepted": state.get("cancelAccepted", False),
             "cancelRequestedAt": state.get("cancelRequestedAt", 0),
             "cancelAttemptCount": state.get("cancelAttemptCount", 0),
             "cleanupPending": state.get("cleanupPending", False),
+            "cleanupSucceeded": state.get("cleanupSucceeded", False),
+            "cleanupOutcome": state.get("cleanupOutcome", ""),
+            "reportOutcome": state.get("reportOutcome", ""),
             "businessTerminal": state.get("businessTerminal", False),
             "unresolvedResources": state.get("unresolvedResources", []),
             "cleanupTerminal": state.get("cleanupTerminal", False),

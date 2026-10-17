@@ -24,7 +24,7 @@ namespace CodingRiver.UPilot.Tests.Automation
         private static readonly FieldInfo ErrorField = Field("s_initializationError");
         private readonly List<string> _reports = new();
         private AutomationStepExecutor _originalExecutor;
-        private object _originalRegistry, _originalStore, _originalError;
+        private object _originalRegistry, _originalStore, _originalError, _originalAdmission;
         private string _directory, _store;
         private bool _isolated;
         private static AutomationStepExecutor Executor => (AutomationStepExecutor)ExecutorField.GetValue(null);
@@ -54,6 +54,7 @@ namespace CodingRiver.UPilot.Tests.Automation
             _originalRegistry = RegistryField.GetValue(null);
             _originalStore = StoreField.GetValue(null);
             _originalError = ErrorField.GetValue(null);
+            _originalAdmission = Field("s_readAdmission").GetValue(null);
             _directory = Path.GetFullPath(Path.Combine(Application.dataPath,
                 "../Library/UPilot/StepServiceTests/" + Guid.NewGuid().ToString("N")));
             Directory.CreateDirectory(_directory);
@@ -66,6 +67,8 @@ namespace CodingRiver.UPilot.Tests.Automation
             StoreField.SetValue(null, _store);
             ErrorField.SetValue(null, "");
             ExecutorField.SetValue(null, new AutomationStepExecutor(registry, _store, failureDiagnostic: message => TestContext.WriteLine(message)));
+            Field("s_readAdmission").SetValue(null, new Func<UPilotAutomationStepService.AdmissionObservation>(() =>
+                AdmissionObservation("edit", UPilotAutomationStepService.GetCurrentSnapshot())));
             Invoke("RefreshUpdateSubscription");
         }
 
@@ -81,6 +84,7 @@ namespace CodingRiver.UPilot.Tests.Automation
                 RegistryField.SetValue(null, _originalRegistry);
                 StoreField.SetValue(null, _originalStore);
                 ErrorField.SetValue(null, _originalError);
+                Field("s_readAdmission").SetValue(null, _originalAdmission);
                 Invoke("RefreshUpdateSubscription");
                 _isolated = false;
             }
@@ -105,6 +109,180 @@ namespace CodingRiver.UPilot.Tests.Automation
         }
         private static int UpdateSubscriptions => EditorApplication.update?.GetInvocationList().Count(callback =>
             callback.Method.DeclaringType == Service && callback.Method.Name == "Update") ?? 0;
+
+        private static UPilotAutomationStepService.AdmissionObservation AdmissionObservation(string mode = "edit",
+            UPilotAutomationStepService.CurrentSnapshot executor = null) => new()
+        {
+            currentMode = mode,
+            context = new EditorContextPayload { connected = true, authoritative = true,
+                compilePhase = "completed", playModeState = mode },
+            executor = executor ?? new UPilotAutomationStepService.CurrentSnapshot { initialized = true },
+        };
+
+        [TestCase("queued")] [TestCase("compiling")] [TestCase("compiler_finished")]
+        [TestCase("domain_reload")] [TestCase("verifying")]
+        public void AdmissionRejectsEveryActiveCompilePhaseEvenWhenRawCompilingIsFalse(string phase)
+        {
+            var observation = AdmissionObservation();
+            observation.context.compilePhase = phase;
+            var result = UPilotAutomationStepService.CheckAdmission(Plan(Item("probe")), observation);
+            Assert.That(result.ok, Is.False);
+            Assert.That(result.started, Is.False);
+            Assert.That(result.code, Is.EqualTo("STEP_EDITOR_COMPILING"));
+        }
+
+        [TestCase("enteringPlay")] [TestCase("exitingPlay")]
+        public void AdmissionRejectsModeTransitions(string mode)
+        {
+            var result = UPilotAutomationStepService.CheckAdmission(Plan(Item("probe")), AdmissionObservation(mode));
+            Assert.That(result.code, Is.EqualTo("STEP_MODE_TRANSITION_BUSY"));
+        }
+
+        [TestCase("stale", "STEP_EDITOR_STATE_UNAVAILABLE")]
+        [TestCase("disconnected", "STEP_EDITOR_STATE_UNAVAILABLE")]
+        [TestCase("unauthoritative", "STEP_EDITOR_STATE_UNAVAILABLE")]
+        [TestCase("unknown_compile", "STEP_EDITOR_STATE_UNAVAILABLE")]
+        [TestCase("failed_compile", "STEP_EDITOR_COMPILE_FAILED")]
+        [TestCase("unknown_mode", "STEP_EDITOR_STATE_UNAVAILABLE")]
+        [TestCase("mode_mismatch", "STEP_EDITOR_STATE_UNAVAILABLE")]
+        [TestCase("updating", "STEP_EDITOR_UPDATING")]
+        [TestCase("busy", "STEP_EXECUTOR_BUSY")]
+        [TestCase("initializing", "STEP_SERVICE_INITIALIZING")]
+        public void AdmissionRejectsUnreadyFacts(string reason, string code)
+        {
+            var observation = AdmissionObservation();
+            switch (reason)
+            {
+                case "stale": observation.context.isStale = true; break;
+                case "disconnected": observation.context.connected = false; break;
+                case "unauthoritative": observation.context.authoritative = false; break;
+                case "unknown_compile": observation.context.compilePhase = "unknown"; break;
+                case "failed_compile": observation.context.compilePhase = "failed"; break;
+                case "unknown_mode": observation.currentMode = "unknown"; break;
+                case "mode_mismatch": observation.context.playModeState = "play"; break;
+                case "updating": observation.isUpdating = true; break;
+                case "busy": observation.executor.busy = true; break;
+                case "initializing": observation.executor.initialized = false; break;
+            }
+            var result = UPilotAutomationStepService.CheckAdmission(Plan(Item("probe")), observation);
+            Assert.That(result.ok, Is.False);
+            Assert.That(result.code, Is.EqualTo(code));
+        }
+
+        [TestCase("edit")] [TestCase("play")] [TestCase("pause")]
+        public void AdmissionPreservesStableCustomPlansAndDoesNotApplyEditOnlyReadiness(string mode)
+        {
+            var observation = AdmissionObservation(mode);
+            observation.context.ready = mode == "edit";
+            observation.context.blocked = mode != "edit";
+            observation.context.blockedReason = mode == "edit" ? "" : "PlayMode";
+            Assert.That(UPilotAutomationStepService.CheckAdmission(Plan(Item("probe")), observation).ok, Is.True);
+        }
+
+        [TestCase("upilot.open_scene", "Assets/Scene.unity")]
+        [TestCase("upilot.enter_play_mode", "Assets/Scene.unity")]
+        public void AdmissionRequiresExplicitEditTransitionThroughOnlyKnownNeutralPrefix(string stepId, string arguments)
+        {
+            var target = Item(stepId, arguments);
+            var plan = Plan(Item("upilot.console_capture_start"), Item("upilot.wait_seconds", "1"), target);
+            var rejected = UPilotAutomationStepService.CheckAdmission(plan, AdmissionObservation("play"));
+            Assert.That(rejected.ok, Is.False);
+            Assert.That(rejected.code, Is.EqualTo("STEP_EDIT_MODE_REQUIRED"));
+            Assert.That(rejected.currentMode, Is.EqualTo("play"));
+            Assert.That(rejected.instanceId, Is.EqualTo(target.instanceId));
+            Assert.That(UPilotAutomationStepService.CheckAdmission(
+                Plan(Item("upilot.enter_edit_mode"), target), AdmissionObservation("play")).ok, Is.True);
+        }
+
+        [TestCase("probe", "")]
+        [TestCase("upilot.capture_snapshot", "")]
+        [TestCase("upilot.enter_play_mode", "")]
+        public void AdmissionStopsModeInferenceAtCustomSnapshotOrExplicitPlayStep(string stepId, string arguments)
+        {
+            var plan = Plan(Item(stepId, arguments), Item("upilot.open_scene", "Assets/Scene.unity"));
+            Assert.That(UPilotAutomationStepService.CheckAdmission(plan, AdmissionObservation("pause")).ok, Is.True);
+        }
+
+        [Test]
+        public void FinallyDoesNotImposeStartupEditMode()
+        {
+            var plan = Plan(Item("upilot.wait_seconds", "1"), Item("upilot.open_scene", "Assets/Scene.unity", "Finally"));
+            Assert.That(UPilotAutomationStepService.CheckAdmission(plan, AdmissionObservation("play")).ok, Is.True);
+        }
+
+        [Test]
+        public void RuntimeAdmissionDoesNotCreateRunReportOrAdvanceCallbacks()
+        {
+            var before = Directory.GetFiles(_directory, "*", SearchOption.AllDirectories);
+            var result = JsonUtility.FromJson<UPilotAutomationStepService.AdmissionResult>(
+                UPilotAutomationStepService.AdmissionJson(JsonUtility.ToJson(Plan(Item("probe")))));
+            Assert.That(result.ok, Is.True);
+            Assert.That(result.started, Is.False);
+            Assert.That(Executor.State, Is.Null);
+            Assert.That(Calls, Is.Empty);
+            Assert.That(Directory.GetFiles(_directory, "*", SearchOption.AllDirectories), Is.EqualTo(before));
+            Assert.That(UpdateSubscriptions, Is.Zero);
+        }
+
+        [Test]
+        public void StaticValidateDoesNotReadRuntimeAdmission()
+        {
+            Field("s_readAdmission").SetValue(null, new Func<UPilotAutomationStepService.AdmissionObservation>(
+                () => throw new InvalidOperationException("Runtime admission must not be read by static validation.")));
+            Assert.That(JsonUtility.FromJson<AutomationStepValidation>(UPilotAutomationStepService.ValidateJson(
+                JsonUtility.ToJson(Plan(Item("probe"))))).ok, Is.True);
+        }
+
+        [TestCase("Verified", "Verified", true)]
+        [TestCase("NotRequired", "NotRequired", true)]
+        [TestCase("Verified", "SkippedByFinallyFailure", false)]
+        [TestCase("Verified", "Unresolved", false)]
+        [TestCase("Unverified", "Verified", false)]
+        [TestCase("", "Verified", false)]
+        public void PublicCleanupRequiresBothFrameworkAndBusinessVerification(string framework, string business, bool expected)
+        {
+            var run = new AutomationStepRun { terminal = true, status = "Failed", cleanupOutcome = framework,
+                reportOutcome = "Written", runId = "failed-run", operationId = "operation" };
+            run.steps.Add(new AutomationStepRecord { cleanupState = business, stage = "Completed" });
+            var result = UPilotAutomationStepService.Public(run);
+            Assert.That(result.businessTerminal, Is.True);
+            Assert.That(result.cleanupOutcome, Is.EqualTo(framework));
+            Assert.That(result.reportOutcome, Is.EqualTo("Written"));
+            Assert.That(result.cleanupSucceeded, Is.EqualTo(expected));
+            run.unresolvedResources = new[] { "capture:unverified" };
+            Assert.That(UPilotAutomationStepService.Public(run).cleanupSucceeded, Is.False);
+        }
+
+        [Test]
+        public void StartRechecksAdmissionAndPreservesDeterministicNotStartedResult()
+        {
+            string plan = JsonUtility.ToJson(Plan(Item("probe")));
+            Assert.That(JsonUtility.FromJson<UPilotAutomationStepService.AdmissionResult>(
+                UPilotAutomationStepService.AdmissionJson(plan)).ok, Is.True);
+            var observation = AdmissionObservation("play");
+            observation.context.compilePhase = "compiler_finished";
+            Field("s_readAdmission").SetValue(null, new Func<UPilotAutomationStepService.AdmissionObservation>(() => observation));
+            UnityEngine.TestTools.LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex("STEP_EDITOR_COMPILING"));
+            var rejected = JsonUtility.FromJson<UPilotAutomationStepService.StateResult>(
+                UPilotAutomationStepService.StartJson("race-" + Guid.NewGuid().ToString("N"), "", plan));
+            Assert.That(rejected.ok, Is.False);
+            Assert.That(rejected.started, Is.False);
+            Assert.That(rejected.code, Is.EqualTo("STEP_EDITOR_COMPILING"));
+            Assert.That(rejected.currentMode, Is.EqualTo("play"));
+            Assert.That(rejected.runId, Is.Null.Or.Empty);
+            Assert.That(Executor.State, Is.Null);
+            Assert.That(Calls, Is.Empty);
+            Assert.That(File.Exists(_store), Is.False);
+        }
+
+        [TestCase("admission")] [TestCase("start")]
+        public void StepAdmissionRoutesReachTheirOwnCompileCheckAndAllowPlayMode(string action)
+        {
+            string route = "automation.steps." + action;
+            Assert.That((bool)typeof(UPilotBridge).GetMethod("IsCompileObservation", BindingFlags.Static | BindingFlags.NonPublic)
+                .Invoke(null, new object[] { route }), Is.True);
+            Assert.That(UPilotCommandRouter.AutomationStepDescriptor(route, action).PlayModePolicy, Is.EqualTo("allowed"));
+        }
 
         [Test] public void CompilationDuringRestoreConstructionInterruptsTheUnpublishedExecutor()
         {

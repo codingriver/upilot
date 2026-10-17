@@ -155,10 +155,15 @@ class StepService(_OperationService):
     def __init__(self, project):
         super().__init__(project, [])
         self.validations = []
+        self.admissions = []
         self.validation_reply = {"ok": True, "budgetSeconds": 60, "diagnostics": []}
+        self.admission_reply = {"ok": True, "started": False}
         self.dispatcher = SimpleNamespace(call=self.validate_bridge)
 
     async def validate_bridge(self, request_id, route, payload):
+        if route == "automation.steps.admission":
+            self.admissions.append(json.loads(payload["planJson"]))
+            return ok(request_id, self.admission_reply)
         assert route == "automation.steps.validate"
         self.validations.append(json.loads(payload["planJson"]))
         return ok(request_id, self.validation_reply)
@@ -177,7 +182,7 @@ def test_production_step_validation_has_no_run_capture_or_execute(tmp_path):
     result = asyncio.run(service.operation_validate(job))
     assert result.ok and result.data["valid"] and result.data["normalizedJobSpec"]["cleanup"]["timeoutSec"] == 30
     assert service.validations == [job["stepPlan"]]
-    assert not service.calls and not service._operations and job == before
+    assert not service.calls and not service.admissions and not service._operations and job == before
 
 
 def test_production_step_start_uses_original_executor_route_and_identity_once(tmp_path):
@@ -187,6 +192,7 @@ def test_production_step_start_uses_original_executor_route_and_identity_once(tm
             result = await service.operation_start(step_spec())
             assert result.ok
             assert len(service.validations) == len(service.calls) == 1
+            assert service.admissions == [step_spec()["stepPlan"]]
             state = service._operations[result.data["operationId"]]
             assert state["startEstablished"] and state["startAttemptCount"] == 1
             assert state["resolvedStatusCall"]["payload"]["runId"] == "fake-run"

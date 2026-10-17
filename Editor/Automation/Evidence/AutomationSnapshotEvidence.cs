@@ -16,6 +16,7 @@ namespace CodingRiver.UPilot.Automation
     {
         public string instanceId, evidenceKey, requestKey, arguments, snapshotId = "";
         public string status = "Running", errorCode = "", message = "";
+        public string diagnostic = "";
         public long requestedAt, cancelRequestedAt;
         public bool cancelIntent, unresolved, recorded;
     }
@@ -129,7 +130,7 @@ namespace CodingRiver.UPilot.Automation
             try { result = UPilotSnapshotApiV1.Start(options.capture); }
             catch (Exception ex)
             {
-                Finish(record, options, "STEP_SNAPSHOT_START_UNCONFIRMED", ex.Message, true);
+                Finish(record, options, "STEP_SNAPSHOT_START_UNCONFIRMED", ex.Message, true, ex.ToString());
                 return Result(record);
             }
             if (result.ok && !string.IsNullOrEmpty(result.snapshotId)) record.snapshotId = result.snapshotId;
@@ -202,7 +203,7 @@ namespace CodingRiver.UPilot.Automation
                         "Snapshot did not produce all required trusted evidence.", false);
                     _save();
                 }
-                catch (Exception ex) { Finish(record, options, "STEP_SNAPSHOT_EVIDENCE_INVALID", ex.Message, true); }
+                catch (Exception ex) { Finish(record, options, "STEP_SNAPSHOT_EVIDENCE_INVALID", ex.Message, true, ex.ToString()); }
                 return Result(record);
             }
             if (cancel || _clock() - record.requestedAt >= options.timeoutSeconds * 1000)
@@ -220,7 +221,8 @@ namespace CodingRiver.UPilot.Automation
         }
         /// <summary>Framework-only release. This never calls a Step's Cancel, Poll or Cleanup.</summary>
         internal bool StopAndObserveRelease(AutomationSnapshotRecord record,
-            Func<string, SnapshotApiResultV1> status = null, Func<string, SnapshotApiResultV1> cancel = null)
+            Func<string, SnapshotApiResultV1> status = null, Func<string, SnapshotApiResultV1> cancel = null,
+            Func<bool> withinDeadline = null)
         {
             if (string.IsNullOrEmpty(record.snapshotId)) throw new InvalidDataException("STEP_SNAPSHOT_IDENTITY_INVALID");
             status ??= UPilotSnapshotApiV1.Status;
@@ -243,9 +245,11 @@ namespace CodingRiver.UPilot.Automation
             record.unresolved = true;
             if (!record.cancelIntent)
             {
+                if (withinDeadline != null && !withinDeadline()) return false;
                 record.cancelIntent = true;
                 record.cancelRequestedAt = _clock();
                 _save(); // Durable intent precedes the one native cancellation attempt.
+                if (withinDeadline != null && !withinDeadline()) return false;
                 try { cancel(record.snapshotId); }
                 catch { /* An uncertain response is observed on later ticks, never replayed. */ }
             }
@@ -280,17 +284,18 @@ namespace CodingRiver.UPilot.Automation
             return true;
         }
 
-        internal bool CompleteItem(string instanceId)
+        internal bool CompleteItem(string instanceId, bool stopOnFailure = false)
         {
             foreach (var record in _run.snapshots.Where(s => s.instanceId == instanceId).ToArray())
             {
                 try { Poll(instanceId, record.evidenceKey); }
                 catch (Exception ex)
                 {
-                    // An unobservable resource blocks success, not the remaining Finally steps.
+                    // The executor applies phase-specific failure policy before advancing any item.
                     record.status = "Failed"; record.errorCode = "STEP_SNAPSHOT_OBSERVATION_FAILED";
-                    record.message = ex.Message; record.unresolved = true; _save();
+                    record.message = ex.Message; record.diagnostic = ex.ToString(); record.unresolved = true; _save();
                 }
+                if (stopOnFailure && record.status == "Failed") break;
             }
             return !_run.snapshots.Any(s => s.instanceId == instanceId && s.status == "Running");
         }
@@ -313,10 +318,10 @@ namespace CodingRiver.UPilot.Automation
             }
             _run.registeredArtifacts.Add(artifact);
         }
-        private void Finish(AutomationSnapshotRecord record, Options options, string code, string message, bool unresolved)
+        private void Finish(AutomationSnapshotRecord record, Options options, string code, string message, bool unresolved, string diagnostic = "")
         {
             record.status = unresolved || options.required ? "Failed" : "SucceededWithWarnings";
-            record.errorCode = code; record.message = message; record.unresolved = unresolved;
+            record.errorCode = code; record.message = message; record.diagnostic = diagnostic; record.unresolved = unresolved;
             _save();
         }
         private static string Result(AutomationSnapshotRecord record) => AutomationStepJsonCodec.ResultJson(

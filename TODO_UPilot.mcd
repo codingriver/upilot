@@ -1,5 +1,13 @@
 # UPilot 活动改进清单
 
+## UPilot-20261017-UPMGitRenameLockDiagnostics / P2：Git 包缓存重命名失败的占用诊断
+
+- 观察：2026-10-17，精确项目 `F:/trunk`（Unity 2022.3.62f2）安装 Git 包 v0.3.51、v0.3.52 多次在 `.tmp-<UPM PID>-*/move` 移入最终 PackageCache 目录时报告 EPERM。保存关闭 Unity、隔离旧失败目录并重新解析 v0.3.52 后仍复现；新目录 ACL/目录级 DELETE 访问正常，原生 MoveFileEx 返回 Win32 5。
+- 证据：VS Code 的 trunk 窗口扩展进程 PID 15180 持有新失败子树内 6 个文件句柄；只读复制句柄查询均为 `NumberOfLinks=0, DeletePending=true`。当时 Unity 6324/UPM 26064 未发现该子树句柄。用户保存关闭 trunk 的 VS Code 窗口后，该扩展进程与 Unity/UPM 均已退出；14:10:59 同一目录的原生 MoveFileEx 探测成功并立即恢复原位，原 Win32 5 已消失。复扫可检查范围内无残留命中（141 个进程不可访问、3 个路径查询失败），不能认定全系统无占用。用户重新打开项目后安装恢复：锁文件 hash 为 `0f04fdf34d82a901fe2d703e70df03378b8727f6`，精确 `F:/trunk` 的 HTTP MCP 返回 Git 包 `io.github.codingriver.upilot` 版本 `0.3.52`、Editor ready；自动编译 `33067d748d2b497ab39ee8803bb3b233` 已完成并核验 0 错误、2217 警告，当前 Console 的 EPERM 匹配为 0。未定位具体扩展或最初删除文件的进程，未运行业务测试；通用诊断能力仍为待实现。
+- 影响流程：UPM Git 包安装/升级及无 Bridge 时的安装恢复；只有通用 EPERM，容易反复换 tag、清缓存或重启 Unity，仍无法指出持续占用来源。
+- 改进建议：在现有安装/诊断入口增加范围受限的只读 Windows 重命名故障报告，关联精确项目、源/目标、版本/commit、Unity/UPM PID、原始 Win32 错误及文件句柄 owner/DeletePending；权限不足明确 unknown，输出前脱敏。恢复建议限定目标缓存与对应应用，不自动关闭句柄、终止 IDE、清空 Library 或重发发布。
+- 验收标准：用隔离临时目录和受控待删除文件句柄覆盖拒绝重命名、诊断占用、释放后恢复及权限不足；报告不混用并行 Unity 的全局 upm.log，不把目录权限正常或旧缓存隔离写成修复通过。状态：Open；本轮仅记录现场与候选能力，未实现或运行该通用验收。
+
 ## UPilot-20261016-ShutdownHelloResetProtection / P1：停服握手重置保护与生命周期诊断
 
 - 现场：trunk 2026-10-16 的两个用户指定日志显示，旧服务停止观察在约 2.61 秒处被 `service_reset` 终止，尚未取得进程退出和双端口释放证据；8 秒复用窗口内“收到认证响应”和主线程应用无法区分。原 hello 在首次空绑定或服务换代时直接重置任务，未检查停止操作及旧回调身份。
@@ -1523,3 +1531,12 @@ V04最新复验原Task task-83b34019-815b-4fa5-8f0f-09f065916c9f、runGuid 4cf4c
 - 定向验证：最终原批 `wb-d7054cdb-4746-46b1-bd82-9a8ba561f50e` verified/passed，correlationVerified/errorsVerified=true，compileOperationId=`eddf31f3f3b2406c8ecfcc86a1171eb3`，结构化编译错误 0。EditMode 精确 5 项全部通过、0 skipped；包含仅 update 驱动恢复、重复/迟到回调不重放、停止/重置/Reload 清理。task=`task-24e3a5ed-10dd-4814-976e-73bab09fa4d4`，run=`515284a6-dbbe-4b66-b3b6-8d371eac9e26`，acceptancePassed/cleanupVerified/testIdentityVerified/sourceUnchanged=true。
 - 证据：`Tests~/UPilotTest/Log/P0P1/recovery-update-20261017/`；验收报告 `Logs/UPilot/Reports/Acceptance/1792208285281_req-33805bbc-33ef-4a1d-b873-0362f7fb9131/summary.json`（528084 bytes，SHA256 `3276c3846f7f5495bda7a113155f708d5f8b81e3d6f22d40e712a82e37938503`）。首次测试选择因缺参数化完整名称在 runner 启动前拒绝；按发现结果修正为 5 个精确名称后通过，原记录保留。
 - 范围：此次关联编译后的 Domain Reload 自动恢复连接，Server PID28124、Unity PID3680 保持不变。未执行全套回归，未强制切换焦点进行对照实验，不能据此确认原约160秒等待的焦点因果；主线程停止更新时仍可能延迟。
+
+## UPilot-20261017-StepFinallyFailStop / P1：Finally 失败后统一停止并保留有界清理、报告证据
+
+- 观察：旧执行器在 Finally 普通失败后仍可能继续后续恢复步骤；执行/清理超时虽直接结束，却缺少余项 Skipped、当前项完整终态和失败报告。最初故障是 Normal 打开场景被 EditMode 要求拒绝，随后 Finally 退出 PlayMode 用旧 30 秒默认值超时；历史记录保持只读。
+- 改进：统一 Finally 首次硬失败冻结出口，补齐当前项和未开始余项记录，禁止冻结后的业务回调；仅 Capture/Snapshot/Gizmos 使用当前 Step 的一次清理预算，持久化停止意图后最多派发一次。SessionState 终态标记必须随所有资源意图保存同步更新，避免 Reload 用旧标记回滚已派发意图。框架清理验证与业务恢复记录分别表达，未验证资源不重新打开任务；有限收尾后写一次失败报告并保留首错、次错及真实产物。
+- 准入与默认值：Operation Capture 前和 Unity Run 副作用前共用只读运行时准入；模式切换须由显式 Step 完成。enter_edit_mode / enter_play_mode 180 秒，open_scene 120 秒，console_capture_start / capture_snapshot 20 秒，wait_seconds 仍 30 秒，显式计划值优先。
+- 验证：规范 D:/upilot/Tests~/UPilotTest 的四个原登记批次均 verified/passed；9 个直接夹具共 342/342 passed、0 skipped，resultAuthoritative/cleanupSucceeded=true。包括构造/Execute/Poll/GetError/Cancel/Cleanup/Restore/Snapshot 失败、期限与一次性派发、Store/报告失败、Reload、编译中断和既有生命周期日志回归。Console 范围完整，分阶段覆盖仍 partial，不冒称全量日志完整。
+- 现场补充：官方 Normal/Finally 正常冒烟成功；初轮预期 Finally 超时样本 op-f288d869-ff36-4c18-b406-5628c5a688d7 在 540ms 结束，后继 Skipped 且 startedAt=0，reportOutcome=Written；业务恢复未执行不记清理成功。现场发现并修复 wait 在 status 自动收集后重复读取同一终态附件，以及重建响应时丢失附件存档失败诊断的问题，显式 collect 和旧记录兼容保留。最终新样本 op-e5824ff9-c74d-45cb-a412-9d14ba37863b / run 8a88e7f36250484e869ba144baaee26f 在 627ms 以预期 STEP_TIMEOUT 结束，自动附件收集序号为 1，重复 wait 仍为 1、startAttemptCount=1；报告 SHA256=961e7e171a40e785154a913df88db8cf20d2fe9830e0927ad7384d8dc026fcff。
+- 状态：已实现并完成上述 Unity 342 项、Python 最终六文件 203 项定向验证（仅 2 条既有 websockets 弃用警告）和官方入口现场检查。规范项目 Server/Bridge 两次分别加载主体实现及后续去重修正，原维护均 succeeded，Unity PID10016 保持；最终 Server PID20772，选定入口 loaded source equivalent，不代表全模块来源鉴证。规则/Skill 版本 60/71，五个集成目标 current，两个安装 Skill 校验通过；重复同步文件内容/时间戳/备份目录不变。证据：Tests~/UPilotTest/.upilot/validation/step-finally-20261017/acceptance-summary.json。未跑全套、外部项目业务或发布。

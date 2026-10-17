@@ -477,6 +477,13 @@ def test_failed_business_with_unverified_cleanup_ends_once_without_claiming_succ
                 unresolved = ("businessCleanup" if business_gap else "authoritativeEditMode"
                               if gap.startswith("editor_") else "consoleCapture:" + session["sessionId"])
                 assert unresolved in first.data["unresolvedResources"]
+                if business_gap:
+                    # Exercise the invalid follow-up while its original budget is
+                    # open. Expiry must not dispatch another cleanup observation.
+                    clock[0] += 1
+                    waiting = await service.operation_status(state["operationId"], detail_level="full")
+                    assert not waiting.data["terminal"] and waiting.data["cleanupPending"]
+                    assert state["cleanupDeadlineAt"] == deadline
                 # Expire the original budget; do not renew it or wait in real time.
                 clock[0] = deadline + 1
                 final = await service.operation_status(state["operationId"], detail_level="full")

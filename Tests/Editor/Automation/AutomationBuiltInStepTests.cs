@@ -15,6 +15,41 @@ namespace CodingRiver.UPilot.Tests.Automation
 {
     public class AutomationBuiltInStepTests
     {
+        [TestCase(typeof(EnterEditModeStep), "upilot.enter_edit_mode", 180)]
+        [TestCase(typeof(EnterPlayModeStep), "upilot.enter_play_mode", 180)]
+        [TestCase(typeof(OpenSceneStep), "upilot.open_scene", 120)]
+        [TestCase(typeof(ConsoleCaptureStartStep), "upilot.console_capture_start", 20)]
+        [TestCase(typeof(CaptureSnapshotStep), "upilot.capture_snapshot", 20)]
+        [TestCase(typeof(WaitSecondsStep), "upilot.wait_seconds", 30)]
+        public void BuiltInCatalogAndBudgetUseDefaultsWhileExplicitTimeoutWins(Type type, string stepId, double timeout)
+        {
+            var attribute = (AutomationStepAttribute)Attribute.GetCustomAttribute(type, typeof(AutomationStepAttribute));
+            Assert.That(attribute.TimeoutSeconds, Is.EqualTo(timeout));
+            Assert.That(attribute.PollIntervalSeconds, Is.EqualTo(0.1));
+            var registry = new AutomationStepRegistry(new[]
+            {
+                new System.Collections.Generic.KeyValuePair<Type, AutomationStepAttribute>(typeof(BudgetProbe), attribute),
+            });
+            Assert.That(registry.Catalog().Single().stepId, Is.EqualTo(stepId));
+            Assert.That(registry.Catalog().Single().timeoutSeconds, Is.EqualTo(timeout));
+            var item = Item(stepId);
+            Assert.That(item.cleanupTimeoutSeconds, Is.EqualTo(10));
+            Assert.That(AutomationStepPlanValidator.Validate(Plan(item), registry).budgetSeconds,
+                Is.EqualTo(timeout + 10 + 60));
+            item.timeoutSeconds = 7;
+            Assert.That(AutomationStepPlanValidator.Validate(Plan(item), registry).budgetSeconds, Is.EqualTo(7 + 10 + 60));
+        }
+        public sealed class BudgetProbe : AutomationStepBase
+        {
+            public override void Execute(string runId, string instanceId, string contextJson, string arguments) => Succeed();
+        }
+        [Test]
+        public void GenericDefaultsRemainUnchanged()
+        {
+            var attribute = new AutomationStepAttribute("custom");
+            Assert.That(attribute.TimeoutSeconds, Is.EqualTo(30));
+            Assert.That(attribute.PollIntervalSeconds, Is.EqualTo(0.1));
+        }
         [TestCase("-1")] [TestCase("NaN")] [TestCase("Infinity")] [TestCase("text")]
         public void WaitRejectsInvalidSeconds(string seconds)
         { Assert.That(AutomationStepJsonCodec.Validation(new WaitSecondsStep().Validate("", "wait", "{}", seconds)).ok, Is.False); }

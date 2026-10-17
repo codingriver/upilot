@@ -24,6 +24,18 @@ namespace CodingRiver.UPilot.Automation
         }
         [Serializable] private sealed class CatalogResult
         { public AutomationStepDescriptor[] steps; public AutomationDiagnostic[] diagnostics; }
+        [Serializable] internal sealed class AdmissionResult
+        {
+            public bool ok = true, started;
+            public string code = "", message = "", currentMode = "unknown", instanceId = "";
+        }
+        internal sealed class AdmissionObservation
+        {
+            internal EditorContextPayload context;
+            internal string currentMode;
+            internal bool isCompiling, isUpdating;
+            internal CurrentSnapshot executor;
+        }
         [Serializable] internal sealed class FileArtifact
         {
             public string kind = "file";
@@ -42,6 +54,8 @@ namespace CodingRiver.UPilot.Automation
         [Serializable] internal sealed class StateResult
         {
             public bool ok = true;
+            public bool started;
+            public string code = "", message = "", currentMode = "", instanceId = "";
             public string runId, operationId, status, phase, error, detail, failureSignature;
             public bool terminal, cleanupPending;
             public float progress;
@@ -51,6 +65,10 @@ namespace CodingRiver.UPilot.Automation
             public AutomationStepDisposition disposition;
             public bool businessTerminal;
             public string outcome;
+            // Empty outcomes retain unknown semantics for legacy runs; interpret success only with this contract.
+            public string cleanupOutcome = "", reportOutcome = "";
+            public string[] unresolvedResources = Array.Empty<string>();
+            public bool cleanupSucceeded;
         }
         private static AutomationStepExecutor s_executor;
         private static AutomationStepExecutor s_initializingExecutor;
@@ -58,6 +76,7 @@ namespace CodingRiver.UPilot.Automation
         private static AutomationStepRegistry s_registry;
         private static string s_storePath = Path.Combine(Application.dataPath, "../Library/UPilot/step-run.json");
         private static string s_initializationError = "";
+        private static Func<AdmissionObservation> s_readAdmission = ReadAdmission;
         [ThreadStatic] private static CallbackScope s_callback;
         private static readonly int MainThreadId = Thread.CurrentThread.ManagedThreadId;
         private readonly UPilotBridge _bridge;
@@ -240,6 +259,83 @@ namespace CodingRiver.UPilot.Automation
             parsed.budgetSeconds = validation.budgetSeconds;
             return parsed;
         }
+        /// <summary>Read-only runtime preflight. This does not reserve a slot or start any resource.</summary>
+        public static string AdmissionJson(string planJson) => JsonUtility.ToJson(AdmissionPlanJson(planJson, out _));
+        private static AdmissionObservation ReadAdmission() => new()
+        {
+            context = UPilotBridge.Instance.GetEditorExecutionContext("automation.steps.admission"),
+            currentMode = UPilotPlayModeCompilePolicy.CurrentMode,
+            isCompiling = EditorApplication.isCompiling,
+            isUpdating = EditorApplication.isUpdating,
+            executor = GetCurrentSnapshot(),
+        };
+        private static AdmissionResult AdmissionPlanJson(string planJson, out AutomationStepPlan plan)
+        {
+            RequireMainThread();
+            var validation = ValidatePlanJson(planJson, out plan);
+            if (!validation.ok) return new AdmissionResult { ok = false, code = "STEP_PLAN_INVALID",
+                message = JsonUtility.ToJson(validation), currentMode = UPilotPlayModeCompilePolicy.CurrentMode };
+            return CheckAdmission(plan, s_readAdmission());
+        }
+        // Main-thread facts are gathered once above; the shared decision has no Editor mutations or lifecycle calls.
+        internal static AdmissionResult CheckAdmission(AutomationStepPlan plan, AdmissionObservation observation)
+        {
+            var result = new AdmissionResult { currentMode = observation?.currentMode ?? "unknown" };
+            AdmissionResult Reject(string code, string message, string instanceId = "")
+            {
+                result.ok = false; result.code = code; result.message = message; result.instanceId = instanceId;
+                return result;
+            }
+            var context = observation?.context;
+            if (context == null || !context.connected || !context.authoritative || context.isStale)
+                return Reject("STEP_EDITOR_STATE_UNAVAILABLE", "Wait for a fresh authoritative connected Editor state before starting a Step plan.");
+            string phase = context.compilePhase;
+            if (observation.isCompiling || context.isCompiling || context.verificationPending
+                || phase == "queued" || phase == "compiling" || phase == "compiler_finished"
+                || phase == "domain_reload" || phase == "verifying")
+                return Reject("STEP_EDITOR_COMPILING", "Compilation or verification is still in progress; observe its original compile before starting a Step plan.");
+            if (phase != "idle" && phase != "completed" && phase != "failed")
+                return Reject("STEP_EDITOR_STATE_UNAVAILABLE", "The current compile state is unknown; inspect Editor and compile diagnostics.");
+            if (phase == "failed" || context.blockedReason == "CompileErrors")
+                return Reject("STEP_EDITOR_COMPILE_FAILED", "Resolve the reported Unity compile errors before starting a Step plan.");
+            if (observation.isUpdating || context.isUpdating)
+                return Reject("STEP_EDITOR_UPDATING", "Wait for Unity asset updating to finish before starting a Step plan.");
+            string mode = result.currentMode;
+            if (mode == "enteringPlay" || mode == "exitingPlay"
+                || context.playModeState == "enteringPlay" || context.playModeState == "exitingPlay")
+                return Reject("STEP_MODE_TRANSITION_BUSY", "Wait for the current mode transition to reach a stable Editor mode.");
+            if ((mode != "edit" && mode != "play" && mode != "pause")
+                || context.playModeState != mode)
+                return Reject("STEP_EDITOR_STATE_UNAVAILABLE", "Wait for matching authoritative stable Editor mode observations.");
+            if (observation.executor?.initialized != true)
+                return Reject("STEP_SERVICE_INITIALIZING", "Wait for the Step executor to finish initializing.");
+            if (observation.executor.busy)
+                return Reject("STEP_EXECUTOR_BUSY", "The current Step task or its bounded framework cleanup is still active.");
+            foreach (var item in plan.steps)
+            {
+                if (item.phase != "Normal") break;
+                if (item.stepId == "upilot.console_capture_start" || item.stepId == "upilot.wait_seconds") continue;
+                if (item.stepId == "upilot.enter_edit_mode") break;
+                if (item.stepId == "upilot.open_scene"
+                    || item.stepId == "upilot.enter_play_mode" && item.arguments != "")
+                {
+                    if (mode != "edit") return Reject("STEP_EDIT_MODE_REQUIRED",
+                        "Step " + item.instanceId + " requires EditMode. Add an explicit upilot.enter_edit_mode before this step.", item.instanceId);
+                    if (item.stepId == "upilot.open_scene") continue;
+                }
+                // Explicit play transitions control subsequent mode; custom/Snapshot steps retain their own runtime checks.
+                break;
+            }
+            return result;
+        }
+        private static StateResult RejectedStart(AdmissionResult rejection, string operationId, Exception exception = null)
+        {
+            Logger.ReportFailure("STEP", rejection.code + " operationId=" + operationId + " " + rejection.message,
+                exception, scope: operationId ?? "", terminal: true);
+            return new StateResult { ok = false, started = false, operationId = operationId,
+                code = rejection.code, message = rejection.message, currentMode = rejection.currentMode,
+                instanceId = rejection.instanceId, error = rejection.code, detail = rejection.message };
+        }
         /// <summary>Start once after full preflight; the caller retains any supplied Capture ownership.</summary>
         public static string StartJson(string operationId, string captureSessionId, string planJson) =>
             JsonUtility.ToJson(StartPlan(operationId, captureSessionId, planJson));
@@ -247,11 +343,14 @@ namespace CodingRiver.UPilot.Automation
         internal static StateResult StartPlan(string operationId, string captureSessionId, string planJson)
         {
             RequireMainThread();
-            if (EditorApplication.isCompiling) throw new InvalidOperationException("STEP_EDITOR_COMPILING");
-            var validation = ValidatePlanJson(planJson, out var plan);
-            if (!validation.ok) throw new InvalidOperationException("STEP_PLAN_INVALID: " + JsonUtility.ToJson(validation));
-            Initialize();
+            var admission = AdmissionPlanJson(planJson, out var plan);
+            if (!admission.ok) return RejectedStart(admission, operationId);
             try { return Public(s_executor.Start(plan, operationId, captureSessionId)); }
+            catch (InvalidOperationException ex) when (ex.Message == "STEP_EDITOR_COMPILING" || ex.Message == "STEP_EXECUTOR_BUSY")
+            {
+                return RejectedStart(new AdmissionResult { ok = false, code = ex.Message, message = ex.Message,
+                    currentMode = UPilotPlayModeCompilePolicy.CurrentMode }, operationId, ex);
+            }
             finally { RefreshUpdateSubscription(); }
         }
         private static AutomationStepRun State(string runId)
@@ -298,7 +397,7 @@ namespace CodingRiver.UPilot.Automation
                 || run.serviceLifecycleId != serviceLifecycleId || serviceLifecycleId != UPilotServiceLifetime.Id)
                 return new StopReply { status = "not_found" };
             if (run.terminal)
-                return new StopReply { status = s_executor.ReleasingImmediateStopResources ? "ending" : "not_found" };
+                return new StopReply { status = s_executor.ReleasingTerminalResources ? "ending" : "not_found" };
             try { return new StopReply { changed = s_executor.StopImmediately(), status = "stopped" }; }
             finally { RefreshUpdateSubscription(); }
         }
@@ -328,7 +427,7 @@ namespace CodingRiver.UPilot.Automation
         public UPilotAutomationStepService(UPilotBridge bridge) { _bridge = bridge; }
         public void RegisterCommands()
         {
-            foreach (string action in new[] { "catalog", "validate", "start", "state", "cancel", "recover", "release_preview", "release", "artifacts" })
+            foreach (string action in new[] { "catalog", "validate", "admission", "start", "state", "cancel", "recover", "release_preview", "release", "artifacts" })
             {
                 string route = "automation.steps." + action;
                 _bridge.Router.Register(UPilotCommandRouter.AutomationStepDescriptor(route, action),
@@ -348,6 +447,7 @@ namespace CodingRiver.UPilot.Automation
                         completion.SetResult(new CatalogResult { steps = Registry.Catalog(),
                             diagnostics = System.Linq.Enumerable.ToArray(Registry.Diagnostics) }); return;
                     }
+                    if (action == "admission") { completion.SetResult(AdmissionPlanJson(request.planJson, out _)); return; }
                     if (IsNewRunAction(action))
                     {
                         if (action == "validate") completion.SetResult(ValidatePlanJson(request.planJson, out _));
@@ -369,6 +469,7 @@ namespace CodingRiver.UPilot.Automation
                 var result = await completion.Task;
                 if (result is CatalogResult catalog) await _bridge.SendResultAsync(id, route, catalog, token);
                 else if (result is AutomationStepValidation validation) await _bridge.SendResultAsync(id, route, validation, token);
+                else if (result is AdmissionResult admission) await _bridge.SendResultAsync(id, route, admission, token);
                 else if (result is StopReply stopped) await _bridge.SendResultAsync(id, route, stopped, token);
                 else if (result is StateResult state) await _bridge.SendResultAsync(id, route, state, token);
                 else throw new InvalidOperationException("STEP_RESPONSE_INVALID");
@@ -382,6 +483,7 @@ namespace CodingRiver.UPilot.Automation
         }
         internal static StateResult Public(AutomationStepRun run) => new()
         {
+            started = true,
             runId = run.runId, operationId = run.operationId, status = run.status, phase = run.stage,
             error = run.error?.code ?? "", failureSignature = run.error?.code ?? "", detail = run.error?.message ?? "",
             terminal = run.terminal, cleanupPending = run.cleanupPending || !run.terminal,
@@ -389,6 +491,11 @@ namespace CodingRiver.UPilot.Automation
             artifacts = PublicArtifacts(run), domain = run, disposition = run.disposition,
             businessTerminal = run.terminal && string.IsNullOrEmpty(run.disposition?.requestId),
             outcome = string.IsNullOrEmpty(run.disposition?.requestId) ? run.status : "unknown",
+            cleanupOutcome = run.cleanupOutcome ?? "", reportOutcome = run.reportOutcome ?? "",
+            unresolvedResources = run.unresolvedResources ?? Array.Empty<string>(),
+            cleanupSucceeded = (run.cleanupOutcome == "Verified" || run.cleanupOutcome == "NotRequired")
+                && !run.cleanupPending && (run.unresolvedResources?.Length ?? 0) == 0
+                && System.Linq.Enumerable.All(run.steps, step => step.cleanupState == "Verified" || step.cleanupState == "NotRequired"),
         };
         private static ArtifactSet PublicArtifacts(AutomationStepRun run)
         {

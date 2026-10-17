@@ -154,32 +154,7 @@ namespace CodingRiver.UPilot.Automation
                 try { FinalizeGizmos(); }
                 catch (Exception ex) { RecordImmediateStopResourceError("STEP_GIZMOS_RELEASE_UNCONFIRMED", ex.Message, ex.ToString()); }
             }
-            if (_run.captureOwned && _run.captureStartIntent && !_run.captureStopVerified)
-            {
-                try
-                {
-                    _ownedCapture ??= new AutomationRunCapture(_captureStorePath, _run.runId, true);
-                    if (string.IsNullOrEmpty(_run.captureSessionId) && !string.IsNullOrEmpty(_ownedCapture.SessionId))
-                        _run.captureSessionId = _ownedCapture.Observe().sessionId;
-                    if (string.IsNullOrEmpty(_run.captureSessionId) || _ownedCapture.SessionId != _run.captureSessionId)
-                        throw new InvalidOperationException("STEP_CAPTURE_IDENTITY_INVALID");
-                    if (_ownedCapture.StopAndVerify(_clock(), out _, out _, AddImmediateStopArtifacts))
-                        _run.captureStopVerified = true;
-                }
-                catch (Exception ex) { RecordImmediateStopResourceError("STEP_CAPTURE_RELEASE_UNCONFIRMED", ex.Message, ex.ToString()); }
-            }
-            // Persisting the native cancellation intent must succeed before dispatch. Do not use Save(),
-            // whose ordinary failure path resets terminal/cleanup fields.
-            var snapshots = new AutomationSnapshotEvidence(_run, () => _store.Save(_run), _clock);
-            foreach (var record in _run.snapshots.Where(NeedsImmediateStopRelease).ToArray())
-            {
-                try { snapshots.StopAndObserveRelease(record); }
-                catch (Exception ex)
-                {
-                    record.unresolved = true;
-                    RecordImmediateStopResourceError("STEP_SNAPSHOT_RELEASE_UNCONFIRMED", record.snapshotId + ": " + ex.Message, ex.ToString());
-                }
-            }
+            ReleaseOwnedResources();
             if (!HasImmediateStopResources)
             {
                 // Historical errors remain; do not label a subsequently verified release unverified.
@@ -189,6 +164,38 @@ namespace CodingRiver.UPilot.Automation
                 CompleteImmediateStopRelease();
             }
             else PersistImmediateStop();
+        }
+
+        private void ReleaseOwnedResources(Func<bool> withinDeadline = null)
+        {
+            if (withinDeadline != null && !withinDeadline()) return;
+            if (_run.captureOwned && _run.captureStartIntent && !_run.captureStopVerified)
+            {
+                try
+                {
+                    _ownedCapture ??= new AutomationRunCapture(_captureStorePath, _run.runId, true);
+                    if (string.IsNullOrEmpty(_run.captureSessionId) && !string.IsNullOrEmpty(_ownedCapture.SessionId))
+                        _run.captureSessionId = _ownedCapture.Observe().sessionId;
+                    if (string.IsNullOrEmpty(_run.captureSessionId) || _ownedCapture.SessionId != _run.captureSessionId)
+                        throw new InvalidOperationException("STEP_CAPTURE_IDENTITY_INVALID");
+                    if (_ownedCapture.StopAndVerify(_clock(), out _, out _, AddImmediateStopArtifacts, withinDeadline))
+                        _run.captureStopVerified = true;
+                }
+                catch (Exception ex) { RecordImmediateStopResourceError("STEP_CAPTURE_RELEASE_UNCONFIRMED", ex.Message, ex.ToString()); }
+            }
+            // Persisting the native cancellation intent must succeed before dispatch. Do not use Save(),
+            // whose ordinary failure path resets terminal/cleanup fields.
+            var snapshots = new AutomationSnapshotEvidence(_run, () => _store.Save(_run), _clock);
+            foreach (var record in _run.snapshots.Where(NeedsImmediateStopRelease).ToArray())
+            {
+                if (withinDeadline != null && !withinDeadline()) break;
+                try { snapshots.StopAndObserveRelease(record, withinDeadline: withinDeadline); }
+                catch (Exception ex)
+                {
+                    record.unresolved = true;
+                    RecordImmediateStopResourceError("STEP_SNAPSHOT_RELEASE_UNCONFIRMED", record.snapshotId + ": " + ex.Message, ex.ToString());
+                }
+            }
         }
 
         private void AddImmediateStopArtifacts(AutomationReportArtifact[] artifacts)

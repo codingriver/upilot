@@ -204,8 +204,23 @@ namespace CodingRiver.UPilot.Tests.Automation
         public void ExecutionAndCleanupTimeoutsCloseGizmos(string phase, string arguments)
         {
             var step = Step(arguments, phase, true, true); step.timeoutSeconds = step.cleanupTimeoutSeconds = 1;
-            Start(step); Pump(6); _now += 2000; Pump();
-            Assert.That(_executor.State.status, Is.EqualTo("TimedOut")); Assert.That(_access.values.Values, Is.All.False);
+            Start(step); Pump(6);
+            int finds = _access.finds, reads = _access.reads, writes = _access.writes;
+            _now += 2000; Pump();
+            Assert.That(_executor.State.status, Is.EqualTo("TimedOut"));
+            if (phase == "Finally" && arguments == "cleanup_hold")
+            {
+                Assert.That(_access.values.Values, Is.All.True);
+                Assert.That(_access.finds, Is.EqualTo(finds));
+                Assert.That(_access.reads, Is.EqualTo(reads));
+                Assert.That(_access.writes, Is.EqualTo(writes));
+                Assert.That(_executor.State.gizmosState.finalCloseAttempted, Is.False);
+                Assert.That(_executor.State.gizmosState.finalCloseVerified, Is.False);
+                Assert.That(_executor.State.cleanupOutcome, Is.EqualTo("Unverified"));
+                Assert.That(_executor.State.unresolvedResources, Does.Contain("gizmos:final-close"));
+                Assert.That(_executor.State.cleanupPending, Is.False);
+            }
+            else Assert.That(_access.values.Values, Is.All.False);
         }
 
         [Test]

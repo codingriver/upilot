@@ -4,6 +4,8 @@
 
 2026-10-16 的 Bridge Ready、生命周期请求隔离及相关时限契约见 [Bridge Ready 与服务生命周期隔离](BridgeReadyLifecycleContract-20261016.md)。该修复的验收状态独立记录，不沿用本页 10 月 14 日的历史通过结果。
 
+2026-10-17 Step 默认执行超时与 Finally 失败即停止规则见 [Step 生命周期与内置清单](../skills/upilot-unity-mcp/references/automation-steps.md#bounded-lifecycle)。`enter_edit_mode`、`enter_play_mode` 为 180 秒，`open_scene` 为 120 秒，`console_capture_start`、`capture_snapshot` 为 20 秒，`wait_seconds` 为 30 秒；显式计划值优先，已冻结期限不续期。Finally 首次失败或超时立即停止业务并跳过余项，仅框架自有资源可使用当前 Step 的原清理预算，随后提交失败报告；默认清理预算仍为 10 秒，不追加普通 60 秒证据等待。
+
 ## 设置入口与保存方式
 
 打开 **UPilot → 高级设置 → 常规 → 周期与超时**。这里集中配置心跳、Health、命令 Watchdog、Domain Reload 复核、窗口观察、包请求与恢复、Profiler 采集默认时长、重连和监控窗口刷新。**服务重启总期限**继续放在同页的 **AI 服务维护** 区域，沿用原有项目配置与授权。

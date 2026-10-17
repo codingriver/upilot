@@ -347,7 +347,9 @@ namespace CodingRiver.UPilot
 
         private static bool IsCompileObservation(string name) => name == "compile.wait" || name == "compile.errors.get" ||
             name == "editor.state" || name == "resource.editorState" || name == "test.status" ||
-            name == "test.results" || name == "queue.snapshot";
+            name == "test.results" || name == "queue.snapshot" ||
+            // These routes perform read-only Step admission first and reject active compilation before effects.
+            name == "automation.steps.admission" || name == "automation.steps.start";
 
         private bool IsMaintenanceControl(string json, BridgeEnvelope envelope)
         {

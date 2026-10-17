@@ -50,6 +50,18 @@ namespace CodingRiver.UPilot.Tests.Automation
             Assert.Throws<InvalidDataException>(() => release.StopAndObserveRelease(_record, Status, id => { cancels++; return new(); }));
             Assert.That(cancels, Is.Zero);
         }
+        [TestCase(false)] [TestCase(true)]
+        public void CleanupDeadlineCrossedByStatusOrIntentSaveNeverDispatchesNativeCancel(bool duringSave)
+        {
+            long now = 100; int cancels = 0;
+            var release = new AutomationSnapshotEvidence(_run, () => { if (duringSave) now = 200; }, () => now);
+            SnapshotApiResultV1 SlowStatus(string id) { if (!duringSave) now = 200; return Status(id); }
+            Assert.That(release.StopAndObserveRelease(_record, SlowStatus,
+                id => { cancels++; return new(); }, () => now < 200), Is.False);
+            Assert.That(cancels, Is.Zero);
+            Assert.That(_record.cancelIntent, Is.EqualTo(duringSave));
+            Assert.That(_record.unresolved, Is.True);
+        }
         [Test] public void VerifiedTerminalSnapshotReleasesAndRegistersEvidenceWithoutNativeCancel()
         {
             Directory.CreateDirectory(_job.outputDirectory);

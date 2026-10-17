@@ -2,7 +2,7 @@
 
 namespace CodingRiver.UPilot.Automation
 {
-    [AutomationStep("upilot.enter_edit_mode", Description = "Exit PlayMode, optionally opening a return scene.", ArgumentsExample = "")]
+    [AutomationStep("upilot.enter_edit_mode", Description = "Exit PlayMode, optionally opening a return scene.", ArgumentsExample = "", TimeoutSeconds = 180)]
     public sealed class EnterEditModeStep : AutomationStepBase
     {
         public override string Validate(string runId, string instanceId, string contextJson, string arguments) =>
