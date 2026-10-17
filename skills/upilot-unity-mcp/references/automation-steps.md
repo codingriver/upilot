@@ -359,6 +359,27 @@ that nothing started and must not cause Start replay.
 Operation timeout must cover the summed step/cleanup budgets plus the evidence margin;
 do not shorten it to a single tool wait window.
 
+### Static budget preview (v1)
+
+`ValidateJson` keeps `ok`, `diagnostics`, and `budgetSeconds`, and adds `budgetPreview`.
+It contains `complete`, `evidenceSeconds=60`, and `steps` rows with zero-based `index`,
+`instanceId`, `stepId`, `phase`, `executionSeconds`, `cleanupSeconds`,
+`pollIntervalSeconds`, `executionSource`, `cleanupSource`, and `pollSource`.
+Execution/poll omission or -1 uses `RegisteredDefault`; an explicit valid override
+uses `PlanOverride` (poll=0 is valid). JSON cleanup omission uses `FrameworkDefault`
+(10 seconds); an explicit 10 is `PlanOverride`. Direct C# object validation cannot
+recover cleanup field presence and reports `PlanValue`.
+
+Invalid timing/type or missing registration omits that row and sets `complete=false`;
+valid rows remain useful alongside original validation errors. The Server forwards
+the object as `stepBudgetPreview`, separate from `normalizedJobSpec`; absence means
+the loaded Bridge did not provide details. No provenance is stored in plan/hash/Run.
+For a complete preview, execution plus Cleanup plus 60 equals the existing total.
+Preview does not execute Steps or acquire resources, change deadlines or reserve
+admission. Start still validates again. Execution time is wall clock; business clocks
+such as battle time can pause or scale independently. A tool wait window is neither
+the Step deadline nor the complete plan budget.
+
 ## Task-owned Gizmos
 
 New Step tasks check all existing SceneView and GameView windows once before the first
@@ -480,6 +501,21 @@ Capture ownership and all existing package-acceptance cleanup rules.
 
 ### Project Attachments
 
+`WriteJsonArtifact(runId,instanceId,kind,fileName,rawJson)` on the service/base class
+validates a single JSON value inside the existing writable-callback transaction after
+identity checks and before directory/file creation. Empty input, duplicate properties,
+trailing content and illegal/nonfinite numbers fail through the existing artifact
+failure channel. The original text is published unchanged with the existing atomic
+write, hash and durable registration; `WriteTextArtifact` remains available.
+
+`AutomationEvidenceValues.Components` projects Vector2/3/4 and Quaternion as x/y/z/w,
+Color as r/g/b/a, and Rect as x/y/width/height numeric arrays. It rejects NaN/Infinity
+with type/component context and never traverses computed Unity properties. UPilot
+does not add Json.NET or an arbitrary object serializer. Project serializers must use
+local settings, reject cycles and UnityEngine.Object, preserve serialization errors,
+then pass their JSON to the writer. This entry does not improve first-error persistence
+or report-finalization reliability beyond the existing v1 behavior.
+
 Use `RegisterArtifact(runId,instanceId,kind,path)` on the base class or public service
 after a project file is complete. Registration is synchronous and follows checkpoint
 write authorization: the current run/item, Editor main thread, and a writable lifecycle
@@ -503,6 +539,18 @@ hashes; an older running Server may not yet collect attachment arrays. Local ind
 and successfully compiled Bridge code do not prove public collection is deployed.
 
 ### Policy Diagnostics
+
+Each declared Console rule also has a frozen summary: declaration `index`, `ruleId`,
+`action`, `valid`, `maximumCount`, `budgetApplicable`, `effectiveMatchCount`,
+`allowedCount`, `blockedCount`, `overBudgetCount`, `firstSequence`, `lastSequence`.
+Only the existing selected deny/first-allow decision increments counts; there are no
+extra regex evaluations. Allow limits accumulate across Cases; over-budget is a
+subset of blocked. `budgetApplicable` means a valid allow with a finite count limit;
+deny has no budget, and unlimited allow retains maximumCount=-1. Zero-hit/invalid
+rules remain in declaration order with sequence=-1. Service observation ignores and
+default blocking are not synthetic rules. Inline `logSummary` and text reports show
+at most ten rules plus `omittedRuleSummaryCount`; the immutable console-policy file
+keeps all. Zero matches never repair incomplete evidence or an invalid policy.
 
 The frozen report's `logSummary` and Step state's `domain.logSummary` contain the exact
 Capture/range, validity/completeness, counts and up to 10 blocking samples. Each sample
@@ -536,6 +584,18 @@ Report commit proves neither Capture shutdown nor Operation cleanup; verify thos
 separately through the original Operation.
 
 ## Deployment and Verification
+
+An explicit `unity_capabilities_get` reads the loaded Bridge's `capabilities.list`
+once, with a five-second observation limit and no retries or persistent cache. Its
+`automationSteps` envelope reports source, observedAtUtcMs, identity and contract.
+`observed` requires a valid description and unchanged session/producer epoch/domain;
+`unreported` means a successful older Bridge response omitted the block;
+`unavailable` means disconnected/unqueryable; `unknown` covers timeout, malformed
+response or identity changes. Unknown observations never reuse a previous contract.
+Discovery version 1 declares supportedPlanVersions=[1], callbackContract=jsonString,
+and captureOwnershipModes=[planOwned,operationBorrowed]. This is implementation
+metadata only: it replaces neither Ready nor authorization, validation, admission or
+actual acceptance. Verify loaded Server/Bridge sources separately.
 
 Check exact project identity, live capabilities and loaded code, not only version/health.
 Agent-policy permission must not be reported as runtime availability. If deployed

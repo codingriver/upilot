@@ -8,6 +8,22 @@ namespace CodingRiver.UPilot.Tests.Automation
     public class AutomationStepJsonContractTests
     {
         [Test]
+        public void CapabilityMetadataIsPureAndDetached()
+        {
+            Assert.That(typeof(AutomationStepCapabilities).TypeInitializer, Is.Null);
+            var first = AutomationStepCapabilities.Describe();
+            var second = AutomationStepCapabilities.Describe();
+            Assert.That(first.discoveryVersion, Is.EqualTo(1));
+            Assert.That(first.supportedPlanVersions, Is.EqualTo(new[] { 1 }));
+            Assert.That(first.callbackContract, Is.EqualTo("jsonString"));
+            Assert.That(first.captureOwnershipModes, Is.EqualTo(new[] { "planOwned", "operationBorrowed" }));
+            first.supportedPlanVersions[0] = 99;
+            Assert.That(second.supportedPlanVersions, Is.EqualTo(new[] { 1 }));
+            var payload = new CommandCapabilitiesPayload { automationSteps = second };
+            var document = AutomationStepJsonCodec.ParseObject(UnityEngine.JsonUtility.ToJson(payload));
+            Assert.That(document.Element("automationSteps").Element("discoveryVersion").Value, Is.EqualTo("1"));
+        }
+        [Test]
         public void PublicLifecycleUsesOnlyStringsAndArgumentsIsAlwaysLast()
         {
             var methods = typeof(IAutomationStep).GetMethods();

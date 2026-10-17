@@ -65,6 +65,8 @@ P0/P1 集中验收续记（2026-10-09）：V01 共享生产 pump/watchdog 与命
 - 2026-10-08 Unity生产端续验：新增自有隔离队列7/7（200/201条、未知排队/执行项、查询自身排除、只读不出队）；真实ObserveQueue序列化回执经生产Server聚合发现独立executingCommandId被遗漏，已局部补入、去重、执行身份缺口及合并200条上限校验。Python新增10组与直接回归61/61通过；七份Unity回执独立核验，旧/新聚合对照确认执行项由漏报变为可见。仅测试自有队列，OS探针模拟；不等同在线注入/历史淘汰/PID复用矩阵。Server在后续V12授权维护中已刷新，但本聚合改动的在线行为/全模块来源仍未鉴证，保持未完成。证据inventory-unity-producer-verification-20261008.json；维护身份见Stage4的V12续验。
 - 既有精确 cleanup、独立授权、令牌、备份和 WriteBatch release 不重写；只读清单不得推进恢复或取消业务。
 
+- 2026-10-17补充（新增建议待人工核查，保留D03原优先级和已验收结论）：规范356项测试终态及清理通过后，queue_cleanup两次返回items=[]、complete=false、EDITOR_IDENTITY_UNVERIFIED，editor来源为TimeoutError；不能据空items判断空闲。随后另批正常编译/Domain变化后的最终查询complete=true/fresh且空。建议在现有sourceDetails中保留身份探测阶段、实际耗时/预算及同身份缓存年龄，区分OS探测超时与断连/不匹配，降低人工重复核对成本；不放宽完整性门或自动重试/维护。隔离验收覆盖精确PID存在且探测超时、身份改变及之后新观察恢复；不使用其它身份补全。原始canonical-final-queue.json、canonical-final-queue-recheck.json及canonical-final-queue-domain8.json保留；F:/trunk/TODO_UPilot.mcd的UPilot-20260922-MaintenanceInventory与本项双向引用。本次未确认超时根因、未实施。
+
 ### D04 / P1：Bridge 大结果的超限诊断
 
 - 本次开发状态（2026-10-10）：**开发完成，待验收**。仅标记本轮 P0/P1 方案范围；已验收子项保持不变，现场、部署与版本覆盖缺口仍保留。
@@ -1334,6 +1336,8 @@ V04最新复验原Task task-83b34019-815b-4fa5-8f0f-09f065916c9f、runGuid 4cf4c
 - 建议：定位 UPilotAutomationStepService 延迟初始化、重载恢复及订阅在真实 PlayMode 生命周期中的缺口，补最小真实重载回归；检查 not_found 式取消接受结果为何未完成原任务、初始化探测错误的重复输出，以及自动升级影响并行 WriteBatch 的诊断。保留原身份、固定期限、执行器独占 Finally 和硬停止不恢复历史的规则，不通过反射手工初始化或重放 start 修复现场。
 - 状态：已记录证据，根因未确认；统一日志任务没有改写执行生命周期，现场验证记为未通过。
 
+- 2026-10-17 F17补验续证（P2建议，待人工核查，不认定与旧现场同根或推翻既有Reset修复）：规范Unity6000.6.0a2/PID10016，另一批正常EditMode编译后新域中，Ready和完整wait计划validate均通过，但正式Start一次返回STEP_SERVICE_INITIALIZING、started=false，无业务Run执行；本轮无PlayMode切换。建议分别展示Editor Ready与Step服务初始化阶段、原开始/截止时间、失败原因及官方恢复下一步，并补真实EditMode Domain后正式Validate/Start准入回归，减少“预检可用但无法启动”的人工试探；保持观察无初始化副作用，不重放Start、不恢复旧Run、不反射初始化。验收需确认新域启动有界成功或明确终止失败，原任务不重复执行。原始canonical-ui-plan-validation.json/canonical-ui-plan-start.json见Tests~/UPilotTest/Log/P0P1/step-low-medium-20261017/；F:/trunk/TODO_UPilot.mcd同ID双向引用。本轮未追加生命周期修复；当时F17真实交互受阻。后续已以隔离CurrentSnapshot在真实窗口完成独立48/48补验，包含4项真实鼠标GUI用例及44项原合同，Task=task-25471144-8ef7-409e-8a5b-35052071845f，清理/身份/源码冻结均验证；七项优化限定范围完成。本初始化诊断建议仍待人工核查，不将窗口补验视为准入修复或重放旧Start。
+
 ## UPilot-20261015-StaleExitingPlayCompileGate：退出播放历史记录阻塞实际 EditMode 编译（已修复，现场恢复及定向验收通过）
 
 - 观察/影响：规范工程 D:/upilot/Tests~/UPilotTest，Unity PID 127400。实时权威状态为 edit、isPlaying/isPaused/isCompiling/isUpdating=false，主线程持续泵送，但 compile.request 反复被判定 exitingPlay；自动 WriteBatch 延期/超时，包验收 ImportNotVerified。
@@ -1406,6 +1410,10 @@ V04最新复验原Task task-83b34019-815b-4fa5-8f0f-09f065916c9f、runGuid 4cf4c
 - 观察/影响：本任务最终批次 wb-375a8908-2cc8-4c5d-accb-321056003013 已权威verified且errorsVerified/correlationVerified=true；unity_compile_errors(req-f625a1ad-574c-45f2-9fa2-89f7cb12a375) 返回终态0E/0W，但 unity_console_search_logs(compileOperationId=569b65dab146434886ceed2db7941072) 返回 CONSOLE_EVIDENCE_NOT_FOUND。编译判断仍有结构化证据，额外Console关联审查无法完成。
 - 建议：核对共享编译轮次、Domain Reload与批次终态写入时Console边界持久化的一致性；保证原编译身份可查询到完整或明确标记缺口的边界，不借用其他轮次日志。
 - 证据/状态：GeneralSettings-20261016 最终核验文件保留原工具响应；待诊断，尚未确认丢失原因，本次未修改编译或Console框架。
+
+- 2026-10-17中低Step开发续证（新增内容待人工核查，P2）：trunk本轮关联编译曾再次出现CONSOLE_EVIDENCE_NOT_FOUND；KSB定向run 97b6e90f-3973-4de2-bb9a-21a76fe3cae4的17项均权威通过并完成清理，但Console范围coverage=unavailable，原因range_coverage_unverified，阶段partial/console_cursor_clear_or_reload_not_detectable。二者是关联证据边界的同类使用痛点，尚未证明同一根因。建议在原run/compile身份下提供可靠的固定范围及边界持久化诊断，摘要明确区分“测试结果已验证”和“Console覆盖未验证”，减少多次人工交叉查询，不借用其它轮次、不以零日志证明无错误。后续在规范工程隔离覆盖无日志、Clear、Reload及边界保存失败；本次不扩大测试或实施。双向引用F:/trunk/TODO_UPilot.mcd / UPilot-20261016-CompileConsoleBoundary；本轮证据见共享40_EVIDENCE/trunk/2026-10-17-upilot-step-improvements/。
+
+- 2026-10-17规范356项验收续证（新增证据待人工核查）：原批次wb-07e69928-a109-48a0-942b-8380b30db774 / compile6f29d86135c446ca910c1f34a914288f已verified且结构化0错误，但关联Console查询仍为CONSOLE_EVIDENCE_NOT_FOUND。run4bd0e680-cc27-4c97-9801-482dde8171a9的356项均权威通过、源码未变及清理完成，Console整体与阶段均partial；不把两类证据的通过互相替代。双向引用F:/trunk/TODO_UPilot.mcd同ID；完整观察见Tests~/UPilotTest/Log/P0P1/step-low-medium-20261017/。
 
 ## UPilot-20261016-ServiceSetupWizard / P2：服务安装向导的默认动作与状态语义（已实现并通过定向验收）
 
@@ -1540,3 +1548,51 @@ V04最新复验原Task task-83b34019-815b-4fa5-8f0f-09f065916c9f、runGuid 4cf4c
 - 验证：规范 D:/upilot/Tests~/UPilotTest 的四个原登记批次均 verified/passed；9 个直接夹具共 342/342 passed、0 skipped，resultAuthoritative/cleanupSucceeded=true。包括构造/Execute/Poll/GetError/Cancel/Cleanup/Restore/Snapshot 失败、期限与一次性派发、Store/报告失败、Reload、编译中断和既有生命周期日志回归。Console 范围完整，分阶段覆盖仍 partial，不冒称全量日志完整。
 - 现场补充：官方 Normal/Finally 正常冒烟成功；初轮预期 Finally 超时样本 op-f288d869-ff36-4c18-b406-5628c5a688d7 在 540ms 结束，后继 Skipped 且 startedAt=0，reportOutcome=Written；业务恢复未执行不记清理成功。现场发现并修复 wait 在 status 自动收集后重复读取同一终态附件，以及重建响应时丢失附件存档失败诊断的问题，显式 collect 和旧记录兼容保留。最终新样本 op-e5824ff9-c74d-45cb-a412-9d14ba37863b / run 8a88e7f36250484e869ba144baaee26f 在 627ms 以预期 STEP_TIMEOUT 结束，自动附件收集序号为 1，重复 wait 仍为 1、startAttemptCount=1；报告 SHA256=961e7e171a40e785154a913df88db8cf20d2fe9830e0927ad7384d8dc026fcff。
 - 状态：已实现并完成上述 Unity 342 项、Python 最终六文件 203 项定向验证（仅 2 条既有 websockets 弃用警告）和官方入口现场检查。规范项目 Server/Bridge 两次分别加载主体实现及后续去重修正，原维护均 succeeded，Unity PID10016 保持；最终 Server PID20772，选定入口 loaded source equivalent，不代表全模块来源鉴证。规则/Skill 版本 60/71，五个集成目标 current，两个安装 Skill 校验通过；重复同步文件内容/时间戳/备份目录不变。证据：Tests~/UPilotTest/.upilot/validation/step-finally-20261017/acceptance-summary.json。未跑全套、外部项目业务或发布。
+
+## UPilot-20261017-StepDeferredCore：18项高复杂度优化延期清单
+
+- 来源/状态：用户批准本阶段只实施F03/F10/F14/F17/F18/F20/F25，其余18项继续延期，均为待开发或待专项设计；以下不是已部署合同。复杂度按“开发/验收”分别列出，中开发但高验收的项也延期。
+- 范围：保留Step v1、现执行器、现权限、固定截止时间和现有运行存储；不因本清单启用v2、迁移历史Run或扩大自动恢复。上方StepFinallyFailStop是已实现的局部修复，以下F06/F07等描述剩余整体重构，不覆盖其既有验收结论。
+- 入口：[本阶段实施与验收记录](Documentation~/Step-LowMedium-Improvements-20261017.md)；项目侧双向引用：F:/trunk/TODO_UPilot.mcd 的同ID。通用状态以本包根清单为准。
+- 本阶段结项：F03/F10/F14/F17/F18/F20/F25均完成限定验收；原规范356项及F17后续独立48项、Server68项、trunk KSB17项分别记录，未扩为全套/战场验收。18项延期继续开放；本轮4条框架反馈仍待人工核查。
+
+| ID | 复杂度（开发/验收） | 已观察问题与拟改动 | 前置依赖 | 后续验收边界 |
+|---|---|---|---|---|
+| F01 | 高/高 | 字符串回调跨阶段约束容易分散；设计强类型生命周期及错误合同，保留明确v1适配边界 | F02合同与兼容策略 | 各回调状态/异常/取消及v1兼容逐项矩阵，业务只调用官方执行器 |
+| F02 | 高/高 | 协议、存储与旧入口演进需协同；设计v2协议、迁移及旧执行路径退出策略 | F01、部署能力证据 | 混合Server/Bridge版本明确拒绝或兼容；历史记录只读，无双执行器 |
+| F04 | 高/极高 | RunRecord、快照和Server投影存在多处状态来源；设计单一事实记录及冻结快照 | F02、F06 | 并发观察、Reload与迟到回调不能回退或拼接身份 |
+| F05 | 中/高 | 取证或持久化失败可能干扰首因；持久保存首错及次错次序，保留原异常 | F04、存储故障注入 | 首错写失败/附件失败/后续Cleanup失败组合不丢首因、不虚报成功 |
+| F06 | 极高/极高 | 局部Finally首错停机已修复，但跨Run/Operation终结仍复杂；统一终结状态机 | F01/F04/F07/F08 | 所有终结触发、同步回调迟到、崩溃/Reload及报告失败，任务只结束一次 |
+| F07 | 高/极高 | 墙钟、阶段预算及外层观察计时容易混淆；统一固定deadline及剩余预算传递 | F06设计、时钟测试缝 | 排队/断连/重查/取消不续期，同步不可抢占单独报告 |
+| F08 | 高/高 | planOwned与operationBorrowed双路径所有权容易误读；统一Capture唯一owner及借用关系 | F02/F06 | token不泄漏、错误owner拒绝、停止最多一次，旧Run不复活 |
+| F09 | 中/高 | completed清理观察与实际release证据可能混淆；分开记录资源释放事实和证据有效性 | F04/F08 | 停止成功/未知/失败与证据完整/丢失笛卡尔组合，unknown不得判成功 |
+| F11 | 高/高 | 多终态出口的报告完整性难一致；统一正常与最小失败报告及原子终结提交 | F05/F06/F09 | 写盘故障、无Console/缺附件与硬截止仍产生有界明确失败结果 |
+| F12 | 高/高 | Server外层cleanup字段不能直接代表业务恢复；统一从冻结事实投影状态 | F04/F06/F09/F11 | 业务失败清理成功、业务成功清理失败、Finally跳过分项一致 |
+| F13 | 高/高 | 队列、软停、升级硬停涉及整个service lifetime；统一身份与一次性状态映射 | F06/F07/F08/F12 | 多聊天并发、同期限、重复停止、升级合并；不恢复旧活动、不重启Unity |
+| F15 | 中/高 | 开场模式变化及进度停滞缺少发起方归因；关联模式请求、Run与阶段时间线 | F04、真实模式事件来源 | 模式并发、Reload和无进度样本不臆测原因，不增加Ready门禁 |
+| F16 | 中/高 | 覆盖缺失、Missing与允许Skip可能误读；定义覆盖事实和结果解释 | F04/F11、业务契约 | 零样本/不足/部分覆盖与允许Skip均不可伪装完整业务通过 |
+| F19 | 高/高 | KSB现有12类Step需协同迁移生命周期；在合同稳定后逐类迁移 | F01/F02、KSB业务基线 | 官方完整计划、各自样本和恢复证据；不做自建业务runner |
+| F21 | 中/高 | KSB入场、英雄存活和战场结算前置有复合失败；补明确只读前置与Guard证据 | F15/F16/F19 | 每个Guard独立失败能精确识别，原业务断言不放宽 |
+| F22 | 高/高 | 临时靶、阵容、日志及输入跨Step恢复需精确owner；统一业务资源租用与恢复记录 | F08/F09/F19 | 连续计划、异常/取消/Reload/外来owner，不删除他人资源、保存原值 |
+| F23 | 中/高 | 事件accepted、执行、效果及Play generation不是同一事实；关联样本和事件代际 | F16/F19/F22 | 成功/拒绝/致死Skip/迟到事件分开，跨代迟到不污染本轮样本 |
+| F24 | 高/极高 | 跨模块故障组合依靠手工复现；提供共享快照及受控故障注入测试缝 | F04/F06/F07/F11 | 在规范工程隔离注入，覆盖写盘/超时/Reload/资源失败；不新增生产旁路 |
+
+- 统一完成标准：每项另行授权后先完善设计、保留原始失败，再在Tests~/UPilotTest做最窄关联编译与定向EditMode；Server对应Python契约、KSB对应trunk业务契约和必要实测分别报告。不能从本次中低项通过推定这些延期项已解决。
+
+## UPilot-20261017-ServiceActivityWithoutListener / P2：服务活动状态与实际监听不一致
+
+- 日期/范围：2026-10-17，规范D:/upilot/Tests~/UPilotTest包验收准备；本轮新增建议，待人工核查，未实施。历史恢复修复仍保留原结论，不据本次现象直接认定回归或相同根因。
+- 观察/痛点：精确Unity PID10016存活，HTTP8011/WS8765均未监听且官方MCP连接预检未发送；主窗口仍获取状态中、启动按钮不可用，高级设置显示服务活动。当时缺少可查询有效维护授权的MCP通道，需要人工恢复，曾阻塞定向编译与验收；配置中的stored approved不能替代有效运行时授权。
+- 建议/收益：在既有本地状态UI内有界展示生命周期意图、实际进程/监听事实、最后验证时间和具体失败；无监听且无法验证时显示明确人工恢复指引，避免无限转圈及重复探测。只读诊断不新增Health就绪门、不自动停止/重启，不引入绕过unity_service_restart或独立维护授权的脚本路线。
+- 验收：规范工程自有隔离fixture覆盖存活Unity但Server退出、端口无监听、状态读取失败与旧快照；显示事实/未知和可操作指引，不误报可服务，不自动刷新原期限或执行维护。额外真实进程故障测试须另行安排，不能影响并行工作。
+- 证据/双向引用：Tests~/UPilotTest/.upilot/validation/step-improvements-20261017/ui/保留只读UI截图；F:/trunk/TODO_UPilot.mcd同ID。本次未确认服务何时/为何停止。
+
+
+- 恢复后事实：用户于本次任务手动恢复8011；Server PID60308/Unity PID10016可用，规范关联编译0错误、7个fixture 356/356权威通过。无监听是恢复前历史，建议仍待人工核查、未实施；本次未确认停止原因。trunk也由用户手动重启至Server PID54092，F03/F14实际MCP已通过。
+
+## UPilot-20261017-UpdateDomainReloadFalseFailure / P2：更新成功后残留 Domain Reload 红色误报（已修复，定向验收通过）
+
+- 观察/原因：用户确认安装成功且服务无影响，但更新中心显示“UPilot 包更新观察结束：domain_reload”。自更新观察器将重载取消记为 stopped，业务回调却写为 Failed 并清除恢复交接；SessionState 保留旧失败，重新检查仅清 Completed。
+- 修复：仅对 OperationCanceledException 且 EndReason=domain_reload 正常结束观察，UpdatingPackage 时清除显示状态并保留生命周期交接；WaitingForReload 保持。打开窗口/重新检查仅额外清除 Failed 加完整旧文案的精确匹配。新非取消异常使用“UPilot 包更新失败：”前缀，避免真实 IOException("domain_reload") 在后续重新检查时被误清；其余失败处理保留。
+- 验证：规范 D:/upilot/Tests~/UPilotTest 最终批次 wb-f59e0c2e-f184-43d6-ba07-d9aa052954a6，compileRequestId=req-c7eadacb-f03a-4449-87f8-2d66d9f49866、compileOperationId=0b873a3bfa7b4decbd83951f2f958276，correlationVerified/errorsVerified=true，verifiedAt=1792239347637 晚于 createdAt=1792239331619；0 编译错误、2 条未修改文件中的 CS1998 警告。最终验收 task-b73e1141-29f0-46e6-b686-6282d328cfe4、run 4ddd2d2c-40e0-48d8-8e00-dc102f280eb9，15/15 通过、0 失败/跳过，resultAuthoritative/acceptancePassed/cleanupVerified/testIdentityVerified/sourceUnchanged/importInputsUnchanged=true。
+- 报告/边界：Tests~/UPilotTest/Logs/UPilot/Reports/Acceptance/1792239388136_req-70e0d006-3e55-4701-b942-9e5e689cc576/summary.json，598519 字节，实际文件 SHA256=ba5ac1182bd388883d5828c6f7e4665950d7ec9f7ae7a2f27c48dee06ffd29cf。关联编译 Console Error 查询返回 0，但 coverage=partial/domain_reload_boundary；不据此宣称全过程日志完整。未执行完整 EditMode、真实 UPM 升级端到端测试或发布，未改外部业务项目。

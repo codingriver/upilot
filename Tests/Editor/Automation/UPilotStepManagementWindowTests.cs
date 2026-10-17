@@ -1,10 +1,13 @@
-using System;
+﻿using System;
+using System.Collections;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Reflection;
 using CodingRiver.UPilot.Automation;
 using NUnit.Framework;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.TestTools;
 
 namespace CodingRiver.UPilot.Tests.Automation
 {
@@ -18,19 +21,70 @@ namespace CodingRiver.UPilot.Tests.Automation
             string key = UPilotTimingSettings.Key(nameof(UPilotTimingSettings.StepWindowRefreshMs));
             _hadRefreshPreference = EditorPrefs.HasKey(key); _refreshPreference = EditorPrefs.GetInt(key);
             EditorPrefs.DeleteKey(key);
+            _guiOpened = _guiShown = _readFails = false;
+            _unexpectedStopCalls = 0;
             _window = ScriptableObject.CreateInstance<UPilotStepManagementWindow>();
         }
         [TearDown] public void TearDown()
         {
-            if (_window != null) UnityEngine.Object.DestroyImmediate(_window);
-            string key = UPilotTimingSettings.Key(nameof(UPilotTimingSettings.StepWindowRefreshMs));
-            if (_hadRefreshPreference) EditorPrefs.SetInt(key, _refreshPreference); else EditorPrefs.DeleteKey(key);
+            try
+            {
+                if (_window != null)
+                {
+                    _window.ObserveGui = null;
+                    _window.ConfirmImmediateStop = null;
+                    _window.StopImmediately = null;
+                    _window.ReadCurrent = null;
+                    try { if (_guiShown) _window.Close(); }
+                    finally { if (_window != null) UnityEngine.Object.DestroyImmediate(_window); }
+                }
+                if (_guiOpened)
+                {
+                    Assert.That(_unexpectedStopCalls, Is.Zero, "Read-only interactions must never dispatch a real or unexpected stop.");
+                    var current = UPilotAutomationStepService.GetCurrentSnapshot();
+                    Assert.That(current.initialized, Is.EqualTo(_serviceBeforeGui.initialized));
+                    Assert.That(current.error, Is.EqualTo(_serviceBeforeGui.error));
+                    Assert.That(current.busy, Is.EqualTo(_serviceBeforeGui.busy));
+                    Assert.That(current.run, Is.SameAs(_serviceBeforeGui.run), "Read-only window interactions must not replace the service run.");
+                    Assert.That(JsonUtility.ToJson(current.run), Is.EqualTo(_serviceRunJson));
+                }
+            }
+            finally
+            {
+                if (_guiOpened) EditorGUIUtility.systemCopyBuffer = _clipboard;
+                string key = UPilotTimingSettings.Key(nameof(UPilotTimingSettings.StepWindowRefreshMs));
+                if (_hadRefreshPreference) EditorPrefs.SetInt(key, _refreshPreference); else EditorPrefs.DeleteKey(key);
+            }
         }
         private static UPilotAutomationStepService.CurrentSnapshot Running(string id) => new()
         {
             initialized = true, busy = true,
             run = new AutomationStepRun { runId = id, operationId = "operation", serviceLifecycleId = "lifetime" }
         };
+        [Test] public void DetailsRetainTerminalButClearUnknownAndSelectionOnIdentityChange()
+        {
+            var one = Running("one");
+            _window.AcceptSnapshot(one); _window.SelectStep(one.run, "instance");
+            Assert.That(_window.SelectedKey, Does.Contain("lifetime:operation:one:instance"));
+            one.busy = false; one.run.terminal = true;
+            _window.AcceptSnapshot(one);
+            Assert.That(UPilotStepManagementWindow.VisibleRun(_window.Latest), Is.SameAs(one.run));
+            Assert.That(UPilotStepManagementWindow.Recorded(one.run.cleanupOutcome), Is.EqualTo("未记录"));
+            Assert.That(UPilotStepManagementWindow.Recorded(one.run.reportOutcome), Is.EqualTo("未记录"));
+            _window.AcceptSnapshot(Running("two")); Assert.That(_window.SelectedKey, Is.Empty);
+            var failed = new UPilotAutomationStepService.CurrentSnapshot { error = "read failed", run = one.run };
+            _window.AcceptSnapshot(failed);
+            Assert.That(UPilotStepManagementWindow.VisibleRun(_window.Latest), Is.Null);
+        }
+        [Test] public void KnownEmptyAndMissingDetailValuesRemainDistinct()
+        {
+            Assert.That(UPilotStepManagementWindow.ArgumentsText(""), Is.EqualTo("\"\"（空字符串）"));
+            Assert.That(UPilotStepManagementWindow.ArgumentsText(null), Is.EqualTo("未记录"));
+            Assert.That(UPilotStepManagementWindow.ResourceText(Array.Empty<string>()), Is.EqualTo("0 项"));
+            Assert.That(UPilotStepManagementWindow.ResourceText(null), Is.EqualTo("未记录"));
+            Assert.That(UPilotStepManagementWindow.RunDuration(new AutomationStepRun { terminal = true }, Timestamp), Is.EqualTo("未知"));
+            Assert.That(UPilotStepManagementWindow.RunDuration(new AutomationStepRun { terminal = true, startedAtUtcMs = Timestamp }, Timestamp), Is.EqualTo("未知"));
+        }
         [Test] public void CoreMenuIsBelowTracerAndDoesNotRequireOptionalAssembly()
         {
             var menu = typeof(UPilotStepManagementWindow).GetMethod("Open").GetCustomAttribute<MenuItem>();
@@ -96,6 +150,182 @@ namespace CodingRiver.UPilot.Tests.Automation
         [TestCase("ResourceCleaning", "Verified", "框架资源收尾中")]
         public void RowsReflectActualStage(string stage, string cleanup, string label)
         { Assert.That(UPilotStepManagementWindow.StepState(new AutomationStepRecord { stage = stage, cleanupState = cleanup }), Is.EqualTo(label)); }
+
+        private readonly Dictionary<string, (string text, Rect rect)> _drawn = new();
+        private int _repaints, _reads, _unexpectedStopCalls;
+        private bool _guiOpened, _guiShown, _readFails;
+        private string _clipboard, _serviceRunJson;
+        private UPilotAutomationStepService.CurrentSnapshot _sample, _serviceBeforeGui;
+
+        private void OpenGui()
+        {
+            _guiOpened = true;
+            _serviceBeforeGui = UPilotAutomationStepService.GetCurrentSnapshot();
+            _serviceRunJson = JsonUtility.ToJson(_serviceBeforeGui.run);
+            _clipboard = EditorGUIUtility.systemCopyBuffer;
+            UPilotTimingSettings.StepWindowRefreshMs = 5000;
+            _sample = Running("gui-one");
+            _sample.run.plan = new AutomationStepPlan { steps = new[] { new AutomationStepItem
+            {
+                instanceId = "gui-instance", stepId = "upilot.wait_seconds", arguments = "{\"中文\":\"原始参数\"}",
+                timeoutSeconds = 60, cleanupTimeoutSeconds = 10, pollIntervalSeconds = 0.25,
+            } } };
+            _sample.run.steps.Add(new AutomationStepRecord
+            {
+                instanceId = "gui-instance", stage = "Completed", outcome = AutomationStepStatus.Failed,
+                error = new AutomationStepError { code = "STEP_ERROR", message = "step failure" },
+                cleanupState = "Unknown",
+            });
+            _sample.run.error = new AutomationStepError { code = "FIRST_ERROR", message = "task failure" };
+            _sample.run.secondaryErrors.Add(new AutomationStepError { code = "SECOND_ERROR", message = "secondary failure" });
+            _sample.run.registeredArtifacts.Add(new AutomationReportArtifact { path = "Logs/证据/attachment.json" });
+            _window.ReadCurrent = () =>
+            {
+                _reads++;
+                if (_readFails) throw new InvalidOperationException("isolated read failure");
+                return _sample;
+            };
+            _window.ConfirmImmediateStop = () => throw new AssertionException("Unexpected stop confirmation");
+            _window.StopImmediately = (_, _, _) =>
+            {
+                _unexpectedStopCalls++;
+                return new UPilotAutomationStepService.StopReply { status = "not_found" };
+            };
+            _window.ObserveGui = (label, text, rect) =>
+            {
+                if (label == null) { _drawn.Clear(); _repaints++; }
+                else _drawn[label] = (text, rect);
+            };
+            _window.Refresh(EditorApplication.timeSinceStartup);
+            _window.ShowUtility();
+            _guiShown = true;
+            _window.position = new Rect(40, 40, 1000, 1000);
+        }
+        private IEnumerator RepaintGui()
+        {
+            int previous = _repaints;
+            double deadline = EditorApplication.timeSinceStartup + 10;
+            do
+            {
+                _window.Repaint();
+                yield return null;
+            } while (_repaints <= previous && EditorApplication.timeSinceStartup < deadline);
+            Assert.That(_repaints, Is.GreaterThan(previous), "A real owner-window Repaint must complete.");
+        }
+        private IEnumerator ClickGui(string label)
+        {
+            yield return RepaintGui();
+            Assert.That(_drawn.ContainsKey(label), Is.True, "Missing rendered control: " + label);
+            Rect rect = _drawn[label].rect;
+            Assert.That(rect.width, Is.GreaterThan(0));
+            Assert.That(rect.height, Is.GreaterThan(0));
+            Assert.That(new Rect(Vector2.zero, _window.position.size).Contains(rect.center), Is.True,
+                "The actual client-space control must be visible: " + label + " " + rect);
+            _window.SendEvent(new Event { type = EventType.MouseDown, button = 0, clickCount = 1, mousePosition = rect.center });
+            _window.SendEvent(new Event { type = EventType.MouseUp, button = 0, clickCount = 1, mousePosition = rect.center });
+            yield return RepaintGui();
+        }
+        [UnityTest] public IEnumerator RealGuiTaskDetailsAndCopyPreserveMissingOutcomes()
+        {
+            OpenGui();
+            _sample.busy = false; _sample.run.terminal = true; _sample.run.status = "Succeeded";
+            _window.Refresh(EditorApplication.timeSinceStartup);
+            yield return ClickGui("任务详情");
+            Assert.That(_drawn["首错"].text, Does.Contain("FIRST_ERROR"));
+            Assert.That(_drawn["次错"].text, Does.Contain("SECOND_ERROR"));
+            Assert.That(_drawn["清理结果"].text, Is.EqualTo("未记录"));
+            Assert.That(_drawn["报告结果"].text, Is.EqualTo("未记录"));
+            Assert.That(_drawn["附件路径"].text, Is.EqualTo("Logs/证据/attachment.json"));
+            yield return ClickGui("复制:Logs/证据/attachment.json");
+            Assert.That(EditorGUIUtility.systemCopyBuffer, Is.EqualTo("Logs/证据/attachment.json"));
+            yield return ClickGui("任务详情");
+            Assert.That(_drawn.ContainsKey("首错"), Is.False);
+            LogAssert.NoUnexpectedReceived();
+        }
+        [UnityTest] public IEnumerator RealGuiSelectionRendersStepErrorArgumentsAndFrozenTiming()
+        {
+            OpenGui();
+            yield return ClickGui("instance:gui-instance");
+            Assert.That(_window.SelectedKey, Is.EqualTo("lifetime:operation:gui-one:gui-instance"));
+            Assert.That(_drawn["步骤错误"].text, Does.Contain("STEP_ERROR").And.Not.Contain("FIRST_ERROR"));
+            Assert.That(_drawn["原始参数"].text, Is.EqualTo(_sample.run.plan.steps[0].arguments));
+            Assert.That(_drawn["Cleanup"].text, Is.EqualTo("Unknown"));
+            Assert.That(_drawn["执行开始"].text, Is.EqualTo("未知"));
+            Assert.That(_drawn["清理开始"].text, Is.EqualTo("未知"));
+            Assert.That(_drawn["完成时间"].text, Is.EqualTo("未知"));
+            Assert.That(_drawn["运行计划时间值（秒）"].text, Is.EqualTo("执行=60；Cleanup=10；轮询=0.25\n来源未记录"));
+            yield return ClickGui("选中 Step 详情");
+            Assert.That(_drawn.ContainsKey("原始参数"), Is.False);
+            LogAssert.NoUnexpectedReceived();
+        }
+        [UnityTest] public IEnumerator RealGuiRefreshTerminalSwitchAndReadFailureNeverShowStaleRun()
+        {
+            OpenGui();
+            yield return RepaintGui();
+            int previousReads = _reads;
+            yield return ClickGui("刷新");
+            Assert.That(_reads, Is.EqualTo(previousReads + 1));
+            Assert.That(_drawn["刷新说明"].text, Does.StartWith("每 5000 毫秒刷新"));
+            yield return ClickGui("instance:gui-instance");
+            _sample.busy = false; _sample.run.terminal = true; _sample.run.status = "Succeeded";
+            yield return ClickGui("刷新");
+            Assert.That(_drawn["状态提示"].text, Is.EqualTo("最近结束任务：Succeeded"));
+            Assert.That(_drawn["Run ID"].text, Is.EqualTo("gui-one"));
+            _sample = Running("gui-two");
+            yield return ClickGui("刷新");
+            Assert.That(_window.SelectedKey, Is.Empty);
+            Assert.That(_drawn["Run ID"].text, Is.EqualTo("gui-two"));
+            _readFails = true;
+            yield return ClickGui("刷新");
+            Assert.That(_drawn["状态提示"].text, Does.Contain("执行器状态未知：isolated read failure"));
+            Assert.That(_drawn.ContainsKey("Run ID"), Is.False);
+            Assert.That(_drawn.ContainsKey("原始参数"), Is.False);
+            _readFails = false; _sample = new UPilotAutomationStepService.CurrentSnapshot { error = "STEP_SERVICE_INITIALIZING" };
+            yield return ClickGui("刷新");
+            Assert.That(_drawn["状态提示"].text, Does.Contain("Step 服务初始化中"));
+            Assert.That(_drawn.ContainsKey("Run ID"), Is.False);
+            LogAssert.NoUnexpectedReceived();
+        }
+        [UnityTest] public IEnumerator RealGuiStopConfirmationCannotRedirectToReplacementTask()
+        {
+            OpenGui();
+            int confirmations = 0, stops = 0;
+            string receivedRun = null, receivedOperation = null, receivedLifetime = null;
+            bool replacementRejected = false;
+            _window.ConfirmImmediateStop = () =>
+            {
+                confirmations++;
+                // Simulate an update of even the original snapshot while a native dialog is open.
+                _sample.run.runId = "gui-two"; _sample.run.operationId = "operation-two";
+                _sample.run.serviceLifecycleId = "lifetime-two";
+                _window.Refresh(EditorApplication.timeSinceStartup);
+                return true;
+            };
+            _window.StopImmediately = (run, operation, lifetime) =>
+            {
+                stops++;
+                receivedRun = run; receivedOperation = operation; receivedLifetime = lifetime;
+                replacementRejected = run != _sample.run.runId || operation != _sample.run.operationId
+                    || lifetime != _sample.run.serviceLifecycleId;
+                return new UPilotAutomationStepService.StopReply { status = replacementRejected ? "not_found" : "stopped",
+                    changed = !replacementRejected };
+            };
+            yield return ClickGui("立即停止整个任务");
+            Assert.That(confirmations, Is.EqualTo(1)); Assert.That(stops, Is.EqualTo(1));
+            // Assert outside the production exception boundary: a caught assertion must never pass this test.
+            Assert.That(receivedRun, Is.EqualTo("gui-one"));
+            Assert.That(receivedOperation, Is.EqualTo("operation"));
+            Assert.That(receivedLifetime, Is.EqualTo("lifetime"));
+            Assert.That(replacementRejected, Is.True);
+            Assert.That(_sample.run.runId, Is.EqualTo("gui-two")); Assert.That(_sample.run.terminal, Is.False);
+            Assert.That(_drawn["Run ID"].text, Is.EqualTo("gui-two"));
+            _window.ConfirmImmediateStop = () => { confirmations++; return false; };
+            yield return ClickGui("立即停止整个任务");
+            Assert.That(confirmations, Is.EqualTo(2)); Assert.That(stops, Is.EqualTo(1));
+            Assert.That(_sample.run.terminal, Is.False);
+            LogAssert.NoUnexpectedReceived();
+        }
+
         private const long Timestamp = 1791624407000;
         [TestCase(0L, 0L)]
         [TestCase(0L, Timestamp)]

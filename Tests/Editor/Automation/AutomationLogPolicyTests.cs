@@ -19,6 +19,10 @@ namespace CodingRiver.UPilot.Tests.Automation
             var result = AutomationLogPolicy.Evaluate(new[] { internalWarning, Record(1, "Warning", "same body"), realError },
                 null, new[] { deny });
             Assert.That(result.classifications.Select(c => c.disposition), Is.EqualTo(new[] { "ignored", "blocked", "blocked" }));
+            Assert.That(result.ruleSummaries.Single().effectiveMatchCount, Is.EqualTo(2));
+            Assert.That(result.ruleSummaries.Single().budgetApplicable, Is.False);
+            Assert.That(result.ruleSummaries.Single().overBudgetCount, Is.Zero);
+            Assert.That(result.ruleSummaries.Single().firstSequence, Is.EqualTo(1));
             Assert.That(result.passed, Is.False);
         }
 
@@ -61,6 +65,12 @@ namespace CodingRiver.UPilot.Tests.Automation
                 Is.EqualTo(new[] { "allowed", "blocked", "blocked" }));
             Assert.That(result.classifications[1].ruleId, Is.EqualTo("allow-one"));
             Assert.That(result.classifications[2].ruleId, Is.EqualTo("deny-cleanup"));
+            Assert.That(result.ruleSummaries.Select(x => x.effectiveMatchCount), Is.EqualTo(new[] { 2, 0, 1 }));
+            Assert.That(result.ruleSummaries.Select(x => x.allowedCount), Is.EqualTo(new[] { 1, 0, 0 }));
+            Assert.That(result.ruleSummaries.Select(x => x.blockedCount), Is.EqualTo(new[] { 1, 0, 1 }));
+            Assert.That(result.ruleSummaries.Select(x => x.overBudgetCount), Is.EqualTo(new[] { 1, 0, 0 }));
+            Assert.That(result.ruleSummaries.Select(x => x.firstSequence), Is.EqualTo(new long[] { 1, -1, 12 }));
+            Assert.That(result.ruleSummaries.Select(x => x.lastSequence), Is.EqualTo(new long[] { 11, -1, 12 }));
         }
 
         [Test]
@@ -141,6 +151,29 @@ namespace CodingRiver.UPilot.Tests.Automation
             Assert.That(AutomationLogPolicy.Fingerprint(first), Is.Not.EqualTo(AutomationLogPolicy.Fingerprint(otherBusinessId)));
         }
 
+        [TestCase(0, 0, 2)] [TestCase(1, 1, 1)] [TestCase(-1, 2, 0)]
+        public void RuleSummaryUsesExistingBudget(int maximum, int allowed, int blocked)
+        {
+            var result = AutomationLogPolicy.Evaluate(new[] { Record(1, "Error", "known"), Record(2, "Error", "known") },
+                null, new[] { Rule("known", "allow", maximum, "known") });
+            var row = result.ruleSummaries.Single();
+            Assert.That(row.effectiveMatchCount, Is.EqualTo(2));
+            Assert.That(row.allowedCount, Is.EqualTo(allowed));
+            Assert.That(row.blockedCount, Is.EqualTo(blocked));
+            Assert.That(row.overBudgetCount, Is.EqualTo(blocked));
+            Assert.That(row.budgetApplicable, Is.EqualTo(maximum >= 0));
+        }
+        [Test] public void InvalidAndShadowedRulesStayZeroWithoutAdditionalMatching()
+        {
+            var invalid = Rule("invalid", "deny", -1, ""); invalid.messageRegex = "[";
+            var shadowed = Rule("shadowed", "deny", -1, ""); shadowed.messageRegex = "^(a+)+$";
+            var result = AutomationLogPolicy.Evaluate(new[] { Record(1, "Error", new string('a', 4096) + "!") }, null,
+                new[] { Rule("first", "deny", -1, ""), Rule("first", "allow", -1, ""), null, invalid, shadowed });
+            Assert.That(result.policyValid, Is.False);
+            Assert.That(result.ruleSummaries.Select(x => x.valid), Is.EqualTo(new[] { true, false, false, false, true }));
+            Assert.That(result.ruleSummaries.Select(x => x.effectiveMatchCount), Is.EqualTo(new[] { 1, 0, 0, 0, 0 }));
+            Assert.That(result.ruleSummaries.Skip(1).All(x => x.firstSequence == -1 && x.lastSequence == -1 && x.blockedCount == 0), Is.True);
+        }
         private static ConsoleCaptureRecord Record(long sequence, string level, string message = "message") => new()
         {
             sequence = sequence,

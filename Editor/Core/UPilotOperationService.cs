@@ -1,4 +1,4 @@
-// -----------------------------------------------------------------------
+﻿// -----------------------------------------------------------------------
 // UPilot Editor - command capability and operation diagnostics.
 // SPDX-License-Identifier: MIT
 // -----------------------------------------------------------------------
@@ -126,6 +126,7 @@ namespace CodingRiver.UPilot
         public int registryVersion = 2;
         public int count;
         public List<CommandCapabilityPayload> commands = new();
+        public Automation.AutomationStepCapabilitiesPayload automationSteps;
     }
 
     public sealed class UPilotOperationService
@@ -198,7 +199,8 @@ namespace CodingRiver.UPilot
         private async Task HandleCapabilitiesAsync(string id, string json, CancellationToken token)
         {
             var descriptors = _bridge.Router.GetDescriptors().OrderBy(item => item.Name).ToList();
-            var payload = new CommandCapabilitiesPayload { count = descriptors.Count };
+            var payload = new CommandCapabilitiesPayload { count = descriptors.Count,
+                automationSteps = Automation.AutomationStepCapabilities.Describe() };
             foreach (var descriptor in descriptors)
             {
                 payload.commands.Add(new CommandCapabilityPayload

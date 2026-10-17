@@ -8,6 +8,12 @@ namespace CodingRiver.UPilot.Automation
     public sealed partial class AutomationStepExecutor
     {
         internal string WriteTextArtifact(string runId, string instanceId, string kind, string fileName, string content)
+            => WriteArtifact(runId, instanceId, kind, fileName, content, false);
+
+        internal string WriteJsonArtifact(string runId, string instanceId, string kind, string fileName, string rawJson)
+            => WriteArtifact(runId, instanceId, kind, fileName, rawJson, true);
+
+        private string WriteArtifact(string runId, string instanceId, string kind, string fileName, string content, bool json)
         {
             string published = null;
             WriteCheckpoint(runId, instanceId, () =>
@@ -16,6 +22,7 @@ namespace CodingRiver.UPilot.Automation
                 RequireArtifactRegistration(kind);
                 RequireArtifactFileName(fileName);
                 if (content == null) throw new ArgumentNullException(nameof(content));
+                if (json) AutomationStepJsonCodec.ValidateArtifactJson(content);
                 var bytes = new UTF8Encoding(false, true).GetBytes(content);
                 string digest = AutomationStepRunStore.HashText(content);
                 string directory = Path.Combine(_report.DirectoryPath, "attachments", AutomationStepRunStore.HashText(instanceId));

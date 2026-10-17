@@ -1,0 +1,36 @@
+{
+  "project": "D:\\upilot\\Tests~\\UPilotTest",
+  "source": "D:\\upilot\\skills\\upilot-unity-mcp",
+  "skillPackVersion": 72,
+  "agentRulesVersion": 60,
+  "outsideBytesPreserved": true,
+  "repeatContentAndMtimeUnchanged": true,
+  "repeatBackupsUnchanged": true,
+  "targets": [
+    {
+      "relativePath": "AGENTS.md",
+      "status": "current",
+      "afterSha256": "bfcbe00ad618f16c04cc17629391f5397db043ebc3e692011dc4c7aec117797a"
+    },
+    {
+      "relativePath": ".cursor/rules/upilot-unity-mcp.mdc",
+      "status": "current",
+      "afterSha256": "9568120b920d1480b8edc0dee0150781dd273a130db8ad81bd2afe7736ff41e5"
+    },
+    {
+      "relativePath": "CLAUDE.md",
+      "status": "current",
+      "afterSha256": "05da704d1374bba29ff925b8838e34fafee2ccf5f54826aa9ae055c2bbab0a19"
+    },
+    {
+      "relativePath": ".agents/skills/upilot-unity-mcp",
+      "status": "current",
+      "afterSha256": "59e66ce8022cd8af40fde8ab020b4badb5acb16d7c7970fa80f8b67f5bd39301"
+    },
+    {
+      "relativePath": ".claude/skills/upilot-unity-mcp",
+      "status": "current",
+      "afterSha256": "59e66ce8022cd8af40fde8ab020b4badb5acb16d7c7970fa80f8b67f5bd39301"
+    }
+  ]
+}

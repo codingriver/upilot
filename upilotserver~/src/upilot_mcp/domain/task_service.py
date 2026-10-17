@@ -834,6 +834,7 @@ class TaskDomainService:
         step_plan = job_spec.get("stepPlan")
         has_step_plan = "stepPlan" in job_spec
         step_budget = 0.0
+        step_budget_preview = None
         capture = job_spec.get("consoleCapture", {})
         if not isinstance(capture, dict):
             errors.append({"path": "consoleCapture", "code": "type", "message": "Expected an object."})
@@ -874,6 +875,8 @@ class TaskDomainService:
                 response = await self.dispatcher.call(request_id, "automation.steps.validate",
                                                       {"planJson": plan_json})
                 data = response.data if isinstance(response.data, dict) else {}
+                if isinstance(data.get("budgetPreview"), dict):
+                    step_budget_preview = copy.deepcopy(data["budgetPreview"])
                 if not response.ok:
                     errors.append({"path": "stepPlan", "code": response.error.code if response.error else "STEP_VALIDATION_FAILED",
                                    "message": response.error.message if response.error else "Step validation failed."})
@@ -957,6 +960,8 @@ class TaskDomainService:
             "warnings": warnings,
             "nextAction": "Call unity_operation_start with normalizedJobSpec." if valid else "Fix the reported jobSpec fields and validate again.",
         }
+        if step_budget_preview is not None:
+            data["stepBudgetPreview"] = step_budget_preview
         return ok(request_id, data) if valid else fail(request_id, "INVALID_JOB_SPEC", "jobSpec validation failed.", data)
 
     async def operation_start(self, job_spec: dict | None) -> ToolResponse:

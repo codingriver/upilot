@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Reflection;
 using System.Threading;
@@ -93,6 +93,77 @@ namespace CodingRiver.UPilot.Tests.Automation
             Assert.That(result.diagnostics.Any(x => x.code == "STEP_ARGUMENTS_INVALID"), Is.True);
         }
 
+        [Test]
+        public void BudgetPreviewPreservesPlanAndDistinguishesWireSources()
+        {
+            const string json = "{\"version\":1,\"steps\":["
+                + "{\"instanceId\":\"omitted\",\"stepId\":\"budget\",\"arguments\":\"  \\u4e2d\\n${start.id}  \"},"
+                + "{\"instanceId\":\"default\",\"stepId\":\"budget\",\"timeoutSeconds\":-1,\"pollIntervalSeconds\":-1,\"cleanupTimeoutSeconds\":10},"
+                + "{\"instanceId\":\"override\",\"stepId\":\"budget\",\"phase\":\"Finally\",\"timeoutSeconds\":7,\"cleanupTimeoutSeconds\":4,\"pollIntervalSeconds\":0}]}";
+            Assert.That(AutomationStepPlanValidator.Parse(json, out var plan, out var inputs).ok, Is.True);
+            string before = UnityEngine.JsonUtility.ToJson(plan);
+            var result = AutomationStepPlanValidator.Validate(plan, Registry(Entry<AutomationBuiltInStepTests.BudgetProbe>("budget")), inputs);
+            Assert.That(result.ok && result.budgetPreview.complete, Is.True);
+            Assert.That(result.budgetSeconds, Is.EqualTo(151));
+            var rows = result.budgetPreview.steps;
+            Assert.That(rows.Select(x => x.executionSeconds), Is.EqualTo(new[] { 30d, 30d, 7d }));
+            Assert.That(rows.Select(x => x.cleanupSeconds), Is.EqualTo(new[] { 10d, 10d, 4d }));
+            Assert.That(rows.Select(x => x.pollIntervalSeconds), Is.EqualTo(new[] { .1d, .1d, 0d }));
+            Assert.That(rows.Select(x => x.executionSource), Is.EqualTo(new[] { "RegisteredDefault", "RegisteredDefault", "PlanOverride" }));
+            Assert.That(rows.Select(x => x.pollSource), Is.EqualTo(new[] { "RegisteredDefault", "RegisteredDefault", "PlanOverride" }));
+            Assert.That(rows.Select(x => x.cleanupSource), Is.EqualTo(new[] { "FrameworkDefault", "PlanOverride", "PlanOverride" }));
+            Assert.That(rows[2].phase, Is.EqualTo("Finally"));
+            Assert.That(rows.Sum(x => x.executionSeconds + x.cleanupSeconds) + result.budgetPreview.evidenceSeconds, Is.EqualTo(result.budgetSeconds));
+            Assert.That(UnityEngine.JsonUtility.ToJson(plan), Is.EqualTo(before));
+            Assert.That(plan.steps[0].arguments, Is.EqualTo("  中\n${start.id}  "));
+            Assert.That(before, Does.Not.Contain("budgetPreview"));
+        }
+
+        [TestCase("timeoutSeconds", "0")] [TestCase("timeoutSeconds", "-2")]
+        [TestCase("cleanupTimeoutSeconds", "0")] [TestCase("cleanupTimeoutSeconds", "-1")]
+        [TestCase("pollIntervalSeconds", "-2")] [TestCase("timeoutSeconds", "\"bad\"")]
+        [TestCase("cleanupTimeoutSeconds", "null")] [TestCase("pollIntervalSeconds", "false")]
+        [TestCase("timeoutSeconds", "1e999")] [TestCase("cleanupTimeoutSeconds", "1e999")]
+        [TestCase("pollIntervalSeconds", "1e999")]
+        public void InvalidTimingDoesNotFabricatePreviewDefault(string field, string value)
+        {
+            var parsed = AutomationStepPlanValidator.Parse("{\"steps\":[{\"instanceId\":\"bad\",\"stepId\":\"budget\",\"" + field + "\":" + value + "}]}", out var plan, out var inputs);
+            var result = AutomationStepPlanValidator.Validate(plan, Registry(Entry<AutomationBuiltInStepTests.BudgetProbe>("budget")), inputs);
+            Assert.That(parsed.ok && result.ok, Is.False);
+            Assert.That(result.budgetPreview.complete, Is.False);
+            Assert.That(result.budgetPreview.steps, Is.Empty);
+        }
+        [Test]
+        public void MissingRegistrationAndInMemoryCleanupHaveHonestProvenance()
+        {
+            var missing = AutomationStepPlanValidator.Validate(Plan(Item("missing")), Registry());
+            Assert.That(missing.budgetPreview.complete, Is.False);
+            Assert.That(missing.budgetPreview.steps, Is.Empty);
+            var memory = AutomationStepPlanValidator.Validate(Plan(Item("budget")), Registry(Entry<AutomationBuiltInStepTests.BudgetProbe>("budget")));
+            Assert.That(memory.budgetPreview.steps.Single().cleanupSource, Is.EqualTo("PlanValue"));
+        }
+
+        [TestCase("not-json")] [TestCase("null")] [TestCase("{}")] [TestCase("[]")]
+        public void MalformedPlanHasExplicitIncompletePreview(string json)
+        {
+            var result = AutomationStepPlanValidator.Parse(json, out _);
+            Assert.That(result.ok, Is.False);
+            Assert.That(result.budgetPreview, Is.Not.Null);
+            Assert.That(result.budgetPreview.complete, Is.False);
+            Assert.That(result.budgetPreview.steps, Is.Empty);
+        }
+
+        [Test]
+        public void CompleteTimingPreviewDoesNotConcealBusinessValidationFailure()
+        {
+            var result = AutomationStepPlanValidator.Validate(Plan(Item("wait", "invalid")),
+                Registry(Entry<WaitSecondsStep>("wait")));
+            Assert.That(result.ok, Is.False);
+            Assert.That(result.diagnostics.Any(x => x.code == "STEP_ARGUMENTS_INVALID"), Is.True);
+            Assert.That(result.budgetPreview.complete, Is.True);
+            Assert.That(result.budgetPreview.steps.Count, Is.EqualTo(1));
+        }
+
         [AutomationStep("upilot.test.suspension_probe")]
         public sealed class SuspensionProbe : AutomationStepBase
         {
@@ -170,10 +241,16 @@ namespace CodingRiver.UPilot.Tests.Automation
                         playModeState = "edit", compilePhase = "completed" },
                     executor = UPilotAutomationStepService.GetCurrentSnapshot(),
                 }));
-                Assert.That(AutomationStepJsonCodec.Validation(UPilotAutomationStepService.ValidateJson(plan)).ok, Is.True);
+                var preflight = UnityEngine.JsonUtility.FromJson<AutomationStepValidation>(UPilotAutomationStepService.ValidateJson(plan));
+                Assert.That(preflight.ok, Is.True);
                 Assert.That(executor.State, Is.Null);
                 Assert.That(UPilotAutomationStepService.StartJson(operationId, "", plan), Does.Contain(operationId));
                 var runId = executor.State.runId;
+                var effective = preflight.budgetPreview.steps.Single();
+                var frozen = executor.State.plan.steps.Single();
+                Assert.That(frozen.timeoutSeconds, Is.EqualTo(effective.executionSeconds));
+                Assert.That(frozen.cleanupTimeoutSeconds, Is.EqualTo(effective.cleanupSeconds));
+                Assert.That(frozen.pollIntervalSeconds, Is.EqualTo(effective.pollIntervalSeconds));
                 Assert.That(executor.Busy, Is.True);
                 UnityEngine.TestTools.LogAssert.Expect(UnityEngine.LogType.Error,
                     new System.Text.RegularExpressions.Regex("STEP_EXECUTOR_BUSY"));

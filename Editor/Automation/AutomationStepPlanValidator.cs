@@ -7,16 +7,28 @@ namespace CodingRiver.UPilot.Automation
 {
     public static class AutomationStepPlanValidator
     {
+        // Wire provenance never enters the executable plan or its hash.
+        internal sealed class TimingInput
+        {
+            internal bool cleanupSpecified;
+            internal bool fieldTypesValid = true;
+        }
+
         /// <summary>Checks JSON token types before JsonUtility can coerce them.</summary>
-        public static AutomationStepValidation Parse(string json, out AutomationStepPlan plan)
+        public static AutomationStepValidation Parse(string json, out AutomationStepPlan plan) =>
+            Parse(json, out plan, out _);
+
+        internal static AutomationStepValidation Parse(string json, out AutomationStepPlan plan,
+            out Dictionary<int, TimingInput> timingInputs)
         {
             plan = null;
-            var result = new AutomationStepValidation();
+            timingInputs = new Dictionary<int, TimingInput>();
+            var result = new AutomationStepValidation { budgetPreview = new AutomationStepBudgetPreview { complete = false } };
             try
             {
                 var root = AutomationStepJsonCodec.ParseJson(json);
                 if ((string)root.Attribute("type") != "object" || (string)root.Element("steps")?.Attribute("type") != "array")
-                    return AutomationStepValidation.Invalid("STEP_PLAN_INVALID", "Plan must contain a steps array.");
+                    return ParseFailure("Plan must contain a steps array.");
                 if (root.Element("version") != null
                     && ((string)root.Element("version").Attribute("type") != "number" || root.Element("version").Value != "1"))
                     AutomationCatalog.Add(result.diagnostics, "STEP_PLAN_VERSION_INVALID", "Expected numeric version 1.");
@@ -28,8 +40,11 @@ namespace CodingRiver.UPilot.Automation
                 int index = 0;
                 foreach (var element in root.Element("steps").Elements())
                 {
+                    var timing = new TimingInput { cleanupSpecified = element.Element("cleanupTimeoutSeconds") != null };
+                    timingInputs.Add(index, timing);
                     if ((string)element.Attribute("type") != "object")
                     {
+                        timing.fieldTypesValid = false;
                         AutomationCatalog.Add(result.diagnostics, "STEP_ITEM_INVALID", "Expected a step object.", "", index);
                         element.RemoveNodes();
                         element.SetAttributeValue("type", "object");
@@ -43,6 +58,7 @@ namespace CodingRiver.UPilot.Automation
                     foreach (var name in new[] { "timeoutSeconds", "pollIntervalSeconds", "cleanupTimeoutSeconds" })
                         if (element.Element(name) != null && (string)element.Element(name).Attribute("type") != "number")
                         {
+                            timing.fieldTypesValid = false;
                             AutomationCatalog.Add(result.diagnostics, "STEP_FIELD_TYPE_INVALID", name + " must be a number.", "", index);
                             element.Element(name).Remove();
                         }
@@ -66,17 +82,29 @@ namespace CodingRiver.UPilot.Automation
                 // The sanitized copy is only for aggregating later diagnostics, never for starting an invalid plan.
                 plan = JsonUtility.FromJson<AutomationStepPlan>(AutomationStepJsonCodec.WriteJson(root));
             }
-            catch (Exception ex) { return AutomationStepValidation.Invalid("STEP_PLAN_INVALID", ex.Message); }
+            catch (Exception ex) { return ParseFailure(ex.Message); }
             return result;
         }
 
-        public static AutomationStepValidation Validate(AutomationStepPlan plan, AutomationStepRegistry registry)
+        private static AutomationStepValidation ParseFailure(string message)
         {
-            var result = new AutomationStepValidation();
+            var result = AutomationStepValidation.Invalid("STEP_PLAN_INVALID", message);
+            result.budgetPreview = new AutomationStepBudgetPreview { complete = false };
+            return result;
+        }
+
+        public static AutomationStepValidation Validate(AutomationStepPlan plan, AutomationStepRegistry registry) =>
+            Validate(plan, registry, null);
+
+        internal static AutomationStepValidation Validate(AutomationStepPlan plan, AutomationStepRegistry registry,
+            IReadOnlyDictionary<int, TimingInput> timingInputs)
+        {
+            var result = new AutomationStepValidation { budgetPreview = new AutomationStepBudgetPreview() };
             result.diagnostics.AddRange(registry.Diagnostics);
             if (plan == null || plan.version != 1 || plan.steps == null || plan.steps.Length == 0)
             {
                 AutomationCatalog.Add(result.diagnostics, "STEP_PLAN_INVALID", "A nonempty version 1 plan is required.");
+                result.budgetPreview.complete = false;
                 result.ok = false; return result;
             }
             var snapshot = AutomationStepJson.Copy(plan);
@@ -89,7 +117,7 @@ namespace CodingRiver.UPilot.Automation
             {
                 var item = snapshot.steps[index];
                 void Error(string code, string text) => AutomationCatalog.Add(result.diagnostics, code, text, item?.instanceId, index);
-                if (item == null) { Error("STEP_ITEM_INVALID", "Null step."); continue; }
+                if (item == null) { Error("STEP_ITEM_INVALID", "Null step."); result.budgetPreview.complete = false; continue; }
                 if (string.IsNullOrWhiteSpace(item.instanceId) || !ids.Add(item.instanceId))
                     Error("STEP_INSTANCE_INVALID", "instanceId must be unique and nonempty.");
                 if (plan.steps[index]?.arguments == null) Error("STEP_ARGUMENTS_INVALID", "arguments must be a string.");
@@ -103,14 +131,31 @@ namespace CodingRiver.UPilot.Automation
                         Error("STEP_CAPTURE_ORDER_INVALID", "Capture must start exactly once as the first Normal item.");
                 }
                 if (!registry.TryGet(item.stepId, out var descriptor))
-                { Error("STEP_NOT_FOUND", "Step is missing or has an invalid registration: " + item.stepId); continue; }
+                { Error("STEP_NOT_FOUND", "Step is missing or has an invalid registration: " + item.stepId); result.budgetPreview.complete = false; continue; }
                 double timeout = item.timeoutSeconds == -1 ? descriptor.timeoutSeconds : item.timeoutSeconds;
                 double interval = item.pollIntervalSeconds == -1 ? descriptor.pollIntervalSeconds : item.pollIntervalSeconds;
                 if (!AutomationStepJson.Finite(timeout) || timeout <= 0
                     || !AutomationStepJson.Finite(item.cleanupTimeoutSeconds) || item.cleanupTimeoutSeconds <= 0
                     || !AutomationStepJson.Finite(interval) || interval < 0)
+                {
                     Error("STEP_TIMING_INVALID", "Timeouts must be finite and positive; polling must be nonnegative.");
-                else result.budgetSeconds += timeout + item.cleanupTimeoutSeconds;
+                    result.budgetPreview.complete = false;
+                }
+                else
+                {
+                    result.budgetSeconds += timeout + item.cleanupTimeoutSeconds;
+                    TimingInput timing = null;
+                    bool hasInput = timingInputs != null && timingInputs.TryGetValue(index, out timing);
+                    if (timingInputs != null && (!hasInput || !timing.fieldTypesValid)) result.budgetPreview.complete = false;
+                    else result.budgetPreview.steps.Add(new AutomationStepBudgetPreviewItem
+                    {
+                        index = index, instanceId = item.instanceId, stepId = item.stepId, phase = item.phase,
+                        executionSeconds = timeout, cleanupSeconds = item.cleanupTimeoutSeconds, pollIntervalSeconds = interval,
+                        executionSource = item.timeoutSeconds == -1 ? "RegisteredDefault" : "PlanOverride",
+                        cleanupSource = !hasInput ? "PlanValue" : timing.cleanupSpecified ? "PlanOverride" : "FrameworkDefault",
+                        pollSource = item.pollIntervalSeconds == -1 ? "RegisteredDefault" : "PlanOverride",
+                    });
+                }
                 if (item.arguments == null) continue;
                 try
                 {
@@ -133,7 +178,10 @@ namespace CodingRiver.UPilot.Automation
             result.diagnostics.AddRange(policy.diagnostics);
             result.budgetSeconds += 60; // Evidence finalization and observer/transport allowance.
             if (!AutomationStepJson.Finite(result.budgetSeconds))
+            {
                 AutomationCatalog.Add(result.diagnostics, "STEP_TIMING_INVALID", "The total plan budget is not finite.");
+                result.budgetPreview.complete = false;
+            }
             result.ok = result.diagnostics.All(d => d.severity != "error");
             return result;
         }

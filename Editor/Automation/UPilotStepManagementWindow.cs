@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Globalization;
 using UnityEditor;
 using UnityEngine;
@@ -12,6 +12,12 @@ namespace CodingRiver.UPilot.Automation
         private const float IndexColumnWidth = 32, PhaseColumnWidth = 60, StateColumnWidth = 140;
         private const float StartTimeColumnWidth = 96, DurationColumnWidth = 84;
         internal Func<UPilotAutomationStepService.CurrentSnapshot> ReadCurrent = UPilotAutomationStepService.GetCurrentSnapshot;
+        // Instance-local seams let isolated GUI tests use frozen snapshots without touching the executor.
+        internal Action<string, string, Rect> ObserveGui;
+        internal Func<bool> ConfirmImmediateStop = ConfirmImmediateStopDialog;
+        internal Func<string, string, string, UPilotAutomationStepService.StopReply> StopImmediately =
+            UPilotAutomationStepService.StopCurrentImmediately;
+        private Vector2 _guiOrigin;
         internal UPilotAutomationStepService.CurrentSnapshot Latest { get; private set; }
         internal Vector2 Scroll;
         private UPilotAutomationStepService.CurrentSnapshot _gui;
@@ -19,6 +25,13 @@ namespace CodingRiver.UPilot.Automation
         private bool _guiInitialized;
         private double _lastRefreshAt;
         private long _guiNow;
+        private bool _taskDetails, _stepDetails = true;
+        internal string SelectedKey { get; private set; } = "";
+        private string _selectionRunKey = "";
+        internal static string Recorded(string value) => string.IsNullOrEmpty(value) ? "未记录" : value;
+        internal static AutomationStepRun VisibleRun(UPilotAutomationStepService.CurrentSnapshot snapshot) =>
+            snapshot?.initialized == true && string.IsNullOrEmpty(snapshot.error) ? snapshot.run : null;
+        internal void SelectStep(AutomationStepRun run, string instanceId) => SelectedKey = Key(run) + ":" + instanceId;
 
         [MenuItem("UPilot/Step管理", false, 401)]
         public static void Open()
@@ -45,6 +58,7 @@ namespace CodingRiver.UPilot.Automation
             _gui = null;
             _observedKey = _notice = _guiNotice = "";
             _guiInitialized = false;
+            SelectedKey = _selectionRunKey = "";
             Scroll = Vector2.zero;
             // Never stop a task or detach the executor's framework resource release.
         }
@@ -68,6 +82,12 @@ namespace CodingRiver.UPilot.Automation
         internal void AcceptSnapshot(UPilotAutomationStepService.CurrentSnapshot snapshot)
         {
             Latest = snapshot;
+            string selectionRun = Key(VisibleRun(snapshot));
+            if (selectionRun != _selectionRunKey)
+            {
+                SelectedKey = "";
+                _selectionRunKey = selectionRun;
+            }
             if (snapshot?.initialized != true) return;
             var run = snapshot.run;
             string key = Key(run);
@@ -156,6 +176,11 @@ namespace CodingRiver.UPilot.Automation
 
         private void OnGUI()
         {
+            if (ObserveGui != null && Event.current.type == EventType.Repaint)
+            {
+                _guiOrigin = GUIUtility.GUIToScreenPoint(Vector2.zero);
+                ObserveGui(null, null, default);
+            }
             if (!_guiInitialized || Event.current.type == EventType.Layout)
             {
                 _gui = Latest;
@@ -164,34 +189,39 @@ namespace CodingRiver.UPilot.Automation
                 _guiInitialized = true;
             }
             var snapshot = _gui;
-            var run = snapshot?.initialized == true && snapshot.busy ? snapshot.run : null;
+            var run = VisibleRun(snapshot);
             EditorGUILayout.BeginHorizontal(EditorStyles.toolbar);
             GUILayout.Label("Step管理", EditorStyles.boldLabel);
             GUILayout.FlexibleSpace();
             if (GUILayout.Button("刷新", EditorStyles.toolbarButton)) Refresh(EditorApplication.timeSinceStartup);
+            Observe("刷新", "刷新");
             using (new EditorGUI.DisabledScope(!CanStop(snapshot)))
+            {
                 if (GUILayout.Button("立即停止整个任务", EditorStyles.toolbarButton)) ConfirmStop(run);
+                Observe("立即停止整个任务", "立即停止整个任务");
+            }
             EditorGUILayout.EndHorizontal();
 
-            if (snapshot == null || !snapshot.initialized)
+            if (snapshot == null || !snapshot.initialized || !string.IsNullOrEmpty(snapshot.error))
             {
                 bool initializing = snapshot?.error == "STEP_SERVICE_INITIALIZING";
-                EditorGUILayout.HelpBox(initializing ? "Step 服务初始化中，暂不能确定执行器状态。"
+                DrawNotice(initializing ? "Step 服务初始化中，暂不能确定执行器状态。"
                     : "执行器状态未知：" + (snapshot?.error ?? "尚未读取"), MessageType.Warning);
             }
             else if (run == null)
             {
-                EditorGUILayout.HelpBox(snapshot.busy ? "执行器正在结束上一轮调用，暂不接受新任务。"
+                DrawNotice(snapshot.busy ? "执行器正在结束上一轮调用，暂不接受新任务。"
                     : "当前无正在执行的 Step 任务。", MessageType.Info);
                 if (!string.IsNullOrEmpty(_guiNotice)) EditorGUILayout.HelpBox(_guiNotice, MessageType.Info);
             }
             else
             {
-                string state = run.immediateStopRequestedAtUtcMs > 0
+                string state = run.terminal && !snapshot.busy ? "最近结束任务：" + run.status
+                    : run.immediateStopRequestedAtUtcMs > 0
                     ? "测试已立即停止，正在释放框架资源；不执行 Finally，暂不接受新任务。"
                     : run.stage == "Finalizing" ? "测试步骤已处理，证据／报告收尾中，执行器仍被占用。"
                     : "Step 执行器正在执行测试任务。";
-                EditorGUILayout.HelpBox(state, MessageType.Info);
+                DrawNotice(state, MessageType.Info);
                 EditorGUILayout.LabelField("提交策略", "执行器占用时拒绝新任务，不进入排队");
                 DrawIdentity("Run ID", run.runId);
                 DrawIdentity("Operation ID", run.operationId);
@@ -199,11 +229,12 @@ namespace CodingRiver.UPilot.Automation
                 int processed = Math.Min(run.cursor, total);
                 string current = run.terminal || processed >= total ? "无业务 Step 正在执行" : $"{processed + 1} / {total}";
                 EditorGUILayout.LabelField("当前 Step", current);
-                long end = run.terminal ? run.finishedAtUtcMs : _guiNow;
-                var elapsed = TimeSpan.FromMilliseconds(Math.Max(0, end - run.startedAtUtcMs));
-                EditorGUILayout.LabelField($"已处理：{processed} / {total}（非通过率）", $"已运行：{(int)elapsed.TotalHours:00}:{elapsed.Minutes:00}:{elapsed.Seconds:00}");
+                EditorGUILayout.LabelField($"已处理：{processed} / {total}（非通过率）", "已运行：" + RunDuration(run, _guiNow));
                 Rect progress = GUILayoutUtility.GetRect(0, 18, GUILayout.ExpandWidth(true));
                 EditorGUI.ProgressBar(progress, total == 0 ? 0 : (float)processed / total, $"已处理 {processed} / {total}");
+                _taskDetails = EditorGUILayout.Foldout(_taskDetails, "任务详情", true);
+                Observe("任务详情", "任务详情");
+                if (_taskDetails) DrawTaskDetails(run);
             }
 
             EditorGUILayout.BeginHorizontal(EditorStyles.toolbar);
@@ -228,7 +259,9 @@ namespace CodingRiver.UPilot.Automation
                     GUILayout.Label((i + 1).ToString(), GUILayout.Width(IndexColumnWidth));
                     EditorGUILayout.BeginVertical(GUILayout.MinWidth(0), GUILayout.ExpandWidth(true));
                     DrawStepIdentity(item.stepId, EditorStyles.boldLabel);
-                    DrawStepIdentity(record.instanceId, EditorStyles.miniLabel);
+                    if (GUILayout.Button(new GUIContent(record.instanceId, record.instanceId), EditorStyles.miniButton))
+                        SelectStep(run, record.instanceId);
+                    Observe("instance:" + record.instanceId, record.instanceId);
                     EditorGUILayout.EndVertical();
                     GUILayout.Label(new GUIContent(item.phase, item.phase), GUILayout.Width(PhaseColumnWidth));
                     string state = StepState(record);
@@ -237,10 +270,72 @@ namespace CodingRiver.UPilot.Automation
                     GUILayout.Label(start, GUILayout.Width(StartTimeColumnWidth));
                     GUILayout.Label(duration, GUILayout.Width(DurationColumnWidth));
                     EditorGUILayout.EndHorizontal();
+                    if (SelectedKey == Key(run) + ":" + record.instanceId)
+                    {
+                        _stepDetails = EditorGUILayout.Foldout(_stepDetails, "选中 Step 详情", true);
+                        Observe("选中 Step 详情", "选中 Step 详情");
+                        if (_stepDetails) DrawStepDetails(item, record);
+                    }
                 }
             }
             EditorGUILayout.EndScrollView();
-            EditorGUILayout.HelpBox("每 1 秒刷新 · 忙时拒绝新任务、不排队\n立即停止不执行后续业务清理或 Finally，不能回滚副作用或强行中断同步代码。", MessageType.None);
+            string refreshNotice = $"每 {UPilotTimingSettings.StepWindowRefreshMs} 毫秒刷新 · 忙时拒绝新任务、不排队\n立即停止不执行后续业务清理或 Finally，不能回滚副作用或强行中断同步代码。";
+            EditorGUILayout.HelpBox(refreshNotice, MessageType.None);
+            Observe("刷新说明", refreshNotice);
+        }
+        private void DrawError(string label, AutomationStepError error) =>
+            DrawValue(label, error == null ? "未记录" : error.code + "\n" + error.message + "\n" + error.diagnostic);
+        private void DrawValue(string label, string value)
+        {
+            EditorGUILayout.LabelField(label, EditorStyles.boldLabel);
+            string text = Recorded(value);
+            EditorGUILayout.SelectableLabel(text, EditorStyles.textArea,
+                GUILayout.MinHeight(EditorGUIUtility.singleLineHeight * 2));
+            Observe(label, text);
+        }
+        private void DrawTaskDetails(AutomationStepRun run)
+        {
+            EditorGUILayout.LabelField("状态／阶段", run.status + " / " + run.stage);
+            EditorGUILayout.LabelField("终态／等待清理", run.terminal + " / " + run.cleanupPending);
+            DrawError("首错", run.error);
+            foreach (var error in run.secondaryErrors) DrawError("次错", error);
+            DrawIdentity("清理结果", Recorded(run.cleanupOutcome));
+            DrawIdentity("报告结果", Recorded(run.reportOutcome));
+            DrawValue("未确认资源", ResourceText(run.unresolvedResources));
+            DrawValue("资源错误", run.resourceRecoveryError);
+            foreach (var artifact in run.artifacts ?? Array.Empty<AutomationReportArtifact>()) DrawArtifactPath(artifact.path);
+            foreach (var artifact in run.registeredArtifacts) DrawArtifactPath(artifact.path);
+        }
+        private void DrawArtifactPath(string path)
+        {
+            EditorGUILayout.BeginHorizontal();
+            DrawIdentity("附件路径", path);
+            if (GUILayout.Button("复制", GUILayout.Width(45))) EditorGUIUtility.systemCopyBuffer = path ?? "";
+            Observe("复制:" + path, "复制");
+            EditorGUILayout.EndHorizontal();
+        }
+        private static string TimestampText(long value) => TryTimestamp(value, out var at) ? FullTimestamp(at) : "未知";
+        private void DrawStepDetails(AutomationStepItem item, AutomationStepRecord record)
+        {
+            DrawValue("原始参数", ArgumentsText(item.arguments));
+            DrawError("步骤错误", record.error);
+            DrawIdentity("Cleanup", Recorded(record.cleanupState));
+            DrawValue("Cleanup 错误", record.cleanupRecoveryError);
+            DrawIdentity("执行开始", TimestampText(record.startedAtUtcMs));
+            DrawIdentity("清理开始", TimestampText(record.cleanupStartedAtUtcMs));
+            DrawIdentity("完成时间", TimestampText(record.finishedAtUtcMs));
+            DrawValue("运行计划时间值（秒）", "执行=" + item.timeoutSeconds.ToString(CultureInfo.InvariantCulture)
+                + "；Cleanup=" + item.cleanupTimeoutSeconds.ToString(CultureInfo.InvariantCulture)
+                + "；轮询=" + item.pollIntervalSeconds.ToString(CultureInfo.InvariantCulture) + "\n来源未记录");
+        }
+        internal static string ArgumentsText(string value) => value == null ? "未记录" : value.Length == 0 ? "\"\"（空字符串）" : value;
+        internal static string ResourceText(string[] values) => values == null ? "未记录" : values.Length == 0 ? "0 项" : string.Join("\n", values);
+        internal static string RunDuration(AutomationStepRun run, long observedAt)
+        {
+            long end = run.terminal ? run.finishedAtUtcMs : observedAt;
+            if (!TryTimestamp(run.startedAtUtcMs, out _) || !TryTimestamp(end, out _) || end < run.startedAtUtcMs) return "未知";
+            var elapsed = TimeSpan.FromMilliseconds(end - run.startedAtUtcMs);
+            return ((long)elapsed.TotalHours).ToString("00", CultureInfo.InvariantCulture) + ":" + elapsed.ToString(@"mm\:ss\.fff", CultureInfo.InvariantCulture);
         }
         private static void DrawStepIdentity(string value, GUIStyle style)
         {
@@ -262,25 +357,41 @@ namespace CodingRiver.UPilot.Automation
             }
             GUI.Label(rect, content, style);
         }
-        private static void DrawIdentity(string label, string value)
+        private void DrawIdentity(string label, string value)
         {
             EditorGUILayout.BeginHorizontal();
             GUILayout.Label(label, GUILayout.Width(100));
             EditorGUILayout.SelectableLabel(value ?? "", EditorStyles.textField, GUILayout.Height(EditorGUIUtility.singleLineHeight));
+            Observe(label, value ?? "");
             EditorGUILayout.EndHorizontal();
         }
-        private void ConfirmStop(AutomationStepRun run)
+        private void Observe(string label, string value)
         {
-            if (run == null) return;
-            if (!EditorUtility.DisplayDialog("立即停止整个 Step 任务",
+            if (ObserveGui == null || Event.current.type != EventType.Repaint) return;
+            Rect rect = GUILayoutUtility.GetLastRect();
+            rect.position = GUIUtility.GUIToScreenPoint(rect.position) - _guiOrigin;
+            ObserveGui(label, value, rect);
+        }
+        private void DrawNotice(string value, MessageType type)
+        {
+            EditorGUILayout.HelpBox(value, type);
+            Observe("状态提示", value);
+        }
+        private static bool ConfirmImmediateStopDialog() => EditorUtility.DisplayDialog("立即停止整个 Step 任务",
                 "立即停止当前整个测试任务。停止后不再调用 Step 的 Cancel、Cleanup、Poll，也不再执行后续 Step 或 Finally。\n\n"
                 + "已经发生的业务副作用不会回滚，PlayMode、场景和业务状态可能保留。框架将另行释放自己拥有的 Capture／Snapshot 资源。\n\n"
                 + "不能强行中断已经进入的同步 Unity 代码或保证终止外部异步工作。",
-                "立即停止", "返回")) return;
+                "立即停止", "返回");
+        private void ConfirmStop(AutomationStepRun run)
+        {
+            if (run == null) return;
+            // Freeze strings before confirmation: even a mutable snapshot cannot redirect the action.
+            string runId = run.runId, operationId = run.operationId, lifecycleId = run.serviceLifecycleId;
+            if (!ConfirmImmediateStop()) return;
             try
             {
                 // Use the confirmed identity, not whichever run appeared while the dialog was open.
-                var result = UPilotAutomationStepService.StopCurrentImmediately(run.runId, run.operationId, run.serviceLifecycleId);
+                var result = StopImmediately(runId, operationId, lifecycleId);
                 if (!result.changed) _notice = "任务已结束、正在结束或身份已变化；未停止其他任务。";
             }
             catch (Exception ex) { _notice = "停止结果未确认，请刷新查看原任务：" + ex.Message; }

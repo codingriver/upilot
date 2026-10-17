@@ -735,6 +735,61 @@ namespace CodingRiver.UPilot.Tests.Automation
             Assert.That(UPilotAutomationStepService.Public(_executor.State).artifacts.attachments.Single(a => a.artifactKind == "evidence").bytes,
                 Is.EqualTo(File.ReadAllBytes(path).LongLength));
         }
+        [TestCase("")] [TestCase(" ")] [TestCase("{\"a\":1,\"a\":2}")]
+        [TestCase("{}[]")] [TestCase("NaN")] [TestCase("1e999")]
+        [TestCase("{\"x\":Infinity}")]
+        [TestCase("{\"x\":[1e999]}")] [TestCase("{\"x\":01}")]
+        [TestCase("{\"x\":+1}")] [TestCase("{\"x\":1.}")]
+        [TestCase("{\"x\":1,}")] [TestCase("[1,]")] [TestCase("{\"x\":/*comment*/1}")]
+        [TestCase("{\"x\":1 \"y\":2}")] [TestCase("[1 2]")] [TestCase("{\"x\":\"\\q\"}")]
+        [TestCase("{\"x\":\"line\nbreak\"}")]
+        public void InvalidJsonArtifactFailsBeforeFileEffects(string json)
+        {
+            RegisterAttachment = (run, item, args) => UPilotAutomationStepService.WriteJsonArtifact(run, item, "json", "data.json", json);
+            Start(Item("artifact")); Pump();
+            Assert.That(_executor.State.error.code, Is.EqualTo("STEP_ARTIFACT_WRITE_FAILED"));
+            Assert.That(_executor.State.registeredArtifacts, Is.Empty);
+            Assert.That(Directory.Exists(Path.Combine(_executor.State.reportDirectory, "attachments")), Is.False);
+        }
+        [TestCase("  {\"text\":\"中文\\n\\\"\"} \n")] [TestCase("[1,true,null]")]
+        [TestCase("\"字符串\"")] [TestCase("false")] [TestCase("null")] [TestCase("42")]
+        [TestCase("[{}, {\"x\":[[], {\"y\":-0.25e+2,\"s\":\"[,]{}\"}]}]")]
+        public void JsonArtifactPreservesSingleValueRawTextAndIdempotence(string json)
+        {
+            string path = null;
+            RegisterAttachment = (run, item, args) =>
+            {
+                path = UPilotAutomationStepService.WriteJsonArtifact(run, item, "json", "data.json", json);
+                var modified = File.GetLastWriteTimeUtc(path);
+                Assert.That(UPilotAutomationStepService.WriteJsonArtifact(run, item, "json", "data.json", json), Is.EqualTo(path));
+                Assert.That(File.GetLastWriteTimeUtc(path), Is.EqualTo(modified));
+            };
+            Start(Item("artifact")); Pump();
+            Assert.That(_executor.State.status, Is.EqualTo("Succeeded"));
+            Assert.That(File.ReadAllText(path), Is.EqualTo(json));
+            Assert.That(_executor.State.registeredArtifacts.Count, Is.EqualTo(1));
+        }
+        [TestCase("wrong-run")] [TestCase("wrong-item")] [TestCase("content")]
+        public void JsonArtifactRetainsIdentityAndConflictGuards(string mode)
+        {
+            string path = null;
+            RegisterAttachment = (run, item, args) =>
+            {
+                path = UPilotAutomationStepService.WriteJsonArtifact(run, item, "json", "data.json", "{}");
+                UPilotAutomationStepService.WriteJsonArtifact(mode == "wrong-run" ? "wrong" : run,
+                    mode == "wrong-item" ? "wrong" : item, "json", "data.json", "[]");
+            };
+            Start(Item("artifact")); Pump();
+            Assert.That(_executor.State.error.code, Is.EqualTo("STEP_ARTIFACT_WRITE_FAILED"));
+            Assert.That(File.ReadAllText(path), Is.EqualTo("{}"));
+        }
+        [Test]
+        public void JsonArtifactRequiresWritableCallback()
+        {
+            Assert.Throws<InvalidOperationException>(() => UPilotAutomationStepService.WriteJsonArtifact("r", "i", "json", "x.json", "{}"));
+            using (UPilotAutomationStepService.EnterCallback(_executor, false))
+                Assert.Throws<InvalidOperationException>(() => UPilotAutomationStepService.WriteJsonArtifact("r", "i", "json", "x.json", "{}"));
+        }
         [TestCase("../escape.json")] [TestCase("folder/file.json")] [TestCase("folder\\file.json")]
         [TestCase("C:\\escape.json")] [TestCase("evidence.json:stream")] [TestCase(".")] [TestCase("..")]
         [TestCase("")] [TestCase("CON")] [TestCase("nul.json")] [TestCase("COM1.txt")] [TestCase("LPT9")]

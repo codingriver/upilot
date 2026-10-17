@@ -1,5 +1,6 @@
 ﻿using System;
 using System.IO;
+using System.Globalization;
 using System.Linq;
 using System.Runtime.Serialization.Json;
 using System.Text;
@@ -39,6 +40,114 @@ namespace CodingRiver.UPilot.Automation
             }
             catch (XmlException ex) { throw new FormatException("Invalid JSON.", ex); }
         }
+        internal static void ValidateArtifactJson(string json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) throw new FormatException("Expected nonempty JSON.");
+            new ArtifactSyntax(json).Validate();
+            var root = ParseJson(json);
+            foreach (var element in root.DescendantsAndSelf().Where(e => (string)e.Attribute("type") == "number"))
+                if (!Regex.IsMatch(element.Value, @"\A-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?\z")
+                    || !double.TryParse(element.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out double value)
+                    || !AutomationStepJson.Finite(value))
+                    throw new FormatException("Invalid or non-finite JSON number.");
+        }
+
+        // The framework XML reader tolerates trailing commas and malformed numeric tokens.
+        // Keep strict grammar local to the new artifact entry; existing wire contracts stay unchanged.
+        private sealed class ArtifactSyntax
+        {
+            private readonly string _json;
+            private readonly System.Collections.Generic.List<char> _containers = new();
+            private int _index;
+            private char Current => _index < _json.Length ? _json[_index] : '\0';
+            internal ArtifactSyntax(string json) => _json = json;
+
+            internal void Validate()
+            {
+                ReadValue();
+                while (_containers.Count > 0)
+                {
+                    SkipWhitespace();
+                    int top = _containers.Count - 1;
+                    char state = _containers[top];
+                    bool isObject = state == 'o' || state == 'O';
+                    if (Take(isObject ? '}' : ']')) { _containers.RemoveAt(top); continue; }
+                    if (state == 'O' || state == 'A') { Need(','); SkipWhitespace(); }
+                    _containers[top] = isObject ? 'O' : 'A';
+                    if (isObject) { ReadString(); SkipWhitespace(); Need(':'); }
+                    ReadValue();
+                }
+                SkipWhitespace();
+                if (_index != _json.Length) Fail();
+            }
+
+            private void ReadValue()
+            {
+                SkipWhitespace();
+                if (Take('{')) { _containers.Add('o'); return; }
+                if (Take('[')) { _containers.Add('a'); return; }
+                if (Current == '"') { ReadString(); return; }
+                if (Current == 't') { ReadLiteral("true"); return; }
+                if (Current == 'f') { ReadLiteral("false"); return; }
+                if (Current == 'n') { ReadLiteral("null"); return; }
+                Take('-');
+                if (!Take('0')) ReadDigits();
+                if (Take('.')) ReadDigits();
+                if (Take('e') || Take('E'))
+                {
+                    if (!Take('+')) Take('-');
+                    ReadDigits();
+                }
+            }
+
+            private void ReadString()
+            {
+                Need('"');
+                while (_index < _json.Length)
+                {
+                    char value = _json[_index++];
+                    if (value == '"') return;
+                    if (value < ' ') Fail();
+                    if (value != '\\') continue;
+                    if (_index == _json.Length) Fail();
+                    char escape = _json[_index++];
+                    if (escape == 'u')
+                    {
+                        for (int digit = 0; digit < 4; digit++)
+                        {
+                            char hex = Current;
+                            if (!(IsDigit(hex) || hex >= 'a' && hex <= 'f' || hex >= 'A' && hex <= 'F')) Fail();
+                            _index++;
+                        }
+                    }
+                    else if ("\"\\/bfnrt".IndexOf(escape) < 0) Fail();
+                }
+                Fail();
+            }
+
+            private void ReadDigits()
+            {
+                if (!IsDigit(Current)) Fail();
+                do { _index++; } while (IsDigit(Current));
+            }
+            private void ReadLiteral(string literal)
+            {
+                if (_json.Length - _index < literal.Length
+                    || string.CompareOrdinal(_json, _index, literal, 0, literal.Length) != 0) Fail();
+                _index += literal.Length;
+            }
+            private void SkipWhitespace()
+            { while (Current == ' ' || Current == '\t' || Current == '\r' || Current == '\n') _index++; }
+            private bool Take(char token)
+            {
+                if (Current != token) return false;
+                _index++; return true;
+            }
+            private void Need(char token) { if (!Take(token)) Fail(); }
+            private static bool IsDigit(char value) => value >= '0' && value <= '9';
+            private void Fail() => throw new FormatException("Invalid artifact JSON at position " + _index + ".");
+        }
+
         private static void RequireSingleValue(string json)
         {
             // The framework reader stops at the first root. Check its input boundary, leaving

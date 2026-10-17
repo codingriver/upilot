@@ -40,6 +40,8 @@
         /// <summary>在当前可写回调中安全发布并持久登记 UTF-8 文本附件。</summary>
         protected static string WriteTextArtifact(string runId, string instanceId, string kind, string fileName, string content) =>
             UPilotAutomationStepService.WriteTextArtifact(runId, instanceId, kind, fileName, content);
+        protected static string WriteJsonArtifact(string runId, string instanceId, string kind, string fileName, string rawJson) =>
+            UPilotAutomationStepService.WriteJsonArtifact(runId, instanceId, kind, fileName, rawJson);
         protected static string BeginSnapshotJson(string runId, string instanceId, string evidenceKey, string arguments) =>
             UPilotAutomationStepService.BeginSnapshotJson(runId, instanceId, evidenceKey, arguments);
         protected static string PollSnapshotJson(string runId, string instanceId, string evidenceKey) =>

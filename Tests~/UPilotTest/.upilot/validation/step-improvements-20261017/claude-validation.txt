@@ -1,0 +1,2 @@
+Checking UPilot Skill: mode=installed root=D:\upilot\Tests~\UPilotTest\.claude\skills\upilot-unity-mcp
+UPilot skill pack ok (mode=installed)

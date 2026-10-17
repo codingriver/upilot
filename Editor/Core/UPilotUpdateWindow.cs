@@ -757,8 +757,10 @@ namespace CodingRiver.UPilot
 
         internal static bool ClearCompletedOperationStatusForFreshCheck()
         {
-            if (UPilotUpdateService.Instance.GetOperationStatus().Phase !=
-                UPilotUpdateOperationPhase.Completed)
+            var status = UPilotUpdateService.Instance.GetOperationStatus();
+            var historicalReloadCancellation = status.Phase == UPilotUpdateOperationPhase.Failed &&
+                string.Equals(status.Message, "UPilot 包更新观察结束：domain_reload", StringComparison.Ordinal);
+            if (status.Phase != UPilotUpdateOperationPhase.Completed && !historicalReloadCancellation)
                 return false;
 
             UPilotUpdateService.ClearOperationStatus();

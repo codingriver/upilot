@@ -74,6 +74,8 @@ namespace CodingRiver.UPilot.Automation
         public int omittedBlockingCount;
         public AutomationReportLogGroup[] blockingGroups = Array.Empty<AutomationReportLogGroup>();
         public int omittedBlockingGroupCount;
+        public AutomationLogRuleSummary[] ruleSummaries = Array.Empty<AutomationLogRuleSummary>();
+        public int omittedRuleSummaryCount;
         public AutomationDiagnostic[] diagnostics = Array.Empty<AutomationDiagnostic>();
         public int omittedDiagnosticCount;
         public bool diagnosticsTextTruncated;
@@ -151,6 +153,7 @@ namespace CodingRiver.UPilot.Automation
         internal const string TextReportFileName = "report.txt";
         internal const string TimingFileName = "timing.csv";
         internal const int BlockingSampleLimit = 10;
+        internal const int RuleSummaryLimit = 10;
         internal const int DiagnosticLimit = 10;
         internal const int MessageLimit = 2048;
         private const int LabelLimit = 256;
@@ -378,6 +381,8 @@ namespace CodingRiver.UPilot.Automation
                 lastSequence = g.Max(c => c.record.sequence),
             }).ToArray();
             bool diagnosticTextTruncated = false;
+            var ruleSummaries = (policy.ruleSummaries ?? new List<AutomationLogRuleSummary>())
+                .Take(RuleSummaryLimit).Select(ToRuleSummary).ToArray();
             var diagnostics = policy.diagnostics.Take(DiagnosticLimit).Select(d =>
             {
                 return new AutomationDiagnostic
@@ -397,9 +402,27 @@ namespace CodingRiver.UPilot.Automation
                 allowedCount = policy.allowedCount, ignoredCount = policy.ignoredCount, lostRecordCount = lostRecordCount,
                 blockingSamples = samples, omittedBlockingCount = Math.Max(0, policy.blockedCount - samples.Length),
                 blockingGroups = summaries, omittedBlockingGroupCount = Math.Max(0, groups.Length - summaries.Length),
+                ruleSummaries = ruleSummaries,
+                omittedRuleSummaryCount = Math.Max(0, (policy.ruleSummaries?.Count ?? 0) - ruleSummaries.Length),
                 diagnostics = diagnostics, omittedDiagnosticCount = Math.Max(0, policy.diagnostics.Count - diagnostics.Length),
                 diagnosticsTextTruncated = diagnosticTextTruncated,
             };
+        }
+
+        private static AutomationLogRuleSummary ToRuleSummary(AutomationLogRuleSummary source)
+        {
+            var summary = new AutomationLogRuleSummary
+            {
+                index = source.index, maximumCount = source.maximumCount, valid = source.valid,
+                budgetApplicable = source.budgetApplicable, effectiveMatchCount = source.effectiveMatchCount,
+                allowedCount = source.allowedCount, blockedCount = source.blockedCount,
+                overBudgetCount = source.overBudgetCount, firstSequence = source.firstSequence,
+                lastSequence = source.lastSequence, textTruncated = source.textTruncated,
+            };
+            summary.ruleId = Limit(source.ruleId, LabelLimit, ref summary.textTruncated);
+            summary.action = Limit(source.valid ? source.action.Trim().ToLowerInvariant() : source.action,
+                LabelLimit, ref summary.textTruncated);
+            return summary;
         }
 
         private static AutomationReportLogSample ToLogSample(AutomationLogClassification c)

@@ -1481,16 +1481,34 @@ namespace CodingRiver.UPilot
                 ex =>
                 {
                     request = null;
-                    if (!ReferenceEquals(_upmObservation, observation)) return;
-                    _upmObservation = null;
-                    SetOperationFailed("UPilot 包更新观察结束：" + ex.Message);
-                    if (observation.EndReason == "start_failed" || ex is UPilotUpmRequestException upm && upm.Code == "UPM_REQUEST_FAILED")
-                        UPilotPackageUpdateLifecycle.RestoreAfterFailedUpdate();
-                    else UPilotPackageUpdateLifecycle.ResetUpdateStateForRepair(clearPendingPackageRetry: false);
-                    if (!(ex is OperationCanceledException)) notice?.Invoke("UPilot 包更新失败：" + ex.Message, MessageType.Error);
+                    HandleUpmObservationFailure(observation, ex, notice);
                 });
             _upmObservation = observation;
             observation.Start();
+        }
+
+        internal void HandleUpmObservationFailure(
+            UPilotUpmRequestObservation observation,
+            Exception ex,
+            Action<string, MessageType> notice)
+        {
+            if (!ReferenceEquals(_upmObservation, observation)) return;
+            _upmObservation = null;
+            if (ex is OperationCanceledException &&
+                string.Equals(observation.EndReason, "domain_reload", StringComparison.Ordinal))
+            {
+                // End only this domain's observation; package registration still owns recovery.
+                if (ReadOperationPhase() == UPilotUpdateOperationPhase.UpdatingPackage)
+                    ClearOperationStatus();
+                return;
+            }
+
+            SetOperationFailed((ex is OperationCanceledException
+                ? "UPilot 包更新观察结束：" : "UPilot 包更新失败：") + ex.Message);
+            if (observation.EndReason == "start_failed" || ex is UPilotUpmRequestException upm && upm.Code == "UPM_REQUEST_FAILED")
+                UPilotPackageUpdateLifecycle.RestoreAfterFailedUpdate();
+            else UPilotPackageUpdateLifecycle.ResetUpdateStateForRepair(clearPendingPackageRetry: false);
+            if (!(ex is OperationCanceledException)) notice?.Invoke("UPilot 包更新失败：" + ex.Message, MessageType.Error);
         }
 
         private static UPilotUpdateOperationPhase ReadOperationPhase()

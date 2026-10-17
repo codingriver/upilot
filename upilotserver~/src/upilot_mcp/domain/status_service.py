@@ -448,6 +448,7 @@ class StatusDomainService:
                     "unavailableReason": "EXECUTION_CAPABILITY_QUERY_FAILED",
                     "detail": str(ex),
                 }
+        step_capabilities = await self._observe_step_capabilities()
         return ok(
             status.request_id,
             {
@@ -455,11 +456,100 @@ class StatusDomainService:
                 "tools": tools,
                 "capabilities": data.get("capabilities", {}),
                 "execution": execution_capabilities,
+                "automationSteps": step_capabilities,
                 "aiServiceMaintenance": data.get("aiServiceMaintenance", {}),
                 "session": data.get("session", {}),
                 "paths": data.get("paths", {}),
             },
         )
+
+    def _step_capabilities_identity(self, session) -> dict:
+        execution = self.server.state.execution_state()
+        return {
+            "bridgeSessionId": str(getattr(session, "session_id", "") or ""),
+            "projectPath": str(getattr(session, "project_path", "") or ""),
+            "processId": getattr(session, "process_id", 0),
+            "editorSessionId": str(execution.get("sessionId") or ""),
+            "producerEpoch": str(execution.get("producerEpoch") or ""),
+            "domainGeneration": execution.get("domainGeneration"),
+        }
+
+    @staticmethod
+    def _valid_step_capabilities_contract(value: object) -> bool:
+        if not isinstance(value, dict) or type(value.get("discoveryVersion")) is not int or value["discoveryVersion"] != 1:
+            return False
+        versions, modes = value.get("supportedPlanVersions"), value.get("captureOwnershipModes")
+        return (
+            isinstance(versions, list) and bool(versions)
+            and all(type(item) is int and item > 0 for item in versions)
+            and len(versions) == len(set(versions))
+            and isinstance(value.get("callbackContract"), str) and bool(value["callbackContract"].strip())
+            and isinstance(modes, list) and bool(modes)
+            and all(isinstance(item, str) and bool(item.strip()) for item in modes)
+            and len(modes) == len(set(modes))
+        )
+
+    async def _observe_step_capabilities(self) -> dict:
+        # Explicit read only: no cache, retry, resource acquisition or admission change.
+        result = {"observationStatus": "unknown", "source": "bridge.capabilities.list",
+                  "observedAtUtcMs": 0, "identity": {}, "contract": None, "diagnostic": ""}
+        session = self.server.session_manager.active
+        if not self.server.is_ready() or session is None:
+            result.update(observationStatus="unavailable", diagnostic="UNITY_NOT_CONNECTED")
+            return result
+        try:
+            before = self._step_capabilities_identity(session)
+        except Exception:
+            result["diagnostic"] = "STEP_CAPABILITY_IDENTITY_UNKNOWN"
+            logger.exception("[UPilot][StepCapabilities] Initial Bridge identity observation failed.")
+            return result
+        result["identity"] = before
+        try:
+            response = await asyncio.wait_for(
+                self.dispatcher.call(new_id("req"), "capabilities.list", {}, timeout_ms=5000), timeout=5.0)
+        except asyncio.TimeoutError:
+            result["diagnostic"] = "STEP_CAPABILITY_QUERY_TIMEOUT"
+            logger.error("[UPilot][StepCapabilities] Query exceeded its five-second budget.")
+            return result
+        except Exception:
+            result["diagnostic"] = "STEP_CAPABILITY_QUERY_FAILED"
+            logger.exception("[UPilot][StepCapabilities] Query failed.")
+            return result
+        current = self.server.session_manager.active
+        if not self.server.is_ready() or current is not session:
+            result["diagnostic"] = "STEP_CAPABILITY_IDENTITY_CHANGED"
+            return result
+        try:
+            after = self._step_capabilities_identity(current)
+        except Exception:
+            result["diagnostic"] = "STEP_CAPABILITY_IDENTITY_UNKNOWN"
+            logger.exception("[UPilot][StepCapabilities] Final Bridge identity observation failed.")
+            return result
+        if after != before:
+            result["diagnostic"] = "STEP_CAPABILITY_IDENTITY_CHANGED"
+            return result
+        if not response.ok:
+            result["diagnostic"] = response.error.code if response.error else "STEP_CAPABILITY_QUERY_FAILED"
+            return result
+        result["observedAtUtcMs"] = now_ms()
+        if not isinstance(response.data, dict):
+            result["diagnostic"] = "STEP_CAPABILITY_RESPONSE_INVALID"
+            return result
+        if "automationSteps" not in response.data:
+            result.update(observationStatus="unreported", diagnostic="STEP_CAPABILITY_NOT_REPORTED")
+            return result
+        contract = response.data["automationSteps"]
+        if not self._valid_step_capabilities_contract(contract):
+            result["diagnostic"] = "STEP_CAPABILITY_CONTRACT_INVALID"
+            return result
+        domain = before["domainGeneration"]
+        if (not before["bridgeSessionId"] or not before["projectPath"] or not before["producerEpoch"]
+                or before["editorSessionId"] != before["bridgeSessionId"]
+                or type(domain) is not int or domain < 0):
+            result["diagnostic"] = "STEP_CAPABILITY_IDENTITY_UNKNOWN"
+            return result
+        result.update(observationStatus="observed", contract=json.loads(json.dumps(contract)))
+        return result
 
     async def tools_find(
         self,

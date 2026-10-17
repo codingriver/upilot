@@ -36,12 +36,30 @@ namespace CodingRiver.UPilot.Automation
         public bool ok = true;
         public List<AutomationDiagnostic> diagnostics = new();
         public double budgetSeconds;
+        public AutomationStepBudgetPreview budgetPreview;
         public static AutomationStepValidation Invalid(string code, string message)
         {
             var result = new AutomationStepValidation { ok = false };
             AutomationCatalog.Add(result.diagnostics, code, message);
             return result;
         }
+    }
+
+    [Serializable]
+    public sealed class AutomationStepBudgetPreview
+    {
+        public bool complete = true;
+        public double evidenceSeconds = 60;
+        public List<AutomationStepBudgetPreviewItem> steps = new();
+    }
+
+    [Serializable]
+    public sealed class AutomationStepBudgetPreviewItem
+    {
+        public int index;
+        public string instanceId, stepId, phase;
+        public double executionSeconds, cleanupSeconds, pollIntervalSeconds;
+        public string executionSource, cleanupSource, pollSource;
     }
 
     [Serializable]

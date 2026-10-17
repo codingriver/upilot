@@ -31,6 +31,21 @@ namespace CodingRiver.UPilot.Automation
                 Field("Console blocked / allowed / ignored / lost", Number(log.blockedCount) + " / "
                     + Number(log.allowedCount) + " / " + Number(log.ignoredCount) + " / " + Number(log.lostRecordCount));
             }
+            if (summary.logSummary?.ruleSummaries?.Length > 0)
+            {
+                foreach (var rule in summary.logSummary.ruleSummaries)
+                    Field("Console rule", "index=" + Number(rule.index) + "; id=" + rule.ruleId
+                        + "; action=" + rule.action + "; valid=" + rule.valid
+                        + "; maximumCount=" + Number(rule.maximumCount)
+                        + "; budget=" + (!rule.valid ? "invalid" : string.Equals(rule.action?.Trim(), "deny", StringComparison.OrdinalIgnoreCase)
+                            ? "not applicable" : rule.budgetApplicable ? "limited" : "unlimited")
+                        + "; effectiveMatchCount=" + Number(rule.effectiveMatchCount)
+                        + "; allowed=" + Number(rule.allowedCount) + "; blocked=" + Number(rule.blockedCount)
+                        + "; overBudget=" + Number(rule.overBudgetCount)
+                        + "; firstSequence=" + Number(rule.firstSequence) + "; lastSequence=" + Number(rule.lastSequence)
+                        + "; textTruncated=" + rule.textTruncated);
+                Field("Omitted console rule summaries", Number(summary.logSummary.omittedRuleSummaryCount));
+            }
             if (summary.gizmos?.policyVersion > 0)
             {
                 Field("Gizmos initialization completed", summary.gizmos.initializationCompleted ? "true" : "false");

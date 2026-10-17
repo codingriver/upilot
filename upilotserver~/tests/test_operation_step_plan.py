@@ -9,15 +9,18 @@ from test_operation_runner_and_agent_rules import _OperationService
 from upilot_mcp.responses import fail, ok
 
 
-def service(tmp_path, valid=True, budget=100):
+def service(tmp_path, valid=True, budget=100, preview=None):
     result = _OperationService(tmp_path, [])
     result.bridge_calls = []
 
     async def call(request_id, route, payload, **kwargs):
         result.bridge_calls.append((route, payload))
         if route == "automation.steps.validate":
-            return ok(request_id, {"ok": valid, "budgetSeconds": budget, "diagnostics": [] if valid else [
-                {"index": 0, "code": "STEP_NOT_FOUND", "message": "Missing step.", "severity": "error"}]})
+            data = {"ok": valid, "budgetSeconds": budget, "diagnostics": [] if valid else [
+                {"index": 0, "code": "STEP_NOT_FOUND", "message": "Missing step.", "severity": "error"}]}
+            if preview is not None:
+                data["budgetPreview"] = preview
+            return ok(request_id, data)
         if route == "automation.steps.start":
             return ok(request_id, {"status": "Running", "runId": "step-run", "operationId": payload["operationId"]})
         return ok(request_id, {"status": "Running", "runId": "step-run", "operationId": payload["operationId"]})
@@ -115,6 +118,39 @@ def test_budget_does_not_truncate_long_plan(tmp_path):
     assert response.data["normalizedJobSpec"]["timeoutSec"] == 900
     rejected = asyncio.run(svc.validate_legacy_spec({**spec(), "timeoutSec": 300}))
     assert not rejected.ok
+
+
+def test_budget_preview_is_detached_diagnostic_without_normalized_plan_changes(tmp_path):
+    preview = {"complete": True, "evidenceSeconds": 60, "steps": [{"cleanupSource": "FrameworkDefault"}]}
+    job = spec("  中\n${start.literal}  ")
+    svc = service(tmp_path, preview=preview)
+    response = asyncio.run(svc.operation_validate(job))
+    assert response.ok and response.data["stepBudgetPreview"] == preview
+    normalized = response.data["normalizedJobSpec"]
+    assert normalized["stepPlan"] == job["stepPlan"]
+    assert "stepBudgetPreview" not in normalized and "budgetPreview" not in normalized["stepPlan"]
+    preview["steps"][0]["cleanupSource"] = "mutated"
+    assert response.data["stepBudgetPreview"]["steps"][0]["cleanupSource"] == "FrameworkDefault"
+    assert [route for route, _ in svc.bridge_calls] == ["automation.steps.validate"]
+
+
+@pytest.mark.parametrize("preview", [None, "invalid", []])
+def test_legacy_bridge_has_explicit_absence_of_budget_details(tmp_path, preview):
+    response = asyncio.run(service(tmp_path, preview=preview).operation_validate(spec()))
+    assert response.ok and "stepBudgetPreview" not in response.data
+
+
+def test_incomplete_preview_does_not_change_rejection_or_budget_authority(tmp_path):
+    preview = {"complete": False, "evidenceSeconds": 1, "steps": []}
+    svc = service(tmp_path, budget=900, preview=preview)
+    response = asyncio.run(svc.operation_validate(spec()))
+    assert response.ok and response.data["normalizedJobSpec"]["timeoutSec"] == 900
+    rejected = asyncio.run(svc.operation_validate({**spec(), "timeoutSec": 300}))
+    assert not rejected.ok and rejected.error.detail["stepBudgetPreview"] == preview
+    invalid = service(tmp_path, valid=False, preview=preview)
+    result = asyncio.run(invalid.operation_validate(spec()))
+    assert not result.ok and result.error.detail["stepBudgetPreview"] == preview
+    assert invalid._operations == {}
 
 
 def test_start_persists_existing_operation_identity_without_expanding_arguments(tmp_path):

@@ -1,13 +1,13 @@
 {
-    "schemaVersion": 2,
-    "templateVersion": 71,
-    "templateSha256": "9a788a9b9680cfaa27d57a6373da3e5d4bb9f42f7c81e579005221eea0f412d6",
-    "contentSha256": "08f50ebe104f682c02f1aba538feffafb9ba092ddd34083dca9b95e0c7f1b660",
-    "renderContext": {
-        "projectPath": "D:\\upilot\\Tests~\\UPilotTest",
-        "mcpUrl": "http://127.0.0.1:8011/mcp",
-        "healthUrl": "http://127.0.0.1:8011/health",
-        "upilotPackageVersion": "0.3.52"
-    },
-    "renderedAt": "2026-10-17T07:15:25Z"
+  "schemaVersion": 2,
+  "templateVersion": 72,
+  "templateSha256": "b3a044a655c782cdd9defca76cd2aa616c0cf0a1836278e6d1958312a0de057b",
+  "contentSha256": "59e66ce8022cd8af40fde8ab020b4badb5acb16d7c7970fa80f8b67f5bd39301",
+  "renderContext": {
+    "projectPath": "D:\\upilot\\Tests~\\UPilotTest",
+    "mcpUrl": "http://127.0.0.1:8011/mcp",
+    "healthUrl": "http://127.0.0.1:8011/health",
+    "upilotPackageVersion": "0.3.53"
+  },
+  "renderedAt": "2026-10-17T11:37:30Z"
 }

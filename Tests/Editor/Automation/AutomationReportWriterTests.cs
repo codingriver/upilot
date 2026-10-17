@@ -221,6 +221,65 @@ namespace CodingRiver.UPilot.Tests.Automation
         }
 
         [Test]
+        public void RuleSummariesBoundPublicReportButRetainFullArtifact()
+        {
+            var writer = Create("rule-summaries", 100);
+            var rules = Enumerable.Range(0, 12).Select(i => new AutomationLogRule { id = "r" + i,
+                action = "allow", maximumCount = 1, messageContains = "known" }).ToArray();
+            var policy = AutomationLogPolicy.Evaluate(Enumerable.Range(0, 3).Select(i => new ConsoleCaptureRecord
+                { sequence = i, logType = "Error", message = "known" }), null, rules);
+            var summary = writer.WriteConsolePolicy("capture", 0, 3, policy, 0);
+            Assert.That(summary.ruleSummaries.Length, Is.EqualTo(10));
+            Assert.That(summary.omittedRuleSummaryCount, Is.EqualTo(2));
+            Assert.That(summary.ruleSummaries[0].effectiveMatchCount, Is.EqualTo(3));
+            Assert.That(summary.ruleSummaries[0].overBudgetCount, Is.EqualTo(2));
+            var artifact = writer.GetArtifacts().Single(x => x.kind == "consolePolicy");
+            var full = AutomationStepJsonCodec.ParseObject(File.ReadAllText(artifact.path)).Element("policy");
+            Assert.That(full.Element("ruleSummaries").Elements().Count(), Is.EqualTo(12));
+            Assert.That(UPilotAutomationStepService.Public(new AutomationStepRun { logSummary = summary }).logSummary, Is.SameAs(summary));
+            var terminal = Summary("Failed", 200); terminal.logSummary = summary; writer.Complete(terminal);
+            string report = File.ReadAllText(writer.GetArtifacts().Single(x => x.kind == "report").path);
+            Assert.That(report, Does.Contain("effectiveMatchCount=3; allowed=1; blocked=2; overBudget=2"));
+            Assert.That(report, Does.Contain("Omitted console rule summaries: 2"));
+        }
+        [Test]
+        public void RuleSummaryTextUsesEffectiveActionAndSignalsTruncationWithoutChangingFullEvidence()
+        {
+            var writer = Create("rule-text", 100);
+            string rawAction = new string(' ', 300) + " DenY ";
+            string rawId = new string('x', 300);
+            var policy = AutomationLogPolicy.Evaluate(null, null, new[]
+            {
+                new AutomationLogRule { id = rawId, action = rawAction },
+                new AutomationLogRule { id = "unlimited", action = " Allow " },
+                new AutomationLogRule { id = "invalid", action = "invalid" },
+            });
+            var summary = writer.WriteConsolePolicy("capture", 0, 0, policy, 0);
+            Assert.That(summary.ruleSummaries[0].action, Is.EqualTo("deny"));
+            Assert.That(summary.ruleSummaries[0].textTruncated, Is.True);
+            Assert.That(summary.ruleSummaries[0].ruleId.Length, Is.LessThanOrEqualTo(256));
+            Assert.That(policy.ruleSummaries[0].action, Is.EqualTo(rawAction));
+            Assert.That(policy.ruleSummaries[0].ruleId, Is.EqualTo(rawId));
+            Assert.That(summary.passed, Is.False);
+            var artifact = writer.GetArtifacts().Single(x => x.kind == "consolePolicy");
+            byte[] policyBytes = File.ReadAllBytes(artifact.path);
+            Assert.That(File.ReadAllText(artifact.path), Does.Contain(rawId));
+            policy.ruleSummaries[0].blockedCount = 999;
+            Assert.That(summary.ruleSummaries[0].blockedCount, Is.Zero);
+            var terminal = Summary("Failed", 200); terminal.logSummary = summary; writer.Complete(terminal);
+            var reportPath = writer.GetArtifacts().Single(x => x.kind == "report").path;
+            byte[] reportBytes = File.ReadAllBytes(reportPath);
+            string report = File.ReadAllText(reportPath);
+            Assert.That(report, Does.Contain("action=deny; valid=True; maximumCount=-1; budget=not applicable"));
+            Assert.That(report, Does.Contain("action=allow; valid=True; maximumCount=-1; budget=unlimited"));
+            Assert.That(report, Does.Contain("action=invalid; valid=False; maximumCount=-1; budget=invalid"));
+            Assert.That(report, Does.Contain("textTruncated=True"));
+            summary.ruleSummaries[0].blockedCount = 888;
+            Assert.That(File.ReadAllBytes(reportPath), Is.EqualTo(reportBytes));
+            Assert.That(File.ReadAllBytes(artifact.path), Is.EqualTo(policyBytes));
+        }
+
+        [Test]
         public void ConsolePolicyIncompleteEvidenceAndDiagnosticsRemainExplicit()
         {
             var writer = Create("incomplete", 100);

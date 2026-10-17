@@ -60,6 +60,7 @@ namespace CodingRiver.UPilot.Automation
             public bool terminal, cleanupPending;
             public float progress;
             public ArtifactSet artifacts;
+            public AutomationReportLogSummary logSummary;
             public AutomationStepRun domain;
             public AutomationStepReleaseProof releaseProof;
             public AutomationStepDisposition disposition;
@@ -239,6 +240,9 @@ namespace CodingRiver.UPilot.Automation
         /// <summary>安全写入并持久登记文本附件；项目负责内容的结构与序列化。</summary>
         public static string WriteTextArtifact(string runId, string instanceId, string kind, string fileName, string content) =>
             WritableExecutor().WriteTextArtifact(runId, instanceId, kind, fileName, content);
+        /// <summary>Validate one JSON value before publishing the original UTF-8 text.</summary>
+        public static string WriteJsonArtifact(string runId, string instanceId, string kind, string fileName, string rawJson) =>
+            WritableExecutor().WriteJsonArtifact(runId, instanceId, kind, fileName, rawJson);
         /// <summary>Read-only discovered directory, including registration diagnostics.</summary>
         public static string CatalogJson()
         {
@@ -251,12 +255,13 @@ namespace CodingRiver.UPilot.Automation
         private static AutomationStepValidation ValidatePlanJson(string planJson, out AutomationStepPlan plan)
         {
             RequireMainThread();
-            var parsed = AutomationStepPlanValidator.Parse(planJson, out plan);
+            var parsed = AutomationStepPlanValidator.Parse(planJson, out plan, out var timingInputs);
             if (plan == null) return parsed;
-            var validation = AutomationStepPlanValidator.Validate(plan, Registry);
+            var validation = AutomationStepPlanValidator.Validate(plan, Registry, timingInputs);
             parsed.diagnostics.AddRange(validation.diagnostics);
             parsed.ok &= validation.ok;
             parsed.budgetSeconds = validation.budgetSeconds;
+            parsed.budgetPreview = validation.budgetPreview;
             return parsed;
         }
         /// <summary>Read-only runtime preflight. This does not reserve a slot or start any resource.</summary>
@@ -488,7 +493,7 @@ namespace CodingRiver.UPilot.Automation
             error = run.error?.code ?? "", failureSignature = run.error?.code ?? "", detail = run.error?.message ?? "",
             terminal = run.terminal, cleanupPending = run.cleanupPending || !run.terminal,
             progress = run.steps.Count == 0 ? 0 : (float)run.cursor / run.steps.Count,
-            artifacts = PublicArtifacts(run), domain = run, disposition = run.disposition,
+            artifacts = PublicArtifacts(run), logSummary = run.logSummary, domain = run, disposition = run.disposition,
             businessTerminal = run.terminal && string.IsNullOrEmpty(run.disposition?.requestId),
             outcome = string.IsNullOrEmpty(run.disposition?.requestId) ? run.status : "unknown",
             cleanupOutcome = run.cleanupOutcome ?? "", reportOutcome = run.reportOutcome ?? "",

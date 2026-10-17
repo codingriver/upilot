@@ -75,6 +75,18 @@ namespace CodingRiver.UPilot.Automation
     }
 
     [Serializable]
+    public sealed class AutomationLogRuleSummary
+    {
+        public int index;
+        public string ruleId, action;
+        public int maximumCount;
+        public bool valid, budgetApplicable;
+        public int effectiveMatchCount, allowedCount, blockedCount, overBudgetCount;
+        public long firstSequence = -1, lastSequence = -1;
+        public bool textTruncated;
+    }
+
+    [Serializable]
     public sealed class AutomationLogPolicyResult
     {
         public bool ok;
@@ -88,6 +100,7 @@ namespace CodingRiver.UPilot.Automation
         public List<AutomationDiagnostic> diagnostics = new();
         public List<AutomationLogClassification> classifications = new();
         public List<AutomationLogFingerprintCount> fingerprints = new();
+        public List<AutomationLogRuleSummary> ruleSummaries = new();
     }
 
     public static class AutomationLogPolicy
@@ -111,6 +124,7 @@ namespace CodingRiver.UPilot.Automation
             public Regex MessageRegex;
             public Regex StackRegex;
             public int MatchCount;
+            public AutomationLogRuleSummary Summary;
         }
 
         public static AutomationLogPolicyResult Evaluate(
@@ -153,6 +167,7 @@ namespace CodingRiver.UPilot.Automation
                     classification.disposition = "blocked";
                     classification.ruleId = deny.Rule.id;
                     classification.reason = "Matched deny rule.";
+                    RecordRuleDecision(deny, classification);
                 }
                 else
                 {
@@ -171,6 +186,7 @@ namespace CodingRiver.UPilot.Automation
                             classification.disposition = "allowed";
                             classification.reason = "Matched allow rule.";
                         }
+                        RecordRuleDecision(allow, classification);
                     }
                     else if (IsDefaultBlockingLevel(record.logType))
                     {
@@ -191,6 +207,25 @@ namespace CodingRiver.UPilot.Automation
             result.ok = result.policyValid;
             result.passed = result.policyValid && result.evidenceComplete && result.blockedCount == 0;
             return result;
+        }
+
+        private static void RecordRuleDecision(PreparedRule prepared, AutomationLogClassification classification)
+        {
+            var summary = prepared.Summary;
+            long sequence = classification.record.sequence;
+            if (summary.effectiveMatchCount == 0) summary.firstSequence = summary.lastSequence = sequence;
+            else
+            {
+                summary.firstSequence = Math.Min(summary.firstSequence, sequence);
+                summary.lastSequence = Math.Max(summary.lastSequence, sequence);
+            }
+            summary.effectiveMatchCount = prepared.MatchCount;
+            if (classification.disposition == "allowed") summary.allowedCount++;
+            else if (classification.disposition == "blocked")
+            {
+                summary.blockedCount++;
+                if (summary.budgetApplicable) summary.overBudgetCount++;
+            }
         }
 
         public static string Fingerprint(ConsoleCaptureRecord record)
@@ -230,6 +265,9 @@ namespace CodingRiver.UPilot.Automation
             foreach (AutomationLogRule rule in rules ?? Array.Empty<AutomationLogRule>())
             {
                 string id = AutomationCatalog.NormalizeId(rule?.id);
+                var summary = new AutomationLogRuleSummary { index = index, ruleId = rule?.id ?? "",
+                    action = rule?.action ?? "", maximumCount = rule?.maximumCount ?? -1 };
+                result.ruleSummaries.Add(summary);
                 if (rule == null || string.IsNullOrEmpty(id) || !ids.Add(id)
                     || (!IsAction(rule, "allow") && !IsAction(rule, "deny")) || rule.maximumCount < -1)
                 {
@@ -245,7 +283,10 @@ namespace CodingRiver.UPilot.Automation
                         Rule = rule,
                         MessageRegex = Compile(rule.messageRegex),
                         StackRegex = Compile(rule.stackRegex),
+                        Summary = summary,
                     });
+                    summary.valid = true;
+                    summary.budgetApplicable = IsAction(rule, "allow") && rule.maximumCount >= 0;
                 }
                 catch (ArgumentException ex)
                 {
