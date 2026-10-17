@@ -3,7 +3,7 @@
 # UPilot Unity MCP
 
 rulesVersion: 59
-upilotPackageVersion: 0.3.51
+upilotPackageVersion: 0.3.52
 projectPath: <UNITY_PROJECT_ROOT>
 generatedAt: (documentation profile)
 
